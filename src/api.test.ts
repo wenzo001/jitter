@@ -1,16 +1,19 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { app } from "./api";
+import { DEFAULT_CONFIG, setActiveConfig } from "./config";
 import { closeDb, getTask, initDb, insertLog, listTasks } from "./db";
 import { stopAll } from "./scheduler";
 import type { NewLogInput } from "./types";
 
 beforeEach(() => {
+  setActiveConfig({ ...DEFAULT_CONFIG });
   stopAll();
   closeDb();
   initDb(":memory:");
 });
 
 afterAll(() => {
+  setActiveConfig({ ...DEFAULT_CONFIG });
   stopAll();
   closeDb();
 });
@@ -83,6 +86,24 @@ describe("api", () => {
     expect(response.body.ok).toBe(true);
   });
 
+  test("exposes the client-side configuration", async () => {
+    setActiveConfig({
+      ...DEFAULT_CONFIG,
+      logsPageSize: 25,
+      defaultWindowMinutes: 7,
+      pollIntervalMs: 2500,
+      logBodyLimitBytes: 2048,
+    });
+    const response = await call("/api/config");
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      logsPageSize: 25,
+      defaultWindowMinutes: 7,
+      pollIntervalMs: 2500,
+      logBodyLimitBytes: 2048,
+    });
+  });
+
   test("creates a task and returns its future plan", async () => {
     const response = await post("/api/tasks", payload({ name: "created" }));
     expect(response.status).toBe(201);
@@ -93,6 +114,19 @@ describe("api", () => {
 
     const list = await call("/api/tasks");
     expect(list.body.tasks).toHaveLength(1);
+  });
+
+  test("creates a task from a browser-style curl with -b cookies", async () => {
+    const response = await post(
+      "/api/tasks",
+      payload({
+        curl: `curl 'https://example.com/api' -H 'User-Agent: Mozilla/5.0' --compressed -b 'session=abc; theme=dark'`,
+      }),
+    );
+    expect(response.status).toBe(201);
+    const headers = JSON.parse(response.body.task.request_headers);
+    expect(headers["User-Agent"]).toBe("Mozilla/5.0");
+    expect(headers.Cookie).toBe("session=abc; theme=dark");
   });
 
   test("persists notification configuration", async () => {
@@ -117,10 +151,10 @@ describe("api", () => {
     const before = listTasks().length;
     const response = await post(
       "/api/tasks",
-      payload({ curl: "curl -u user:pass https://example.com" }),
+      payload({ curl: "curl -F 'file=@a' https://example.com" }),
     );
     expect(response.status).toBe(400);
-    expect(response.body.error).toContain("-u");
+    expect(response.body.error).toContain("-F");
     expect(listTasks().length).toBe(before);
   });
 
@@ -128,11 +162,29 @@ describe("api", () => {
     const before = listTasks().length;
     const response = await post(
       "/api/tasks",
-      payload({ notify_enabled: true, notify_curl: "curl -k https://notify.example" }),
+      payload({
+        notify_enabled: true,
+        notify_curl: "curl --resolve example.com:443:127.0.0.1 https://notify.example",
+      }),
     );
     expect(response.status).toBe(400);
-    expect(response.body.error).toContain("-k");
+    expect(response.body.error).toContain("--resolve");
     expect(listTasks().length).toBe(before);
+  });
+
+  test("persists curl request options such as --insecure and --max-time", async () => {
+    const response = await post(
+      "/api/tasks",
+      payload({
+        curl: "curl -k --max-time 2 -x http://127.0.0.1:3128 https://example.com",
+      }),
+    );
+    expect(response.status).toBe(201);
+    expect(JSON.parse(response.body.task.request_options)).toEqual({
+      insecure: true,
+      timeoutMs: 2000,
+      proxy: "http://127.0.0.1:3128/",
+    });
   });
 
   test("rejects an invalid window before inserting", async () => {
@@ -194,6 +246,23 @@ describe("api", () => {
 
     const missingTask = await call("/api/tasks/missing/logs");
     expect(missingTask.status).toBe(404);
+  });
+
+  test("uses configured log page sizes", async () => {
+    setActiveConfig({ ...DEFAULT_CONFIG, logsPageSize: 2, logsMaxPageSize: 2 });
+    const created = await post("/api/tasks", payload());
+    const taskId = created.body.task.id;
+    for (let index = 0; index < 3; index += 1) {
+      insertLog(logInput(taskId, index));
+    }
+
+    const defaulted = await call(`/api/tasks/${taskId}/logs?limit=`);
+    expect(defaulted.body.logs).toHaveLength(2);
+    expect(defaulted.body.has_more).toBe(true);
+
+    const clamped = await call(`/api/tasks/${taskId}/logs?limit=999`);
+    expect(clamped.body.logs).toHaveLength(2);
+    expect(clamped.body.has_more).toBe(true);
   });
 
   test("rejects malformed JSON", async () => {

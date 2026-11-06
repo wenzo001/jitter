@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { DEFAULT_CONFIG, setActiveConfig } from "./config";
 import { closeDb, createTask, initDb, listLogs } from "./db";
 import {
   RESPONSE_BODY_LIMIT,
@@ -41,6 +42,14 @@ beforeAll(() => {
 afterAll(() => {
   server.stop(true);
   closeDb();
+});
+
+beforeEach(() => {
+  setActiveConfig({ ...DEFAULT_CONFIG });
+});
+
+afterEach(() => {
+  setActiveConfig({ ...DEFAULT_CONFIG });
 });
 
 function urlOf(path: string): string {
@@ -176,6 +185,103 @@ describe("executeTaskRun", () => {
     expect(log.duration_ms).toBeGreaterThanOrEqual(0);
   });
 
+  test("passes curl request options to fetch", async () => {
+    const original = globalThis.fetch;
+    const capture: {
+      init: (RequestInit & { tls?: unknown; proxy?: unknown }) | null;
+    } = { init: null };
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      capture.init =
+        (init as (RequestInit & { tls?: unknown; proxy?: unknown }) | undefined) ?? null;
+      return new Response("ok");
+    }) as typeof fetch;
+
+    try {
+      const task = makeTask({
+        request: {
+          url: "https://example.com/options",
+          method: "GET",
+          headers: {},
+          body: null,
+          options: {
+            insecure: true,
+            redirect: "manual",
+            proxy: "http://127.0.0.1:3128",
+            proxyAuthorization: `Basic ${Buffer.from("proxy:pass").toString("base64")}`,
+          },
+        },
+      });
+      const outcome = await executeTaskRun(task, new AbortController().signal);
+      expect(outcome.status).toBe(200);
+      expect(capture.init?.redirect).toBe("manual");
+      expect(capture.init?.tls).toEqual({ rejectUnauthorized: false });
+      expect(capture.init?.proxy).toEqual({
+        url: "http://127.0.0.1:3128",
+        headers: {
+          "Proxy-Authorization": `Basic ${Buffer.from("proxy:pass").toString("base64")}`,
+        },
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("uses a per-task curl timeout", async () => {
+    const task = makeTask({
+      request: {
+        url: urlOf("/slow"),
+        method: "GET",
+        headers: {},
+        body: null,
+        options: { timeoutMs: 50 },
+      },
+    });
+    const outcome = await executeTaskRun(task, new AbortController().signal);
+    expect(outcome.aborted).toBe(true);
+    expect(outcome.matched).toBe(false);
+    expect(outcome.error).toContain("超时");
+  });
+
+  test("applies notification request options", async () => {
+    const original = globalThis.fetch;
+    const calls: Array<RequestInit & { tls?: unknown; proxy?: unknown }> = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push((init as RequestInit & { tls?: unknown; proxy?: unknown }) ?? {});
+      return new Response("ok");
+    }) as typeof fetch;
+
+    try {
+      const task = makeTask(
+        withNotify({
+          request: {
+            url: "https://example.com/main",
+            method: "GET",
+            headers: {},
+            body: null,
+          },
+          notify_request: {
+            url: "https://example.com/notify",
+            method: "POST",
+            headers: {},
+            body: "ping",
+            options: {
+              insecure: true,
+              proxy: "http://127.0.0.1:3128",
+              timeoutMs: 1000,
+            },
+          },
+        }),
+      );
+      const outcome = await executeTaskRun(task, new AbortController().signal);
+      expect(outcome.notifyLogId).not.toBeNull();
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.tls).toEqual({ rejectUnauthorized: false });
+      expect(calls[1]?.proxy).toBe("http://127.0.0.1:3128");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   test("sends the notification curl only when the response matches", async () => {
     const hitsBefore = notifyHits;
     const task = makeTask(withNotify());
@@ -220,6 +326,21 @@ describe("executeTaskRun", () => {
     const log = listLogs(task.id, 10)[0]!;
     expect(log.aborted).toBe(1);
     expect(log.error).toContain("中断");
+  });
+
+  test("records a configured request timeout", async () => {
+    setActiveConfig({ ...DEFAULT_CONFIG, requestTimeoutMs: 50 });
+    const task = makeTask({
+      request: { url: urlOf("/slow"), method: "GET", headers: {}, body: null },
+    });
+    const outcome = await executeTaskRun(task, new AbortController().signal);
+
+    expect(outcome.aborted).toBe(true);
+    expect(outcome.matched).toBe(false);
+    expect(outcome.error).toContain("超时");
+    const log = listLogs(task.id, 10)[0]!;
+    expect(log.aborted).toBe(1);
+    expect(log.error).toContain("超时");
   });
 
   test("captures a non-2xx status without treating it as a transport error", async () => {

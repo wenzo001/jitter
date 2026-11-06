@@ -1,5 +1,6 @@
+import { getActiveConfig } from "./config";
 import { insertLog } from "./db";
-import type { TaskRow } from "./types";
+import type { RequestOptions, TaskRow } from "./types";
 
 export const RESPONSE_BODY_LIMIT = 100 * 1024;
 
@@ -57,7 +58,7 @@ export function evaluateSuccess(input: SuccessInput): boolean {
 
 export async function readBodyCapped(
   response: Response,
-  limit: number = RESPONSE_BODY_LIMIT,
+  limit: number = getActiveConfig().logBodyLimitBytes,
 ): Promise<BodyReadResult> {
   const stream = response.body;
   if (!stream) {
@@ -133,12 +134,58 @@ function describeError(error: unknown, aborted: boolean): string {
   return String(error);
 }
 
+function parseRequestOptions(raw: string | null): RequestOptions {
+  if (!raw) return {};
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const record = value as Record<string, unknown>;
+    const options: RequestOptions = {};
+    if (record.insecure === true) options.insecure = true;
+    if (record.redirect === "follow" || record.redirect === "manual") {
+      options.redirect = record.redirect;
+    }
+    if (
+      typeof record.timeoutMs === "number" &&
+      Number.isInteger(record.timeoutMs) &&
+      record.timeoutMs >= 0
+    ) {
+      options.timeoutMs = record.timeoutMs;
+    }
+    if (typeof record.proxy === "string" && record.proxy.trim() !== "") {
+      options.proxy = record.proxy.trim();
+    }
+    if (
+      typeof record.proxyAuthorization === "string" &&
+      record.proxyAuthorization.trim() !== ""
+    ) {
+      options.proxyAuthorization = record.proxyAuthorization.trim();
+    }
+    return options;
+  } catch {
+    return {};
+  }
+}
+
+interface BunRequestInit extends RequestInit {
+  tls?: { rejectUnauthorized?: boolean };
+  proxy?:
+    | string
+    | {
+        url: string;
+        headers?: Record<string, string>;
+      };
+}
+
 async function performRequest(
   url: string,
   method: string,
   rawHeaders: string | null,
   body: string | null,
   signal: AbortSignal,
+  options: RequestOptions,
+  defaultTimeoutMs: number,
+  bodyLimit: number,
 ): Promise<RequestResult> {
   const started = performance.now();
   let status: number | null = null;
@@ -148,23 +195,44 @@ async function performRequest(
   let error: string | null = null;
   let aborted = false;
 
+  const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
+  const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null;
+  const effectiveSignal = timeoutSignal ? AbortSignal.any([signal, timeoutSignal]) : signal;
+
   try {
     const headers = parseStoredHeaders(rawHeaders);
-    const response = await fetch(url, {
+    const init: BunRequestInit = {
       method,
       headers,
       body: body ?? undefined,
-      signal,
-      redirect: "follow",
-    });
+      signal: effectiveSignal,
+      redirect: options.redirect ?? "follow",
+    };
+    if (options.insecure) {
+      init.tls = { rejectUnauthorized: false };
+    }
+    if (options.proxy) {
+      init.proxy = options.proxyAuthorization
+        ? {
+            url: options.proxy,
+            headers: {
+              "Proxy-Authorization": options.proxyAuthorization,
+            },
+          }
+        : options.proxy;
+    }
+    const response = await fetch(url, init);
     status = response.status;
     headersJson = JSON.stringify(Object.fromEntries(response.headers.entries()));
-    const read = await readBodyCapped(response);
+    const read = await readBodyCapped(response, bodyLimit);
     responseBody = read.text;
     truncated = read.truncated;
   } catch (caught) {
-    aborted = signal.aborted;
-    error = describeError(caught, aborted);
+    const timedOut = timeoutSignal !== null && timeoutSignal.aborted && !signal.aborted;
+    aborted = effectiveSignal.aborted;
+    error = timedOut
+      ? `请求超时（${timeoutMs} ms）`
+      : describeError(caught, aborted);
   }
 
   return {
@@ -179,6 +247,8 @@ async function performRequest(
 }
 
 export async function executeTaskRun(task: TaskRow, signal: AbortSignal): Promise<RunOutcome> {
+  const config = getActiveConfig();
+  const mainOptions = parseRequestOptions(task.request_options);
   const mainExecutedAt = Date.now();
   const main = await performRequest(
     task.request_url,
@@ -186,6 +256,9 @@ export async function executeTaskRun(task: TaskRow, signal: AbortSignal): Promis
     task.request_headers,
     task.request_body,
     signal,
+    mainOptions,
+    config.requestTimeoutMs,
+    config.logBodyLimitBytes,
   );
 
   const matched = evaluateSuccess({
@@ -231,12 +304,16 @@ export async function executeTaskRun(task: TaskRow, signal: AbortSignal): Promis
     !signal.aborted
   ) {
     const notifyExecutedAt = Date.now();
+    const notifyOptions = parseRequestOptions(task.notify_options);
     const notify = await performRequest(
       task.notify_url,
       task.notify_method ?? "GET",
       task.notify_headers,
       task.notify_body,
       signal,
+      notifyOptions,
+      config.requestTimeoutMs,
+      config.logBodyLimitBytes,
     );
     notifyLogId = insertLog({
       task_id: task.id,

@@ -1,0 +1,18 @@
+services:
+  jitter:
+    build: .
+    container_name: jitter
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      JITTER_CONFIG: /app/jitter.config.json
+      JITTER_DB_PATH: /app/data/app.db
+    volumes:
+      - jitter-data:/app/data
+      - ./jitter.config.json:/app/jitter.config.json:ro
+
+volumes:
+  jitter-data:

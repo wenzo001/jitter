@@ -1,8 +1,19 @@
+export type RedirectMode = "follow" | "manual";
+
+export interface RequestOptions {
+  insecure?: boolean;
+  redirect?: RedirectMode;
+  timeoutMs?: number;
+  proxy?: string;
+  proxyAuthorization?: string;
+}
+
 export interface RequestSpec {
   url: string;
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  options?: RequestOptions;
 }
 
 export type TaskStatus = "active" | "stopped";
@@ -15,6 +26,7 @@ export interface TaskRow {
   request_method: string;
   request_headers: string | null;
   request_body: string | null;
+  request_options: string | null;
   window_start: string;
   window_end: string;
   status: TaskStatus;
@@ -27,6 +39,7 @@ export interface TaskRow {
   notify_method: string | null;
   notify_headers: string | null;
   notify_body: string | null;
+  notify_options: string | null;
   expect_status: number | null;
   expect_body: string | null;
 }

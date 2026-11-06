@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -99,6 +100,33 @@ describe("db", () => {
 
     expect(getTask(task.id)?.id).toBe(task.id);
     expect(listTasks().some((row) => row.id === task.id)).toBe(true);
+  });
+
+  test("stores per-request curl options", () => {
+    const task = createTask(
+      sampleTask({
+        name: "request options",
+        request: {
+          url: "https://example.com/options",
+          method: "GET",
+          headers: {},
+          body: null,
+          options: {
+            insecure: true,
+            redirect: "manual",
+            timeoutMs: 1500,
+            proxy: "http://127.0.0.1:3128",
+          },
+        },
+      }),
+    );
+    expect(JSON.parse(task.request_options!)).toEqual({
+      insecure: true,
+      redirect: "manual",
+      timeoutMs: 1500,
+      proxy: "http://127.0.0.1:3128",
+    });
+    expect(task.notify_options).toBe("{}");
   });
 
   test("updates status and next run", () => {
@@ -225,5 +253,32 @@ describe("db", () => {
     expect(notify.kind).toBe("notify");
     expect(notify.parent_log_id).toBe(mainId);
     expect(getLog(missedId)?.kind).toBe("missed");
+  });
+
+  test("migrates an existing tasks table by adding request option columns", () => {
+    const legacyPath = join(tempDir, "legacy.db");
+    initDb(legacyPath);
+    const existing = createTask(sampleTask({ name: "before migration" }));
+    closeDb();
+
+    const raw = new Database(legacyPath);
+    raw.exec("ALTER TABLE tasks DROP COLUMN request_options");
+    raw.exec("ALTER TABLE tasks DROP COLUMN notify_options");
+    raw.close();
+
+    const migrated = initDb(legacyPath);
+    const columns = (migrated.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map(
+      (entry) => entry.name,
+    );
+    expect(columns).toContain("request_options");
+    expect(columns).toContain("notify_options");
+    expect(getTask(existing.id)?.request_options).toBe("{}");
+    expect(getTask(existing.id)?.notify_options).toBe("{}");
+
+    const task = createTask(sampleTask({ name: "after migration" }));
+    expect(task.request_options).toBe("{}");
+    expect(task.notify_options).toBe("{}");
+
+    initDb(dbPath);
   });
 });

@@ -29,6 +29,13 @@ const els = {
   refreshLogs: document.getElementById("refresh-logs"),
 };
 
+const CLIENT_CONFIG_DEFAULTS = {
+  logsPageSize: 50,
+  defaultWindowMinutes: 5,
+  pollIntervalMs: 4000,
+  logBodyLimitBytes: 100 * 1024,
+};
+
 const state = {
   tasks: [],
   tasksSignature: "",
@@ -39,9 +46,8 @@ const state = {
   hasMore: false,
   polling: false,
   statusTimer: null,
+  clientConfig: { ...CLIENT_CONFIG_DEFAULTS },
 };
-
-const LOG_LIMIT = 50;
 
 function h(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -144,9 +150,28 @@ function syncNotify() {
 
 function setDefaultWindow() {
   const now = new Date();
-  const end = new Date(now.getTime() + 5 * 60_000);
+  const configured = Number(state.clientConfig.defaultWindowMinutes);
+  const minutes = Number.isFinite(configured) && configured > 0 ? configured : 5;
+  const end = new Date(now.getTime() + minutes * 60_000);
   els.windowStart.value = hhmm(now);
   els.windowEnd.value = hhmm(end);
+}
+
+async function loadClientConfig() {
+  try {
+    const data = await api("/api/config");
+    state.clientConfig = {
+      ...CLIENT_CONFIG_DEFAULTS,
+      ...(data && typeof data === "object" ? data : {}),
+    };
+  } catch {
+    state.clientConfig = { ...CLIENT_CONFIG_DEFAULTS };
+  }
+  const bytes = Number(state.clientConfig.logBodyLimitBytes);
+  const kib =
+    Number.isFinite(bytes) && bytes > 0 ? Math.max(1, Math.round(bytes / 1024)) : 100;
+  const hint = document.getElementById("body-limit");
+  if (hint) hint.textContent = String(kib);
 }
 
 function selectedTask() {
@@ -171,6 +196,13 @@ function renderTasks() {
   }
 }
 
+function formatTimeout(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const seconds = value / 1000;
+  return Number.isInteger(seconds) ? `${seconds}s` : `${seconds.toFixed(1)}s`;
+}
+
 function renderTaskCard(task) {
   const cross = task.window_end < task.window_start;
   const active = task.status === "active";
@@ -178,6 +210,13 @@ function renderTaskCard(task) {
   if (task.expect_status !== null) conditions.push(`状态=${task.expect_status}`);
   if (task.expect_body !== null) conditions.push("响应体相等");
   if (!conditions.length) conditions.push("任意 2xx");
+
+  let requestOptions = {};
+  try {
+    requestOptions = task.request_options ? JSON.parse(task.request_options) : {};
+  } catch {
+    requestOptions = {};
+  }
 
   const card = h(
     "article",
@@ -206,6 +245,16 @@ function renderTaskCard(task) {
             active ? "运行中" : "已停止",
           ),
           cross ? h("span", { class: "badge badge-cross" }, "跨午夜") : null,
+          requestOptions.insecure
+            ? h("span", { class: "badge badge-insecure" }, "跳过 TLS 校验")
+            : null,
+          requestOptions.timeoutMs
+            ? h(
+                "span",
+                { class: "badge badge-timeout" },
+                `超时 ${formatTimeout(requestOptions.timeoutMs)}`,
+              )
+            : null,
           h("span", {}, `窗口 ${task.window_start}–${task.window_end}`),
         ),
       ),
@@ -243,6 +292,7 @@ function kindLabel(kind) {
 
 function statusInfo(log) {
   if (log.kind === "missed") return { text: "未执行", cls: "status-warn" };
+  if (log.error && log.error.startsWith("请求超时")) return { text: "超时", cls: "status-warn" };
   if (log.aborted) return { text: "已中断", cls: "status-err" };
   if (log.error) return { text: "错误", cls: "status-err" };
   if (log.response_status === null) return { text: "无响应", cls: "status-muted" };
@@ -384,7 +434,8 @@ async function loadLogs({ reset = false, older = false } = {}) {
   const sizeBefore = state.logs.size;
 
   try {
-    let url = `/api/tasks/${encodeURIComponent(taskId)}/logs?limit=${LOG_LIMIT}`;
+    const pageSize = Number(state.clientConfig.logsPageSize) || 50;
+    let url = `/api/tasks/${encodeURIComponent(taskId)}/logs?limit=${pageSize}`;
     if (older && state.oldestId !== null) {
       url += `&before=${state.oldestId}`;
     }
@@ -601,6 +652,8 @@ function bindEvents() {
 }
 
 function startPolling() {
+  const configured = Number(state.clientConfig.pollIntervalMs);
+  const delay = Number.isFinite(configured) && configured >= 500 ? configured : 4000;
   setInterval(async () => {
     if (document.hidden || state.polling) return;
     state.polling = true;
@@ -610,15 +663,16 @@ function startPolling() {
     } finally {
       state.polling = false;
     }
-  }, 4000);
+  }, delay);
 }
 
 async function init() {
-  setDefaultWindow();
   syncMode();
   syncNotify();
   bindEvents();
   setStatus("加载中…");
+  await loadClientConfig();
+  setDefaultWindow();
   await loadTasks();
   if (state.selectedTaskId) {
     await loadLogs({ reset: true });

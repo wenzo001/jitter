@@ -1,4 +1,5 @@
 import { Elysia } from "elysia";
+import { getActiveConfig } from "./config";
 import { createTask, getLog, getTask, listLogs, listTasks } from "./db";
 import { CurlParseError, normalizeStructured, parseCurlCommand } from "./curl-parser";
 import { resumeTask, scheduleNewTask, stopTask } from "./scheduler";
@@ -149,6 +150,15 @@ export const app = new Elysia()
     return { error: "服务器内部错误" };
   })
   .get("/api/health", () => ({ ok: true, now: Date.now() }))
+  .get("/api/config", () => {
+    const config = getActiveConfig();
+    return {
+      logsPageSize: config.logsPageSize,
+      defaultWindowMinutes: config.defaultWindowMinutes,
+      pollIntervalMs: config.pollIntervalMs,
+      logBodyLimitBytes: config.logBodyLimitBytes,
+    };
+  })
   .get("/api/tasks", () => ({ tasks: listTasks() }))
   .post("/api/tasks", ({ body, set }) => {
     const input = parseTaskInput(body);
@@ -179,13 +189,14 @@ export const app = new Elysia()
       return { error: "任务不存在" };
     }
 
+    const config = getActiveConfig();
     const rawLimit =
       typeof query.limit === "string" && query.limit.trim() !== ""
         ? Number(query.limit)
-        : 50;
+        : config.logsPageSize;
     const limit = Number.isFinite(rawLimit)
-      ? Math.min(Math.max(Math.trunc(rawLimit), 1), 200)
-      : 50;
+      ? Math.min(Math.max(Math.trunc(rawLimit), 1), config.logsMaxPageSize)
+      : config.logsPageSize;
 
     let before: number | null = null;
     if (query.before !== undefined && query.before !== "") {

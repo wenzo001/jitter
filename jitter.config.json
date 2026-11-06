@@ -1,0 +1,14 @@
+{
+  "port": 3001,
+  "host": "127.0.0.1",
+  "autoIncrementPort": true,
+  "portMaxAttempts": 100,
+  "dbPath": "data/app.db",
+  "logBodyLimitBytes": 102400,
+  "logsPageSize": 50,
+  "logsMaxPageSize": 200,
+  "requestTimeoutMs": 0,
+  "shutdownGraceMs": 150,
+  "defaultWindowMinutes": 5,
+  "pollIntervalMs": 4000
+}

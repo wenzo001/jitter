@@ -3,7 +3,10 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { LogRow, NewLogInput, NewTaskInput, TaskRow } from "./types";
 
-const DEFAULT_DB_PATH = join(import.meta.dir, "..", "data", "app.db");
+const RUNTIME_ROOT = /(^|[\\/])~BUN([\\/]|$)/.test(import.meta.dir)
+  ? process.cwd()
+  : join(import.meta.dir, "..");
+const DEFAULT_DB_PATH = join(RUNTIME_ROOT, "data", "app.db");
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tasks (
@@ -14,6 +17,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   request_method   TEXT NOT NULL DEFAULT 'GET',
   request_headers  TEXT,
   request_body     TEXT,
+  request_options  TEXT NOT NULL DEFAULT '{}',
   window_start     TEXT NOT NULL,
   window_end       TEXT NOT NULL,
   status           TEXT NOT NULL DEFAULT 'active',
@@ -26,6 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   notify_method    TEXT,
   notify_headers   TEXT,
   notify_body      TEXT,
+  notify_options   TEXT NOT NULL DEFAULT '{}',
   expect_status    INTEGER,
   expect_body      TEXT
 );
@@ -71,6 +76,24 @@ let database: Database | null = null;
 let databasePath: string | null = null;
 let statements: Statements | null = null;
 
+function ensureColumn(
+  db: Database,
+  table: string,
+  column: string,
+  definition: string,
+): void {
+  const columns = db.query(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+  if (!columns.some((entry) => entry.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+/** Additive migrations for databases created by earlier versions. */
+function migrate(db: Database): void {
+  ensureColumn(db, "tasks", "request_options", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, "tasks", "notify_options", "TEXT NOT NULL DEFAULT '{}'");
+}
+
 export function resolveDbPath(path?: string): string {
   const candidate = path ?? process.env.JITTER_DB_PATH;
   return candidate?.trim() || DEFAULT_DB_PATH;
@@ -97,15 +120,16 @@ export function initDb(path?: string): Database {
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec("PRAGMA synchronous = NORMAL;");
   db.exec(SCHEMA);
+  migrate(db);
 
   statements = {
     insertTask: db.query(
       `INSERT INTO tasks (
-        id, name, curl_command, request_url, request_method, request_headers, request_body,
+        id, name, curl_command, request_url, request_method, request_headers, request_body, request_options,
         window_start, window_end, status, next_run_at, created_at, updated_at,
-        notify_enabled, notify_curl_command, notify_url, notify_method, notify_headers, notify_body,
+        notify_enabled, notify_curl_command, notify_url, notify_method, notify_headers, notify_body, notify_options,
         expect_status, expect_body
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ),
     getTask: db.query("SELECT * FROM tasks WHERE id = ?"),
     listTasks: db.query("SELECT * FROM tasks ORDER BY created_at DESC"),
@@ -167,6 +191,7 @@ export function createTask(
     input.request.method,
     JSON.stringify(input.request.headers),
     input.request.body,
+    JSON.stringify(input.request.options ?? {}),
     input.window_start,
     input.window_end,
     "active",
@@ -179,6 +204,7 @@ export function createTask(
     notify?.method ?? null,
     notify ? JSON.stringify(notify.headers) : null,
     notify?.body ?? null,
+    notify ? JSON.stringify(notify.options ?? {}) : "{}",
     notifyEnabled ? input.expect_status : null,
     notifyEnabled ? input.expect_body : null,
   );

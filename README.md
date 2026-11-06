@@ -24,20 +24,48 @@ bun install
 bun run src/index.ts
 ```
 
-控制台会打印访问地址（默认 `http://127.0.0.1:3000/`）、数据库位置和恢复的任务数。
+控制台会打印实际访问地址、监听地址、数据库、使用的配置文件和恢复的任务数。默认读取项目根目录的 `jitter.config.json`；端口被占用时会自动尝试下一个端口（见下文“配置”）。
 
-环境变量：
+环境变量（优先级高于配置文件）：
 
-- `PORT`：监听端口，默认 `3000`
-- `HOST`：监听地址，默认 `127.0.0.1`
-- `JITTER_DB_PATH`：SQLite 路径，默认 `data/app.db`（目录会自动创建）
+- `JITTER_CONFIG`：配置文件路径，默认项目根目录的 `jitter.config.json`
+- `PORT`：监听端口，覆盖配置文件的 `port`
+- `HOST`：监听地址，覆盖配置文件的 `host`
+- `JITTER_DB_PATH`：SQLite 路径，覆盖配置文件的 `dbPath`
 
 其他命令：
 
 ```bash
-bun test            # 84 项核心逻辑 / 调度 / API / 数据库 / 执行器测试
+bun test            # 136 项核心逻辑 / curl / 配置 / 调度 / API / 数据库 / 执行器测试
 bun run typecheck   # tsc --noEmit
 ```
+
+## 配置
+
+默认配置文件 `jitter.config.json`（可选；不存在时使用内置默认值），也可以通过 `JITTER_CONFIG` 指定其他路径。仓库内的文件是可编辑示例：表中的值是**内置默认值**，文件中的值会覆盖它们。
+
+优先级：**内置默认值 < 配置文件 < 环境变量**（`PORT`、`HOST`、`JITTER_DB_PATH`）。
+
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `port` | `3000` | 监听端口；`0` 表示由系统分配 |
+| `host` | `127.0.0.1` | 监听地址 |
+| `autoIncrementPort` | `true` | 端口被占用时是否自动 +1 重试 |
+| `portMaxAttempts` | `100` | 最多尝试的端口数（包含初始端口） |
+| `dbPath` | `data/app.db` | SQLite 路径；配置文件中的相对路径相对于配置文件所在目录 |
+| `logBodyLimitBytes` | `102400` | 响应体保存/比较上限（100 KiB） |
+| `logsPageSize` | `50` | 日志默认分页大小 |
+| `logsMaxPageSize` | `200` | 日志单页上限 |
+| `requestTimeoutMs` | `0` | 默认请求超时；curl 的 `--max-time` 可按任务覆盖 |
+| `shutdownGraceMs` | `150` | SIGINT/SIGTERM 后等待在途中断日志落库的时间 |
+| `defaultWindowMinutes` | `5` | 新建任务表单的默认窗口时长 |
+| `pollIntervalMs` | `4000` | 前端刷新任务/日志的轮询间隔 |
+
+- 未知配置项、错误类型或越界值会在启动时直接报错，不会静默回退；`$schema` 可作为编辑器元数据忽略。
+- `JITTER_CONFIG` 的相对路径相对于进程工作目录；`JITTER_DB_PATH` 的相对路径也相对于工作目录；配置文件中的 `dbPath` 相对路径相对于配置文件目录。
+- 端口占用自动重试：只对 `EADDRINUSE` 生效，按 `port + 1` 继续尝试，最多 `portMaxAttempts` 个端口；每次重试和最终切换都会打印。其他启动错误不重试；全部端口占用时以清晰错误退出。`autoIncrementPort: false` 时首次占用即失败。
+- 前端通过 `GET /api/config` 获取 `logsPageSize`、`defaultWindowMinutes`、`pollIntervalMs`、`logBodyLimitBytes`，用于默认窗口、日志分页、轮询和响应体上限提示。
+- `requestTimeoutMs > 0` 时，超时会写入 `aborted=1` 和 `error="请求超时（N ms）"`，随后按正常流程规划下一次执行；`0` 表示保持长时间请求，直到完成或手动停止。单个任务可用 curl 的 `--max-time` 覆盖。
 
 ## 调度语义
 
@@ -86,25 +114,37 @@ bun run typecheck   # tsc --noEmit
 - 命中后执行通知 curl，并写入一条 `kind='notify'` 日志，`parent_log_id` 指向主请求日志。
 - 未命中则不发送通知。
 - 通知请求失败只影响自己的日志，不影响主任务。
-- 响应用于比较和存储的正文上限为 100 KiB；超过上限会追加 `[truncated]`，且此时“期望响应体”视为不匹配。
+- 响应用于比较和存储的正文上限由 `logBodyLimitBytes` 决定（默认 100 KiB）；超过上限会追加 `[truncated]`，且此时“期望响应体”视为不匹配。
 
 错过窗口只写 `kind='missed'` 日志并在启动时打印提示，不补跑，也不会触发成功通知（通知只用于成功命中）。
 
 ## curl 解析
 
-支持：
+支持（请求语义会真实生效）：
 
-- `-X/--request`、`-H/--header`、`-d/--data/--data-raw/--data-binary/--data-ascii`、`--url`
-- 单引号、双引号、反斜杠续行、`-XPOST` 这类紧贴取值、`--request=POST`
-- 多个 `-d` 按 curl 语义用 `&` 拼接；有 body 且未指定方法时默认 POST，并补充 `Content-Type: application/x-www-form-urlencoded`
-- 不改变出站语义的 `-s/-S/-i/-v/--compressed/-L`
+- 方法与请求体：`-X/--request`、`-H/--header`、`-d/--data/--data-raw/--data-binary/--data-ascii`、`--data-urlencode`、`--json`、`-G/--get`、`-I/--head`
+- 常用头与认证：`-A/--user-agent`、`-e/--referer`、`-u/--user`（Basic）、`--oauth2-bearer`、`-r/--range`、`-b/--cookie`
+- URL 与超时：`--url`、`--url-query`、`--max-time`（每个任务超时，覆盖全局 `requestTimeoutMs`）、`--connect-timeout`（没有 `--max-time` 时作为总超时回退）
+- 传输选项：`-k/--insecure`（仅该任务把 Bun fetch 的 `tls.rejectUnauthorized` 设为 false）、`-L/--location`、`--location-trusted`、`--no-location`、`-x/--proxy`（http/https，也接受 `host:port`）、`-U/--proxy-user`（需配合 `-x`，Basic 代理认证通过 Bun 代理 headers 发送，不写入普通请求头/日志）
+- 引号、双引号、反斜杠续行、`-XPOST` 这类紧贴取值、`--request=POST`
+- 多个 `-d` 用 `&` 拼接；有 body 且未指定方法时默认 POST，并补充 `Content-Type: application/x-www-form-urlencoded`
+- 浏览器「Copy as cURL」常见组合（`-H`、`-b`、`--compressed`、`--data-raw`、`--insecure`）可直接粘贴
+- `-b/--cookie` 映射为 `Cookie` 头；多个值与已有 Cookie 头用 `; ` 合并（不含 `=` 的值视为文件路径并拒绝）
+- `-G` 把 `-d/--data-urlencode` 放入 URL 查询串；`--url-query` 始终追加查询参数（`+` 前缀编码值）
+
+兼容接受但**不会改变出站请求**的 flag（curl 自身的输出/重试/传输偏好）：
+
+`-s/-S/-i/-v/-o/-O/-D/-w/-c/-C/-y/-Y/-z`、`--compressed`、`--retry/--retry-delay/--retry-max-time`、`--max-redirs`、`--http0.9/--http1.0/--http1.1/--http2/--http3`、`--tlsv1.0/--tlsv1.1/--tlsv1.2/--tlsv1.3`、`--fail/--fail-with-body`、`--globoff`、`--no-keepalive/--keepalive-time`、`--trace/--trace-ascii` 等。输出文件不会创建，重试不会由 curl 层执行；调度仍是每个窗口一次。
 
 明确拒绝并报出参数名：
 
-- `@file` 请求体、`-u`、`-k`、`-F/--form`、`-G`、`-b`、`--proxy`、`--max-time`、`--data-urlencode` 等无法等价映射的项
-- 未知 flag
-- 非 http/https URL
-- GET/HEAD 携带 body
+- multipart/上传：`-F/--form`、`-T/--upload-file`
+- 自定义 TLS 证书/私钥：`--cacert`、`--capath`、`--cert`、`--key`、`-E` 等
+- 网络/DNS 覆盖：`--resolve`、`--connect-to`、`--interface`、`--unix-socket`、`--dns-*`、`--noproxy`、`--proxy-header`
+- 其他认证：`--digest`、`--ntlm`、`--negotiate`
+- 配置文件/多请求：`-K/--config`、`--next`
+- `-G/--get` 与 `--json` 同时使用（避免静默丢载荷）
+- `@file` 请求体、未知 flag、非 http/https URL、GET/HEAD 携带 body
 
 所有校验在**创建任务之前**完成；失败返回 400，不落库、不执行。整个项目不执行 shell 命令，不使用 `child_process`、`eval` 或 `new Function` 处理用户输入。
 
@@ -116,8 +156,9 @@ bun run typecheck   # tsc --noEmit
 | POST | `/api/tasks` | 新建任务（curl 或结构化字段） |
 | POST | `/api/tasks/:id/stop` | 停止（幂等） |
 | POST | `/api/tasks/:id/resume` | 恢复 |
-| GET | `/api/tasks/:id/logs?limit=50&before=<id>` | 倒序游标分页，返回 `{ logs, has_more }` |
+| GET | `/api/tasks/:id/logs?limit=50&before=<id>` | 倒序游标分页（默认/上限来自配置），返回 `{ logs, has_more }` |
 | GET | `/api/logs/:id` | 单条日志详情 |
+| GET | `/api/config` | 前端可用的配置（分页、默认窗口、轮询、响应体上限） |
 | GET | `/api/health` | 健康检查 |
 
 创建请求示例（curl 文本）：
@@ -142,7 +183,7 @@ bun run typecheck   # tsc --noEmit
 
 在需求给定结构上增加了通知与日志分类字段：
 
-- `tasks`：`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`
+- `tasks`：`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`、`request_options` / `notify_options`（JSON：`insecure`、`redirect`、`timeoutMs`、`proxy`、`proxyAuthorization`）
 - `logs`：`kind`（`task` / `notify` / `missed`）、`parent_log_id`、`matched`
 
 `data/` 整个目录已被 `.gitignore` 忽略。日志无自动清理，长期保留。
@@ -153,24 +194,112 @@ bun run typecheck   # tsc --noEmit
 - 日志会原样保存请求头与请求体，可能包含 token、Cookie 等敏感信息。
 - 进程内 cron 依赖服务常驻；服务停止期间错过的窗口不会补跑，只记录 `missed` 日志。
 - 执行过程中崩溃重启时，如果请求已发出但尚未完成落库，重启后可能再次执行一次（窗口内恢复语义）。
-- 请求本身没有内置超时；长时间挂起的请求可用“停止”中断。在请求结束或停止之前，该任务不会进入下一次调度。
+- 请求默认没有超时；可通过全局 `requestTimeoutMs` 或 curl 的 `--max-time` 启用（超时记为 `aborted=1`，错误为“请求超时”）。在请求结束或停止之前，该任务不会进入下一次调度。
+- `-k/--insecure` 会为该任务关闭 TLS 证书校验（Bun fetch `tls.rejectUnauthorized=false`），任务卡片会显示“跳过 TLS 校验”；仅对可信内网或自签名测试端点使用。
+- `-x/--proxy` 会让请求经指定代理发出；未指定时 Bun fetch 仍会读取 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境变量。`-U/--proxy-user` 必须配合 `-x`，凭据通过 Bun 代理 headers 发送，不写入普通请求头或日志；代理 URL 中的 userinfo 会被剥离并转换为同一份代理认证。
+- curl 文本、任务配置和日志可能包含 Authorization、Cookie 等敏感信息；请限制数据目录权限，不要把实例暴露到公网。
+- 编译后的单文件在执行目录/可执行文件目录查找 `jitter.config.json`；服务化时应显式设置 `JITTER_CONFIG` 和 `JITTER_DB_PATH` 到可写目录。
+- 输出、重试、协议偏好类 flag 会被接受但不会改变出站请求：不写文件、不执行 curl 层重试，任务仍按窗口调度一次。
+- 不支持 multipart/文件上传、自定义 TLS 证书文件、DNS/连接覆盖（见上文拒绝列表）。
 - 一个窗口只执行一次；不提供手动立即执行。
-- 响应正文最多保存/比较 100 KiB；二进制响应按 UTF-8 解码显示。
+- 响应正文默认最多保存/比较 100 KiB，可由 `logBodyLimitBytes` 调整；二进制响应按 UTF-8 解码显示。
 - 通知 curl 是固定请求，不做模板变量替换。
 - 所有时间按运行机器的本地时区计算；DB 存毫秒时间戳。
 - 时间窗口精度为分钟；不支持秒级窗口或跨多天窗口。
 
+## 部署与打包
+
+Jitter 的 cron、timer 和 SQLite 都在进程内，**必须单实例运行**；进程管理只负责常驻和崩溃重启。
+
+### PM2（跨平台）
+
+```bash
+npm i -g pm2        # 或 bun add -g pm2
+cd /path/to/jitter
+pm2 start bun --name jitter -- run src/index.ts
+pm2 save
+```
+
+- 也可以 `pm2 start ecosystem.config.cjs`（已设为 `instances: 1`、fork 模式）。
+- Linux/macOS 开机自启：执行 `pm2 startup` 后运行它打印的命令，再 `pm2 save`。
+- Windows：`pm2 startup` 不可用，使用 `pm2-installer`、任务计划程序或 NSSM 在登录/开机时执行 `pm2 resurrect`。
+- 不要让 PM2 使用 cluster 模式：会重复执行 cron/timer 并竞争 SQLite。
+
+### systemd（Linux）
+
+```ini
+[Unit]
+Description=Jitter
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/jitter
+ExecStart=/usr/local/bin/bun run src/index.ts
+Restart=always
+RestartSec=2
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`systemctl daemon-reload && systemctl enable --now jitter`。如果使用编译后的二进制，把 `ExecStart` 改成 `/opt/jitter/jitter`。
+
+### Docker / Compose
+
+```bash
+docker compose up -d --build
+```
+
+- 容器内使用 `HOST=0.0.0.0`、`PORT=3000`（Compose 已设置），只把端口发布到 `127.0.0.1:3000`。
+- `data` 使用命名卷；SQLite WAL 需要本地可写文件系统，不要放在 NFS 上；只跑一个副本。
+- 固定端口映射时，把 `jitter.config.json` 的 `autoIncrementPort` 改为 `false`，否则端口被占用时容器内部会换端口而外部映射仍指向旧端口。
+- 配置文件通过 `-v ./jitter.config.json:/app/jitter.config.json:ro` 挂载；数据库路径用 `JITTER_DB_PATH` 覆盖。
+- Dockerfile 基于 `oven/bun:1.4.4`，构建时使用 `bun install --frozen-lockfile`。
+
+### 单文件打包
+
+```bash
+bun run build
+```
+
+- 生成 `dist/jitter`（Windows 为 `dist/jitter.exe`），内嵌 Bun 运行时、Elysia、后端和前端 HTML/JS；约 116 MB。
+- 把可执行文件和 `jitter.config.json` 放在同一目录（或从该目录启动）；程序会在启动目录和可执行文件目录查找配置，也支持 `JITTER_CONFIG` / `JITTER_DB_PATH` / `PORT` 覆盖。
+- 交叉编译示例：`bun build --compile --target=bun-linux-x64 --outfile dist/jitter-linux src/index.ts`（也支持 `bun-darwin-arm64`、`bun-windows-x64` 等）。
+- 打包后目标机不需要 `bun install`；数据库仍在外部 `data/` 目录，升级二进制不会丢历史日志。
+
+### 持续部署
+
+PM2 / systemd / Docker 只负责“常驻 + 崩溃重启”；持续部署需要拉代码、测试、构建、重启的流水线，例如：
+
+```bash
+git pull --ff-only
+bun install --frozen-lockfile
+bun test
+pm2 restart jitter --update-env
+```
+
+Docker 流程为：构建并推送新镜像 → 目标机 `docker compose pull && docker compose up -d`。GitHub Actions 可以复用同样的 `bun install` / `bun test` / `bun run build`，部署步骤按服务器选择 SSH 或镜像仓库。
+
 ## 目录
 
 ```text
+jitter.config.json    # 默认配置（可用 JITTER_CONFIG 覆盖）
+ecosystem.config.cjs  # PM2 单实例配置
+Dockerfile            # 容器镜像（oven/bun:1.4.4）
+docker-compose.yml    # 命名卷 + 本地端口映射
+.dockerignore
+dist/                 # bun run build 产物（gitignore）
 src/
-├── index.ts          # Bun.serve + HTML 路由 + 启动/退出
-├── api.ts            # Elysia API、创建前校验、错误映射
-├── db.ts             # SQLite/WAL、建表、预编译语句、任务与日志读写
+├── index.ts          # Bun.serve + HTML 路由 + 配置/端口启动 + 退出
+├── api.ts            # Elysia API、创建前校验、/api/config、错误映射
+├── config.ts         # 配置默认值、JSON 加载、校验、环境变量覆盖、编译态路径
+├── port.ts           # EADDRINUSE 检测、端口 +1 重试、本机地址校验
+├── db.ts             # SQLite/WAL、建表、增量迁移、预编译语句、任务与日志读写
 ├── scheduler.ts      # cron + 随机 timer + 恢复 + 停止/恢复 + 代际防护
 ├── window.ts         # 跨午夜窗口、随机点、恢复矩阵（纯函数）
-├── executor.ts       # fetch + AbortController + 100 KiB 截断 + 成功判定 + 通知
-├── curl-parser.ts    # shell 风格 tokenizer + curl 参数映射
+├── executor.ts       # fetch + AbortController + TLS/代理/超时 + 100 KiB 截断 + 通知
+├── curl-parser.ts    # shell 风格 tokenizer + 宽 curl 参数映射
 ├── types.ts
 ├── *.test.ts         # bun test
 └── frontend/

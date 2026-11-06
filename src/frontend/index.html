@@ -156,6 +156,8 @@
       .badge-active { color: var(--ok); background: var(--ok-soft); }
       .badge-stopped { color: var(--muted); background: #eef0f3; }
       .badge-cross { color: var(--warn); background: var(--warn-soft); }
+      .badge-insecure { color: var(--err); background: var(--err-soft); }
+      .badge-timeout { color: var(--warn); background: var(--warn-soft); }
       .badge-task { color: var(--accent); background: var(--accent-soft); }
       .badge-notify { color: #6b3fa0; background: #f1eafb; }
       .badge-missed { color: var(--warn); background: var(--warn-soft); }
@@ -346,7 +348,7 @@
                     <textarea id="expect-body" rows="2" placeholder='例如 {"code":0}'></textarea>
                   </div>
                 </div>
-                <p class="hint">两项都不填时，任意 2xx 视为成功；填写后需全部相等才发送通知。响应体按最多 100 KiB 比较。</p>
+                <p class="hint">两项都不填时，任意 2xx 视为成功；填写后需全部相等才发送通知。响应体按最多 <span id="body-limit">100</span> KiB 比较。</p>
               </div>
             </div>
 
