@@ -1,0 +1,229 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  closeDb,
+  createTask,
+  getJournalMode,
+  getLog,
+  getTask,
+  initDb,
+  insertLog,
+  listLogs,
+  listTasks,
+  resolveDbPath,
+  updateTaskNextRun,
+  updateTaskStatus,
+} from "./db";
+import type { NewTaskInput } from "./types";
+
+const tempDir = mkdtempSync(join(tmpdir(), "jitter-db-"));
+const dbPath = join(tempDir, "test.db");
+
+beforeAll(() => {
+  initDb(dbPath);
+});
+
+afterAll(() => {
+  closeDb();
+  rmSync(tempDir, { recursive: true, force: true });
+});
+
+function sampleTask(overrides: Partial<NewTaskInput> = {}): NewTaskInput {
+  return {
+    name: "daily check",
+    curl_command: "curl https://example.com/api",
+    request: {
+      url: "https://example.com/api",
+      method: "GET",
+      headers: { "X-Test": "1" },
+      body: null,
+    },
+    window_start: "10:10",
+    window_end: "10:20",
+    notify_enabled: false,
+    notify_curl_command: null,
+    notify_request: null,
+    expect_status: null,
+    expect_body: null,
+    ...overrides,
+  };
+}
+
+describe("db", () => {
+  test("enables WAL on a file database", () => {
+    expect(getJournalMode()).toBe("wal");
+  });
+
+  test("falls back to the default path for a blank path or env", () => {
+    const previous = process.env.JITTER_DB_PATH;
+    try {
+      process.env.JITTER_DB_PATH = "   ";
+      expect(resolveDbPath()).toMatch(/app\.db$/);
+      expect(resolveDbPath("")).toMatch(/app\.db$/);
+    } finally {
+      if (previous === undefined) delete process.env.JITTER_DB_PATH;
+      else process.env.JITTER_DB_PATH = previous;
+    }
+  });
+
+  test("creates and reads a task with notification config", () => {
+    const task = createTask(
+      sampleTask({
+        name: "notify me",
+        notify_enabled: true,
+        notify_curl_command: "curl -X POST https://notify.example/ping",
+        notify_request: {
+          url: "https://notify.example/ping",
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: '{"text":"done"}',
+        },
+        expect_status: 200,
+        expect_body: '{"ok":true}',
+      }),
+    );
+
+    expect(task.name).toBe("notify me");
+    expect(task.window_start).toBe("10:10");
+    expect(task.window_end).toBe("10:20");
+    expect(task.status).toBe("active");
+    expect(task.next_run_at).toBeNull();
+    expect(task.notify_enabled).toBe(1);
+    expect(task.notify_url).toBe("https://notify.example/ping");
+    expect(task.notify_method).toBe("POST");
+    expect(JSON.parse(task.notify_headers!)).toEqual({ "Content-Type": "application/json" });
+    expect(task.expect_status).toBe(200);
+    expect(task.expect_body).toBe('{"ok":true}');
+
+    expect(getTask(task.id)?.id).toBe(task.id);
+    expect(listTasks().some((row) => row.id === task.id)).toBe(true);
+  });
+
+  test("updates status and next run", () => {
+    const task = createTask(sampleTask({ name: "lifecycle" }));
+    const planned = Date.now() + 30_000;
+    updateTaskNextRun(task.id, planned, Date.now());
+    expect(getTask(task.id)?.next_run_at).toBe(planned);
+
+    updateTaskStatus(task.id, "stopped", null, Date.now());
+    const stopped = getTask(task.id)!;
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.next_run_at).toBeNull();
+
+    updateTaskStatus(task.id, "active", planned, Date.now());
+    expect(getTask(task.id)?.status).toBe("active");
+  });
+
+  test("paginates logs newest first and isolates tasks", () => {
+    const task = createTask(sampleTask({ name: "paginate" }));
+    const other = createTask(sampleTask({ name: "other" }));
+    const ids: number[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      ids.push(
+        insertLog({
+          task_id: task.id,
+          executed_at: 1_000 + i,
+          request_url: "https://example.com",
+          request_method: "GET",
+          request_headers: "{}",
+          request_body: null,
+          response_status: 200,
+          response_headers: "{}",
+          response_body: `body-${i}`,
+          duration_ms: 10,
+          error: null,
+          aborted: 0,
+          kind: "task",
+          parent_log_id: null,
+          matched: 1,
+        }),
+      );
+    }
+    insertLog({
+      task_id: other.id,
+      executed_at: 9_999,
+      request_url: "https://other.example",
+      request_method: "GET",
+      request_headers: null,
+      request_body: null,
+      response_status: 200,
+      response_headers: null,
+      response_body: "other",
+      duration_ms: 1,
+      error: null,
+      aborted: 0,
+      kind: "task",
+      parent_log_id: null,
+      matched: 1,
+    });
+
+    const first = listLogs(task.id, 2, null);
+    expect(first.map((row) => row.id)).toEqual([ids[4]!, ids[3]!]);
+    const second = listLogs(task.id, 2, ids[3]!);
+    expect(second.map((row) => row.id)).toEqual([ids[2]!, ids[1]!]);
+    expect(getLog(ids[4]!)?.response_body).toBe("body-4");
+    expect(listLogs(other.id, 10, null)).toHaveLength(1);
+  });
+
+  test("stores notify, missed and aborted log rows", () => {
+    const task = createTask(sampleTask({ name: "log kinds" }));
+    const mainId = insertLog({
+      task_id: task.id,
+      executed_at: 2_000,
+      request_url: "https://example.com",
+      request_method: "POST",
+      request_headers: "{}",
+      request_body: "x",
+      response_status: 200,
+      response_headers: "{}",
+      response_body: "ok",
+      duration_ms: 12,
+      error: null,
+      aborted: 0,
+      kind: "task",
+      parent_log_id: null,
+      matched: 1,
+    });
+    const notifyId = insertLog({
+      task_id: task.id,
+      executed_at: 2_001,
+      request_url: "https://notify.example",
+      request_method: "POST",
+      request_headers: null,
+      request_body: "done",
+      response_status: 204,
+      response_headers: null,
+      response_body: "",
+      duration_ms: 5,
+      error: null,
+      aborted: 0,
+      kind: "notify",
+      parent_log_id: mainId,
+      matched: null,
+    });
+    const missedId = insertLog({
+      task_id: task.id,
+      executed_at: 2_002,
+      request_url: "https://example.com",
+      request_method: "GET",
+      request_headers: null,
+      request_body: null,
+      response_status: null,
+      response_headers: null,
+      response_body: null,
+      duration_ms: null,
+      error: "错过执行窗口",
+      aborted: 0,
+      kind: "missed",
+      parent_log_id: null,
+      matched: null,
+    });
+
+    const notify = getLog(notifyId)!;
+    expect(notify.kind).toBe("notify");
+    expect(notify.parent_log_id).toBe(mainId);
+    expect(getLog(missedId)?.kind).toBe("missed");
+  });
+});

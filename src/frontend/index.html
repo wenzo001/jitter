@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23f5f6f8'/%3E%3Ccircle cx='16' cy='16' r='9' fill='%232563eb'/%3E%3C/svg%3E"
+    />
+    <title>Jitter · 随机窗口定时任务</title>
+    <style>
+      :root {
+        --bg: #f5f6f8;
+        --panel: #ffffff;
+        --border: #e2e5ea;
+        --text: #18212f;
+        --muted: #6b7585;
+        --accent: #2563eb;
+        --accent-soft: #e8efff;
+        --ok: #16794b;
+        --ok-soft: #e7f6ee;
+        --warn: #a15c07;
+        --warn-soft: #fdf2df;
+        --err: #b42318;
+        --err-soft: #fdecea;
+        --radius: 12px;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      button, input, select, textarea { font: inherit; color: inherit; }
+      button { cursor: pointer; }
+      button:disabled { cursor: not-allowed; opacity: 0.55; }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 24px;
+        background: rgba(255, 255, 255, 0.92);
+        border-bottom: 1px solid var(--border);
+        backdrop-filter: blur(8px);
+      }
+      .brand { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+      .brand-name { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+      .brand-dot {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 0 4px var(--accent-soft);
+        margin-right: 4px;
+      }
+      .tagline { color: var(--muted); font-size: 13px; }
+      #status-line { color: var(--muted); font-size: 13px; max-width: 46ch; text-align: right; }
+      #status-line.error { color: var(--err); }
+      .layout {
+        max-width: 1440px;
+        margin: 0 auto;
+        padding: 20px 24px 48px;
+        display: grid;
+        grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+        gap: 20px;
+        align-items: start;
+      }
+      .column { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+        overflow: hidden;
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .panel-head h2 { margin: 0; font-size: 15px; font-weight: 650; }
+      .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .btn {
+        border: 1px solid var(--border);
+        background: #fff;
+        border-radius: 8px;
+        padding: 6px 11px;
+        font-size: 13px;
+        line-height: 1.2;
+        transition: background 0.12s ease, border-color 0.12s ease;
+      }
+      .btn:hover { background: #f4f6f9; }
+      .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .btn-quiet { border-color: transparent; color: var(--muted); }
+      .btn-primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        padding: 9px 16px;
+        font-weight: 600;
+      }
+      .btn-primary:hover { background: #1d4ed8; }
+      .btn-danger { color: var(--err); border-color: #f3c8c2; background: #fff; }
+      .btn-danger:hover { background: var(--err-soft); }
+      .task-list { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+      .task-card {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        background: #fff;
+        cursor: pointer;
+        transition: border-color 0.12s ease, box-shadow 0.12s ease;
+      }
+      .task-card:hover { border-color: #c9d2df; }
+      .task-card.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+      .task-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+      .task-name { margin: 0; font-size: 14px; font-weight: 650; word-break: break-word; }
+      .task-actions { display: flex; gap: 6px; flex-shrink: 0; }
+      .task-meta { margin-top: 7px; color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+      .task-request {
+        margin-top: 7px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: #3a4658;
+        word-break: break-all;
+        background: #f7f8fa;
+        border-radius: 6px;
+        padding: 6px 8px;
+      }
+      .task-extra { margin-top: 6px; color: var(--muted); font-size: 12px; }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 11.5px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .badge-active { color: var(--ok); background: var(--ok-soft); }
+      .badge-stopped { color: var(--muted); background: #eef0f3; }
+      .badge-cross { color: var(--warn); background: var(--warn-soft); }
+      .badge-task { color: var(--accent); background: var(--accent-soft); }
+      .badge-notify { color: #6b3fa0; background: #f1eafb; }
+      .badge-missed { color: var(--warn); background: var(--warn-soft); }
+      .empty { padding: 24px 16px; color: var(--muted); text-align: center; }
+      .form { padding: 16px; display: flex; flex-direction: column; gap: 13px; }
+      .field { display: flex; flex-direction: column; gap: 5px; }
+      .field > label, .field-label { font-size: 12.5px; font-weight: 650; color: #38445a; }
+      .field input[type="text"], .field input[type="time"], .field input[type="number"], .field select,
+      .field textarea, .form textarea, .form input[type="text"] {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 10px;
+        background: #fff;
+        outline: none;
+      }
+      .field input:focus, .field select:focus, .field textarea:focus,
+      .form textarea:focus, .form input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+      textarea { resize: vertical; min-height: 74px; font-family: var(--mono); font-size: 12.5px; }
+      .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .segmented { display: flex; gap: 6px; background: #f0f2f5; padding: 3px; border-radius: 9px; }
+      .segmented label {
+        flex: 1;
+        text-align: center;
+        border-radius: 7px;
+        padding: 6px 8px;
+        font-size: 12.5px;
+        color: var(--muted);
+        cursor: pointer;
+        user-select: none;
+      }
+      .segmented label:has(input:checked) { background: #fff; color: var(--text); font-weight: 650; box-shadow: 0 1px 2px rgba(16,24,40,.08); }
+      .segmented input { position: absolute; opacity: 0; pointer-events: none; }
+      .segmented label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .check { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: #38445a; }
+      .check input { width: 16px; height: 16px; accent-color: var(--accent); }
+      .hint { margin: 0; color: var(--muted); font-size: 12px; }
+      .form-error {
+        border: 1px solid #f3c8c2;
+        background: var(--err-soft);
+        color: var(--err);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12.5px;
+        white-space: pre-wrap;
+      }
+      .notify-block { border: 1px dashed var(--border); border-radius: 10px; padding: 11px; display: flex; flex-direction: column; gap: 10px; }
+      .logs-panel { display: flex; flex-direction: column; min-height: 420px; }
+      .log-list { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 190px); overflow: auto; }
+      .logs-footer { padding: 0 16px 14px; display: flex; justify-content: center; }
+      .log {
+        border: 1px solid var(--border);
+        border-left-width: 4px;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #fff;
+      }
+      .log.kind-task { border-left-color: var(--accent); }
+      .log.kind-notify { border-left-color: #7c4dbe; }
+      .log.kind-missed { border-left-color: var(--warn); background: #fffaf1; }
+      .log.aborted { border-left-color: var(--err); }
+      .log-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .log-time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+      .log-request { margin-top: 6px; font-family: var(--mono); font-size: 12px; word-break: break-all; color: #2c384a; }
+      .log-error { margin-top: 6px; color: var(--err); font-size: 12.5px; white-space: pre-wrap; }
+      .log details { margin-top: 8px; }
+      .log summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+      .detail { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+      .detail h4 { margin: 0 0 3px; font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+      .detail pre {
+        margin: 0;
+        padding: 8px;
+        background: #f7f8fa;
+        border: 1px solid #eef0f3;
+        border-radius: 7px;
+        font-family: var(--mono);
+        font-size: 11.5px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 300px;
+        overflow: auto;
+      }
+      .status-ok { color: var(--ok); background: var(--ok-soft); }
+      .status-err { color: var(--err); background: var(--err-soft); }
+      .status-warn { color: var(--warn); background: var(--warn-soft); }
+      .status-muted { color: var(--muted); background: #eef0f3; }
+      .muted { color: var(--muted); }
+      @media (max-width: 900px) {
+        .layout { grid-template-columns: 1fr; padding: 14px 12px 40px; }
+        .topbar { padding: 12px 14px; }
+        #status-line { text-align: left; }
+        .log-list { max-height: none; }
+      }
+      @media (max-width: 420px) {
+        .grid-2 { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-name">Jitter</span>
+        <span class="tagline">在时间窗口里随机醒来，替你执行 curl</span>
+      </div>
+      <div id="status-line" aria-live="polite">就绪</div>
+    </header>
+
+    <main class="layout">
+      <section class="column">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>任务</h2>
+            <button id="refresh-tasks" class="btn btn-quiet" type="button">刷新</button>
+          </div>
+          <div id="task-list" class="task-list"></div>
+          <div id="tasks-empty" class="empty">还没有任务。下面创建一个：填写窗口，粘贴 curl 即可。</div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>新建任务</h2></div>
+          <form id="create-form" class="form" novalidate>
+            <div class="field">
+              <label for="name">任务名称</label>
+              <input id="name" name="name" type="text" placeholder="例如：每日签到" maxlength="200" autocomplete="off" />
+            </div>
+
+            <div class="grid-2">
+              <div class="field">
+                <label for="window-start">窗口开始</label>
+                <input id="window-start" name="window_start" type="time" step="60" />
+              </div>
+              <div class="field">
+                <label for="window-end">窗口结束</label>
+                <input id="window-end" name="window_end" type="time" step="60" />
+              </div>
+            </div>
+            <p class="hint">结束早于开始视为跨午夜窗口（例如 23:50–00:10），按开始日计一次执行。</p>
+
+            <div class="segmented" role="group" aria-label="请求填写方式">
+              <label><input type="radio" name="mode" value="curl" checked />curl 文本</label>
+              <label><input type="radio" name="mode" value="structured" />表单字段</label>
+            </div>
+
+            <div id="curl-wrap" class="field">
+              <label for="curl">curl 命令</label>
+              <textarea id="curl" placeholder="curl -X POST 'https://example.com/api' -H 'Content-Type: application/json' -d '{&quot;ok&quot;:true}'"></textarea>
+            </div>
+
+            <div id="structured-wrap" class="field" hidden>
+              <label for="url">URL</label>
+              <input id="url" type="text" placeholder="https://example.com/api" autocomplete="off" />
+              <div class="grid-2" style="margin-top: 8px">
+                <div class="field">
+                  <label for="method">Method</label>
+                  <select id="method">
+                    <option>GET</option>
+                    <option>POST</option>
+                    <option>PUT</option>
+                    <option>PATCH</option>
+                    <option>DELETE</option>
+                    <option>HEAD</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="headers">Headers（每行一个）</label>
+                  <textarea id="headers" placeholder="Content-Type: application/json&#10;Authorization: Bearer …"></textarea>
+                </div>
+              </div>
+              <div class="field" style="margin-top: 8px">
+                <label for="body">Body</label>
+                <textarea id="body" placeholder='{"hello":"world"}'></textarea>
+              </div>
+            </div>
+
+            <div class="notify-block">
+              <label class="check"><input id="notify-enabled" type="checkbox" />成功时发送通知 curl</label>
+              <div id="notify-fields" class="field" hidden>
+                <label for="notify-curl">通知 curl</label>
+                <textarea id="notify-curl" placeholder="curl -X POST 'https://notify.example/hook' -H 'Content-Type: application/json' -d '{&quot;text&quot;:&quot;签到成功&quot;}'"></textarea>
+                <div class="grid-2" style="margin-top: 8px">
+                  <div class="field">
+                    <label for="expect-status">期望状态码（可选）</label>
+                    <input id="expect-status" type="number" min="100" max="599" placeholder="例如 200" />
+                  </div>
+                  <div class="field">
+                    <label for="expect-body">期望响应体（可选，完全相等）</label>
+                    <textarea id="expect-body" rows="2" placeholder='例如 {"code":0}'></textarea>
+                  </div>
+                </div>
+                <p class="hint">两项都不填时，任意 2xx 视为成功；填写后需全部相等才发送通知。响应体按最多 100 KiB 比较。</p>
+              </div>
+            </div>
+
+            <div id="form-error" class="form-error" role="alert" hidden></div>
+            <button id="submit" class="btn btn-primary" type="submit">创建任务</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="column">
+        <div class="panel logs-panel">
+          <div class="panel-head">
+            <h2 id="logs-title">执行记录</h2>
+            <div class="row">
+              <span id="logs-task-meta" class="muted" style="font-size: 12px"></span>
+              <button id="refresh-logs" class="btn btn-quiet" type="button">刷新</button>
+            </div>
+          </div>
+          <div id="log-list" class="log-list"></div>
+          <div id="logs-empty" class="empty">选择一个任务查看执行记录</div>
+          <div class="logs-footer">
+            <button id="load-more" class="btn btn-quiet" type="button" hidden>加载更早</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
