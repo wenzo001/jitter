@@ -265,6 +265,54 @@ describe("api", () => {
     expect(clamped.body.has_more).toBe(true);
   });
 
+  test("previews and executes log cleanup with confirmation", async () => {
+    const created = await post("/api/tasks", payload());
+    const taskId = created.body.task.id;
+    const day = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    const stale = [0, 1, 2].map((index) =>
+      insertLog({ ...logInput(taskId, index), executed_at: now - 40 * day + index }),
+    );
+    insertLog({ ...logInput(taskId, 10), executed_at: now - day });
+
+    const preview = await call("/api/logs/cleanup/preview");
+    expect(preview.status).toBe(200);
+    expect(preview.body.total_count).toBe(4);
+    expect(preview.body.options.map((option: { days: number }) => option.days)).toEqual([
+      10, 30, 180, 365,
+    ]);
+    const thirty = preview.body.options.find((option: { days: number }) => option.days === 30);
+    expect(thirty.count).toBe(3);
+    expect(preview.body.all).toEqual({ count: 4, bytes: preview.body.total_bytes });
+
+    const missingConfirm = await post("/api/logs/cleanup", { days: 30 });
+    expect(missingConfirm.status).toBe(400);
+
+    const badDays = await post("/api/logs/cleanup", { days: 7, confirm: true });
+    expect(badDays.status).toBe(400);
+
+    const both = await post("/api/logs/cleanup", { days: 30, all: true, confirm: "DELETE_ALL" });
+    expect(both.status).toBe(400);
+
+    const wrongAllConfirm = await post("/api/logs/cleanup", { all: true, confirm: true });
+    expect(wrongAllConfirm.status).toBe(400);
+
+    const cleaned = await post("/api/logs/cleanup", { days: 30, confirm: true });
+    expect(cleaned.status).toBe(200);
+    expect(cleaned.body.deleted).toBe(3);
+    expect(cleaned.body.remaining).toBe(1);
+    expect(cleaned.body.vacuum_error).toBeNull();
+
+    const remaining = await call(`/api/tasks/${taskId}/logs`);
+    expect(remaining.body.logs.map((log: { id: number }) => log.id)).not.toContain(stale[0]!);
+
+    const clearedAll = await post("/api/logs/cleanup", { all: true, confirm: "DELETE_ALL" });
+    expect(clearedAll.status).toBe(200);
+    expect(clearedAll.body.deleted).toBe(1);
+    expect(clearedAll.body.remaining).toBe(0);
+  });
+
   test("rejects malformed JSON", async () => {
     const response = await call("/api/tasks", {
       method: "POST",

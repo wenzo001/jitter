@@ -1,6 +1,15 @@
 import { Elysia } from "elysia";
 import { getActiveConfig } from "./config";
-import { createTask, getLog, getTask, listLogs, listTasks } from "./db";
+import {
+  LOG_CLEANUP_DAYS,
+  cleanupLogs,
+  createTask,
+  getLog,
+  getLogCleanupPreview,
+  getTask,
+  listLogs,
+  listTasks,
+} from "./db";
 import { CurlParseError, normalizeStructured, parseCurlCommand } from "./curl-parser";
 import { resumeTask, scheduleNewTask, stopTask } from "./scheduler";
 import { WindowError, validateWindow } from "./window";
@@ -212,6 +221,40 @@ export const app = new Elysia()
     const hasMore = rows.length > limit;
     const logs = hasMore ? rows.slice(0, limit) : rows;
     return { logs, has_more: hasMore };
+  })
+  .get("/api/logs/cleanup/preview", () => getLogCleanupPreview())
+  .post("/api/logs/cleanup", ({ body, set }) => {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      set.status = 400;
+      return { error: "请求体必须是 JSON 对象" };
+    }
+    const input = body as Record<string, unknown>;
+    const wantsAll = input.all === true;
+    const hasDays = input.days !== undefined && input.days !== null;
+
+    if (wantsAll && hasDays) {
+      set.status = 400;
+      return { error: "days 与 all 不能同时指定" };
+    }
+
+    if (wantsAll) {
+      if (input.confirm !== "DELETE_ALL") {
+        set.status = 400;
+        return { error: "全部清除需要二次确认：confirm 必须为 \"DELETE_ALL\"" };
+      }
+      return cleanupLogs({ all: true });
+    }
+
+    const days = Number(input.days);
+    if (!(LOG_CLEANUP_DAYS as readonly number[]).includes(days)) {
+      set.status = 400;
+      return { error: `days 必须是 ${LOG_CLEANUP_DAYS.join(" / ")} 之一` };
+    }
+    if (input.confirm !== true && input.confirm !== "DELETE") {
+      set.status = 400;
+      return { error: "清理前需要二次确认：confirm 必须为 true" };
+    }
+    return cleanupLogs({ days });
   })
   .get("/api/logs/:id", ({ params, set }) => {
     const id = Number(params.id);

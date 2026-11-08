@@ -1,5 +1,5 @@
 import { Database, type Statement } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { LogRow, NewLogInput, NewTaskInput, TaskRow } from "./types";
 
@@ -273,6 +273,187 @@ export function listLogs(taskId: string, limit: number, before: number | null = 
 export function getJournalMode(): string {
   const row = getDatabase().query("PRAGMA journal_mode").get() as { journal_mode?: string } | null;
   return row?.journal_mode ?? "unknown";
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Retention options exposed to the UI, in days. */
+export const LOG_CLEANUP_DAYS = [10, 30, 180, 365] as const;
+
+const LOG_CLEANUP_LABELS: Record<number, string> = {
+  10: "10 天",
+  30: "30 天",
+  180: "半年",
+  365: "一年",
+};
+
+/**
+ * Rough on-disk payload estimate per row: text column bytes plus ~64 bytes of
+ * row/page overhead. Used only for the pre-cleanup preview, never for billing.
+ */
+const LOG_BYTES_EXPR = `(
+  length(coalesce(request_url, '')) +
+  length(coalesce(request_method, '')) +
+  length(coalesce(request_headers, '')) +
+  length(coalesce(request_body, '')) +
+  length(coalesce(response_headers, '')) +
+  length(coalesce(response_body, '')) +
+  length(coalesce(error, '')) + 64
+)`;
+
+export interface LogStorageUsage {
+  db_bytes: number;
+  wal_bytes: number;
+  shm_bytes: number;
+  total_bytes: number;
+}
+
+export interface LogCleanupOption {
+  days: number;
+  label: string;
+  cutoff: number;
+  count: number;
+  bytes: number;
+}
+
+export interface LogCleanupPreview {
+  generated_at: number;
+  total_count: number;
+  total_bytes: number;
+  oldest_executed_at: number | null;
+  newest_executed_at: number | null;
+  storage: LogStorageUsage;
+  options: LogCleanupOption[];
+  all: { count: number; bytes: number };
+}
+
+export interface LogCleanupOutcome {
+  deleted: number;
+  remaining: number;
+  cutoff: number | null;
+  storage_before: LogStorageUsage;
+  storage_after: LogStorageUsage;
+  reclaimed_bytes: number;
+  vacuum_error: string | null;
+}
+
+function fileSize(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+/** Actual sizes of the database and its WAL/SHM sidecar files. */
+export function getLogStorageUsage(): LogStorageUsage {
+  if (!databasePath || databasePath === ":memory:") {
+    return { db_bytes: 0, wal_bytes: 0, shm_bytes: 0, total_bytes: 0 };
+  }
+  const dbBytes = fileSize(databasePath);
+  const walBytes = fileSize(`${databasePath}-wal`);
+  const shmBytes = fileSize(`${databasePath}-shm`);
+  return {
+    db_bytes: dbBytes,
+    wal_bytes: walBytes,
+    shm_bytes: shmBytes,
+    total_bytes: dbBytes + walBytes + shmBytes,
+  };
+}
+
+interface LogCountRow {
+  count: number;
+  bytes: number;
+  oldest: number | null;
+  newest: number | null;
+}
+
+function countLogs(where = "", params: (number | string)[] = []): LogCountRow {
+  const row = getDatabase()
+    .query(
+      `SELECT count(*) AS count,
+              coalesce(sum(${LOG_BYTES_EXPR}), 0) AS bytes,
+              min(executed_at) AS oldest,
+              max(executed_at) AS newest
+       FROM logs ${where}`,
+    )
+    .get(...params) as LogCountRow | null;
+  return {
+    count: Number(row?.count ?? 0),
+    bytes: Number(row?.bytes ?? 0),
+    oldest: row?.oldest ?? null,
+    newest: row?.newest ?? null,
+  };
+}
+
+/**
+ * Read-only preview. Cutoff column is logs.executed_at (epoch ms); a row is
+ * removed when executed_at < now - days * 24h. No per-task retention.
+ */
+export function getLogCleanupPreview(now: number = Date.now()): LogCleanupPreview {
+  const totals = countLogs();
+  const options = LOG_CLEANUP_DAYS.map((days) => {
+    const cutoff = now - days * DAY_MS;
+    const row = countLogs("WHERE executed_at < ?", [cutoff]);
+    return {
+      days,
+      label: LOG_CLEANUP_LABELS[days] ?? `${days} 天`,
+      cutoff,
+      count: row.count,
+      bytes: row.bytes,
+    };
+  });
+  return {
+    generated_at: now,
+    total_count: totals.count,
+    total_bytes: totals.bytes,
+    oldest_executed_at: totals.oldest,
+    newest_executed_at: totals.newest,
+    storage: getLogStorageUsage(),
+    options,
+    all: { count: totals.count, bytes: totals.bytes },
+  };
+}
+
+/**
+ * Delete logs older than the cutoff (or all logs), then VACUUM and truncate
+ * the WAL so the file actually shrinks. Runs synchronously in the single Bun
+ * thread, so an in-flight task cannot insert a row between DELETE and VACUUM;
+ * its log lands afterwards and is not part of this cleanup.
+ */
+export function cleanupLogs(
+  input: { days: number } | { all: true },
+  now: number = Date.now(),
+): LogCleanupOutcome {
+  const db = getDatabase();
+  const cutoff = "all" in input ? null : now - input.days * DAY_MS;
+  const before = getLogStorageUsage();
+
+  const result =
+    cutoff === null
+      ? db.run("DELETE FROM logs")
+      : db.run("DELETE FROM logs WHERE executed_at < ?", [cutoff]);
+  const deleted = Number(result.changes);
+
+  let vacuumError: string | null = null;
+  try {
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    db.exec("VACUUM;");
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  } catch (error) {
+    vacuumError = error instanceof Error ? error.message : String(error);
+  }
+
+  const after = getLogStorageUsage();
+  return {
+    deleted,
+    remaining: countLogs().count,
+    cutoff,
+    storage_before: before,
+    storage_after: after,
+    reclaimed_bytes: Math.max(0, before.total_bytes - after.total_bytes),
+    vacuum_error: vacuumError,
+  };
 }
 
 export function closeDb(): void {

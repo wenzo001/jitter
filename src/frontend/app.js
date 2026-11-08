@@ -27,6 +27,31 @@ const els = {
   loadMore: document.getElementById("load-more"),
   refreshTasks: document.getElementById("refresh-tasks"),
   refreshLogs: document.getElementById("refresh-logs"),
+  openCleanup: document.getElementById("open-cleanup"),
+  cleanupDialog: document.getElementById("cleanup-dialog"),
+  cleanupClose: document.getElementById("cleanup-close"),
+  cleanupCancel: document.getElementById("cleanup-cancel"),
+  cleanupExecute: document.getElementById("cleanup-execute"),
+  cleanupLoading: document.getElementById("cleanup-loading"),
+  cleanupErrorWrap: document.getElementById("cleanup-error-wrap"),
+  cleanupError: document.getElementById("cleanup-error"),
+  cleanupRetry: document.getElementById("cleanup-retry"),
+  cleanupContent: document.getElementById("cleanup-content"),
+  cleanupRunning: document.getElementById("cleanup-running"),
+  cleanupResult: document.getElementById("cleanup-result"),
+  cleanupOptions: document.getElementById("cleanup-options"),
+  cleanupImpact: document.getElementById("cleanup-impact"),
+  cleanupRange: document.getElementById("cleanup-range"),
+  cleanupAllWarning: document.getElementById("cleanup-all-warning"),
+  cleanupConfirmWrap: document.getElementById("cleanup-confirm-wrap"),
+  cleanupConfirm: document.getElementById("cleanup-confirm"),
+  cleanupAllInputWrap: document.getElementById("cleanup-all-input-wrap"),
+  cleanupAllInput: document.getElementById("cleanup-all-input"),
+  cleanupEmpty: document.getElementById("cleanup-empty"),
+  usageDb: document.getElementById("usage-db"),
+  usageWal: document.getElementById("usage-wal"),
+  usageTotal: document.getElementById("usage-total"),
+  usageCount: document.getElementById("usage-count"),
 };
 
 const CLIENT_CONFIG_DEFAULTS = {
@@ -47,6 +72,7 @@ const state = {
   polling: false,
   statusTimer: null,
   clientConfig: { ...CLIENT_CONFIG_DEFAULTS },
+  cleanup: { preview: null, selected: null, busy: false, view: "loading" },
 };
 
 function h(tag, props = {}, ...children) {
@@ -83,6 +109,21 @@ function formatTime(timestamp) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
     date.getHours(),
   )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  const text =
+    unit === 0 ? String(Math.round(size)) : size >= 100 ? size.toFixed(0) : size.toFixed(1);
+  return `${text} ${units[unit]}`;
 }
 
 function formatWindow(task) {
@@ -611,6 +652,237 @@ async function onTaskAction(button) {
   }
 }
 
+function setCleanupView(view) {
+  state.cleanup.view = view;
+  els.cleanupLoading.hidden = view !== "loading";
+  els.cleanupErrorWrap.hidden = view !== "error";
+  els.cleanupContent.hidden = view !== "content";
+  els.cleanupRunning.hidden = view !== "running";
+  els.cleanupResult.hidden = view !== "result";
+
+  const busy = view === "running";
+  els.cleanupCancel.disabled = busy;
+  els.cleanupClose.disabled = busy;
+  els.cleanupExecute.hidden = view === "result";
+  els.cleanupCancel.textContent = view === "result" ? "关闭" : "取消";
+  els.cleanupExecute.textContent = busy ? "清理中…" : "执行清理";
+  if (view === "content") {
+    updateCleanupExecute();
+  } else {
+    els.cleanupExecute.disabled = true;
+  }
+}
+
+function showCleanupError(message) {
+  els.cleanupError.textContent = message || "清理失败";
+  setCleanupView("error");
+}
+
+function updateCleanupExecute() {
+  const preview = state.cleanup.preview;
+  const selected = state.cleanup.selected;
+  if (!preview || selected === null || selected === undefined) {
+    els.cleanupExecute.disabled = true;
+    return;
+  }
+  const count =
+    selected === "all"
+      ? preview.all.count
+      : (preview.options.find((option) => option.days === selected)?.count ?? 0);
+  const confirmed =
+    selected === "all"
+      ? els.cleanupAllInput.value.trim() === "删除全部"
+      : els.cleanupConfirm.checked;
+  els.cleanupExecute.disabled = state.cleanup.busy || count === 0 || !confirmed;
+}
+
+function updateCleanupSelection() {
+  const preview = state.cleanup.preview;
+  const selected = state.cleanup.selected;
+  const isAll = selected === "all";
+  els.cleanupAllWarning.hidden = !isAll;
+  els.cleanupConfirmWrap.hidden = isAll;
+  els.cleanupAllInputWrap.hidden = !isAll;
+
+  if (!preview || selected === null || selected === undefined) {
+    els.cleanupImpact.textContent = "请选择一个清理范围。";
+    updateCleanupExecute();
+    return;
+  }
+
+  const option = isAll
+    ? preview.all
+    : preview.options.find((entry) => entry.days === selected);
+  const count = Number(option?.count ?? 0);
+  const bytes = Number(option?.bytes ?? 0);
+  if (isAll) {
+    els.cleanupImpact.textContent = `将删除全部 ${count} 条日志（约 ${formatBytes(bytes)}），清理后日志表为空。`;
+  } else {
+    const remaining = Math.max(0, preview.total_count - count);
+    els.cleanupImpact.textContent = `将删除 ${count} 条日志（约 ${formatBytes(bytes)}），保留 ${remaining} 条较新的日志。`;
+  }
+  updateCleanupExecute();
+}
+
+function renderCleanupPreview(data) {
+  const storage = data.storage ?? {};
+  els.usageDb.textContent = formatBytes(storage.db_bytes);
+  els.usageWal.textContent = formatBytes(storage.wal_bytes);
+  els.usageTotal.textContent = formatBytes(storage.total_bytes);
+  els.usageCount.textContent = `${data.total_count} 条`;
+
+  els.cleanupRange.textContent =
+    data.oldest_executed_at && data.newest_executed_at
+      ? `日志时间范围：${formatTime(data.oldest_executed_at)} → ${formatTime(data.newest_executed_at)}。按 executed_at 判断，不保留每个任务的最近记录。`
+      : "当前没有可统计的日志时间范围。";
+
+  const options = [
+    ...data.options,
+    { days: "all", label: "全部清除", count: data.all.count, bytes: data.all.bytes, danger: true },
+  ];
+
+  const inputs = new Map();
+  const nodes = options.map((option) => {
+    const isAll = option.days === "all";
+    const count = Number(option.count) || 0;
+    const input = h("input", {
+      type: "radio",
+      name: "cleanup-option",
+      value: String(option.days),
+      disabled: count === 0,
+      onchange: () => {
+        state.cleanup.selected = isAll ? "all" : Number(option.days);
+        els.cleanupConfirm.checked = false;
+        els.cleanupAllInput.value = "";
+        updateCleanupSelection();
+      },
+    });
+    inputs.set(option.days, input);
+    return h(
+      "label",
+      { class: `cleanup-option${isAll ? " is-danger" : ""}` },
+      input,
+      h("span", { class: "cleanup-option-label" }, isAll ? option.label : `保留最近 ${option.label}`),
+      h(
+        "span",
+        { class: "cleanup-option-impact" },
+        count === 0 ? "无匹配日志" : `删除 ${count} 条 · 约 ${formatBytes(option.bytes)}`,
+      ),
+    );
+  });
+
+  const legend = h("legend", {}, "选择保留范围（按执行时间 executed_at 判断）");
+  els.cleanupOptions.replaceChildren(legend, ...nodes);
+
+  const firstAvailable = options.find((option) => option.days !== "all" && Number(option.count) > 0);
+  state.cleanup.selected = firstAvailable ? firstAvailable.days : null;
+  if (firstAvailable) {
+    const input = inputs.get(firstAvailable.days);
+    if (input) input.checked = true;
+  }
+
+  els.cleanupEmpty.hidden = data.total_count > 0;
+  updateCleanupSelection();
+}
+
+async function loadCleanupPreview() {
+  state.cleanup.preview = null;
+  state.cleanup.selected = null;
+  setCleanupView("loading");
+  try {
+    const data = await api("/api/logs/cleanup/preview");
+    if (!els.cleanupDialog.open) return;
+    state.cleanup.preview = data;
+    renderCleanupPreview(data);
+    setCleanupView("content");
+  } catch (error) {
+    if (!els.cleanupDialog.open) return;
+    showCleanupError(`统计失败：${error.message}`);
+  }
+}
+
+async function openCleanup() {
+  state.cleanup = { preview: null, selected: null, busy: false, view: "loading" };
+  els.cleanupConfirm.checked = false;
+  els.cleanupAllInput.value = "";
+  els.cleanupImpact.textContent = "";
+  els.cleanupResult.replaceChildren();
+  if (!els.cleanupDialog.open) els.cleanupDialog.showModal();
+  setCleanupView("loading");
+  await loadCleanupPreview();
+}
+
+function closeCleanup() {
+  if (els.cleanupDialog.open) els.cleanupDialog.close();
+}
+
+function renderCleanupResult(result) {
+  const before = result.storage_before ?? {};
+  const after = result.storage_after ?? {};
+  const rows = [
+    ["删除条数", `${result.deleted} 条`],
+    ["剩余条数", `${result.remaining} 条`],
+    ["释放空间", formatBytes(result.reclaimed_bytes)],
+    ["合计占用", `${formatBytes(before.total_bytes)} → ${formatBytes(after.total_bytes)}`],
+    ["数据库文件", `${formatBytes(before.db_bytes)} → ${formatBytes(after.db_bytes)}`],
+    ["WAL 文件", `${formatBytes(before.wal_bytes)} → ${formatBytes(after.wal_bytes)}`],
+  ];
+  const children = [
+    h("p", { class: "cleanup-result-title" }, `清理完成：已删除 ${result.deleted} 条日志`),
+    h(
+      "dl",
+      { class: "cleanup-usage" },
+      ...rows.map(([label, value]) => h("div", {}, h("dt", {}, label), h("dd", {}, value))),
+    ),
+  ];
+  if (result.vacuum_error) {
+    children.push(
+      h(
+        "div",
+        { class: "cleanup-warning" },
+        `空间回收未完成：${result.vacuum_error}。日志行已删除，但数据库文件可能没有缩小。`,
+      ),
+    );
+  }
+  els.cleanupResult.replaceChildren(...children);
+}
+
+async function executeCleanup() {
+  const preview = state.cleanup.preview;
+  const selected = state.cleanup.selected;
+  if (!preview || selected === null || selected === undefined) return;
+
+  state.cleanup.busy = true;
+  setCleanupView("running");
+  try {
+    const body =
+      selected === "all"
+        ? { all: true, confirm: "DELETE_ALL" }
+        : { days: selected, confirm: true };
+    const result = await api("/api/logs/cleanup", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    state.cleanup.busy = false;
+    renderCleanupResult(result);
+    setCleanupView("result");
+
+    state.logs.clear();
+    state.oldestId = null;
+    state.hasMore = false;
+    await loadTasks({ silent: true });
+    if (state.selectedTaskId) {
+      await loadLogs({ reset: true });
+    } else {
+      renderLogs();
+    }
+    setStatus(`已删除 ${result.deleted} 条日志，释放 ${formatBytes(result.reclaimed_bytes)}`);
+  } catch (error) {
+    state.cleanup.busy = false;
+    showCleanupError(`清理失败：${error.message}`);
+  }
+}
+
 function bindEvents() {
   document.querySelectorAll('input[name="mode"]').forEach((radio) => {
     radio.addEventListener("change", syncMode);
@@ -624,6 +896,20 @@ function bindEvents() {
   });
   els.refreshLogs.addEventListener("click", () => loadLogs({ reset: true }));
   els.loadMore.addEventListener("click", () => loadLogs({ older: true }));
+
+  els.openCleanup.addEventListener("click", openCleanup);
+  els.cleanupClose.addEventListener("click", closeCleanup);
+  els.cleanupCancel.addEventListener("click", closeCleanup);
+  els.cleanupExecute.addEventListener("click", executeCleanup);
+  els.cleanupRetry.addEventListener("click", () => loadCleanupPreview());
+  els.cleanupConfirm.addEventListener("change", updateCleanupExecute);
+  els.cleanupAllInput.addEventListener("input", updateCleanupExecute);
+  els.cleanupDialog.addEventListener("cancel", (event) => {
+    if (state.cleanup.busy) event.preventDefault();
+  });
+  els.cleanupDialog.addEventListener("close", () => {
+    state.cleanup.busy = false;
+  });
 
   els.taskList.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-action]");

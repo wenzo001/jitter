@@ -245,6 +245,83 @@
       .status-warn { color: var(--warn); background: var(--warn-soft); }
       .status-muted { color: var(--muted); background: #eef0f3; }
       .muted { color: var(--muted); }
+      .cleanup-dialog {
+        width: min(600px, calc(100vw - 32px));
+        padding: 0;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel);
+        color: var(--text);
+        box-shadow: 0 24px 64px rgba(16, 24, 40, 0.24);
+      }
+      .cleanup-dialog::backdrop { background: rgba(16, 24, 40, 0.36); }
+      .cleanup-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 13px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .cleanup-head h2 { margin: 0; font-size: 15px; font-weight: 650; }
+      .cleanup-body {
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        max-height: min(68vh, 620px);
+        overflow: auto;
+      }
+      .cleanup-state { padding: 28px 12px; text-align: center; color: var(--muted); font-size: 13px; }
+      .cleanup-usage { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .cleanup-usage > div { border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; background: #fafbfc; }
+      .cleanup-usage dt { color: var(--muted); font-size: 12px; }
+      .cleanup-usage dd { margin: 2px 0 0; font-weight: 650; font-variant-numeric: tabular-nums; }
+      .cleanup-options { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+      .cleanup-options legend { padding: 0 0 6px; font-size: 12.5px; font-weight: 650; color: #38445a; }
+      .cleanup-option {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 9px 11px;
+        cursor: pointer;
+        transition: border-color 0.12s ease, box-shadow 0.12s ease;
+      }
+      .cleanup-option:hover { border-color: #c9d2df; }
+      .cleanup-option:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+      .cleanup-option.is-danger:has(input:checked) { border-color: #f3c8c2; box-shadow: 0 0 0 3px var(--err-soft); }
+      .cleanup-option:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
+      .cleanup-option input { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
+      .cleanup-option-label { font-weight: 650; }
+      .cleanup-option-impact {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 12px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .cleanup-option.is-danger .cleanup-option-label { color: var(--err); }
+      .cleanup-warning {
+        border: 1px solid #f3c8c2;
+        background: var(--err-soft);
+        color: var(--err);
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-size: 12.5px;
+      }
+      .cleanup-result { display: flex; flex-direction: column; gap: 10px; }
+      .cleanup-result-title { margin: 0; font-weight: 650; color: var(--ok); }
+      .cleanup-result .cleanup-warning { margin: 0; }
+      .cleanup-foot {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        padding: 12px 16px;
+        border-top: 1px solid var(--border);
+        background: #fafbfc;
+      }
       @media (max-width: 900px) {
         .layout { grid-template-columns: 1fr; padding: 14px 12px 40px; }
         .topbar { padding: 12px 14px; }
@@ -364,6 +441,7 @@
             <h2 id="logs-title">执行记录</h2>
             <div class="row">
               <span id="logs-task-meta" class="muted" style="font-size: 12px"></span>
+              <button id="open-cleanup" class="btn btn-quiet" type="button">清理日志</button>
               <button id="refresh-logs" class="btn btn-quiet" type="button">刷新</button>
             </div>
           </div>
@@ -375,6 +453,67 @@
         </div>
       </section>
     </main>
+
+    <dialog id="cleanup-dialog" class="cleanup-dialog" aria-labelledby="cleanup-title">
+      <div class="cleanup-head">
+        <h2 id="cleanup-title">清理日志</h2>
+        <button id="cleanup-close" class="btn btn-quiet" type="button">关闭</button>
+      </div>
+
+      <div class="cleanup-body">
+        <div id="cleanup-loading" class="cleanup-state">正在统计日志占用…</div>
+
+        <div id="cleanup-error-wrap" hidden>
+          <div id="cleanup-error" class="form-error" role="alert"></div>
+          <div class="row" style="margin-top: 10px">
+            <button id="cleanup-retry" class="btn" type="button">重试</button>
+          </div>
+        </div>
+
+        <div id="cleanup-content" hidden>
+          <dl class="cleanup-usage">
+            <div><dt>数据库文件</dt><dd id="usage-db">—</dd></div>
+            <div><dt>WAL 文件</dt><dd id="usage-wal">—</dd></div>
+            <div><dt>合计占用</dt><dd id="usage-total">—</dd></div>
+            <div><dt>日志条数</dt><dd id="usage-count">—</dd></div>
+          </dl>
+          <p class="hint" id="cleanup-range"></p>
+
+          <fieldset class="cleanup-options" id="cleanup-options">
+            <legend>选择保留范围（按执行时间 executed_at 判断）</legend>
+          </fieldset>
+
+          <p class="hint" id="cleanup-impact"></p>
+
+          <div id="cleanup-all-warning" class="cleanup-warning" hidden>
+            全部清除会删除所有任务的执行记录、通知记录与错过记录，且不可恢复。
+          </div>
+
+          <label class="check" id="cleanup-confirm-wrap">
+            <input id="cleanup-confirm" type="checkbox" />
+            我确认删除上述日志，操作不可恢复
+          </label>
+
+          <div class="field" id="cleanup-all-input-wrap" hidden>
+            <label for="cleanup-all-input">请输入「删除全部」以确认</label>
+            <input id="cleanup-all-input" type="text" autocomplete="off" placeholder="删除全部" />
+          </div>
+
+          <div id="cleanup-empty" class="empty" hidden>当前没有日志，无需清理。</div>
+        </div>
+
+        <div id="cleanup-running" class="cleanup-state" hidden>
+          正在删除并回收磁盘空间，VACUUM 期间接口会短暂无响应，请勿关闭页面…
+        </div>
+
+        <div id="cleanup-result" class="cleanup-result" hidden></div>
+      </div>
+
+      <div class="cleanup-foot">
+        <button id="cleanup-cancel" class="btn" type="button">取消</button>
+        <button id="cleanup-execute" class="btn btn-danger" type="button" disabled>执行清理</button>
+      </div>
+    </dialog>
 
     <script type="module" src="./app.js"></script>
   </body>
