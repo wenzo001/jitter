@@ -292,6 +292,24 @@ describe("api", () => {
     const badDays = await post("/api/logs/cleanup", { days: 7, confirm: true });
     expect(badDays.status).toBe(400);
 
+    const stringDays = await post("/api/logs/cleanup", { days: "30", confirm: true });
+    expect(stringDays.status).toBe(400);
+
+    const arrayDays = await post("/api/logs/cleanup", { days: [30], confirm: true });
+    expect(arrayDays.status).toBe(400);
+
+    const negativeDays = await post("/api/logs/cleanup", { days: -30, confirm: true });
+    expect(negativeDays.status).toBe(400);
+
+    const stringConfirm = await post("/api/logs/cleanup", { days: 30, confirm: "true" });
+    expect(stringConfirm.status).toBe(400);
+
+    const stringAll = await post("/api/logs/cleanup", { all: "true", confirm: "DELETE_ALL" });
+    expect(stringAll.status).toBe(400);
+
+    const missingDays = await post("/api/logs/cleanup", { confirm: true });
+    expect(missingDays.status).toBe(400);
+
     const both = await post("/api/logs/cleanup", { days: 30, all: true, confirm: "DELETE_ALL" });
     expect(both.status).toBe(400);
 

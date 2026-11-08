@@ -245,10 +245,10 @@ export const app = new Elysia()
       return cleanupLogs({ all: true });
     }
 
-    const days = Number(input.days);
-    if (!(LOG_CLEANUP_DAYS as readonly number[]).includes(days)) {
+    const days = input.days;
+    if (typeof days !== "number" || !(LOG_CLEANUP_DAYS as readonly number[]).includes(days)) {
       set.status = 400;
-      return { error: `days 必须是 ${LOG_CLEANUP_DAYS.join(" / ")} 之一` };
+      return { error: `days 必须是 ${LOG_CLEANUP_DAYS.join(" / ")} 之一（数字类型）` };
     }
     if (input.confirm !== true && input.confirm !== "DELETE") {
       set.status = 400;

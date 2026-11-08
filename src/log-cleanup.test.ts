@@ -114,4 +114,20 @@ describe("log cleanup", () => {
       outcome.storage_before.total_bytes,
     );
   });
+
+  test("tier cleanup never touches future-dated rows", () => {
+    addLogs(1, Date.now() + 30 * DAY_MS + 60_000);
+
+    const preview = getLogCleanupPreview();
+    expect(preview.total_count).toBe(1);
+    expect(preview.options.every((option) => option.count === 0)).toBe(true);
+
+    const outcome = cleanupLogs({ days: 365 });
+    expect(outcome.deleted).toBe(0);
+    expect(outcome.remaining).toBe(1);
+
+    const cleared = cleanupLogs({ all: true });
+    expect(cleared.deleted).toBe(1);
+    expect(cleared.remaining).toBe(0);
+  });
 });
