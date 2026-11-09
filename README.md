@@ -36,7 +36,7 @@ bun run src/index.ts
 其他命令：
 
 ```bash
-bun test            # 136 项核心逻辑 / curl / 配置 / 调度 / API / 数据库 / 执行器测试
+bun test            # 147 项核心逻辑 / curl / 配置 / 调度 / API / 数据库 / 执行器测试
 bun run typecheck   # tsc --noEmit
 ```
 
@@ -102,6 +102,18 @@ bun run typecheck   # tsc --noEmit
 
 正在进行的请求被中断后，会在日志中记录 `aborted=1`、`error="请求已中断"`。停止后的任务不再被调度；恢复会重新规划并注册 cron。
 
+### 暂停
+
+任务卡片上的「暂停」可以暂时跳过 1–15 天的调度：
+
+- 暂停天数可选 1–15 天；起算日选择 **明天（默认）** 或 **今天**。
+- 暂停截止到起算日 + N 天的本地 00:00，例如「从今天开始 3 天」将在第 3 天的 00:00 恢复。
+- 恢复后的第一次执行仍遵循窗口：落在恢复日窗口内随机执行一次；若恢复时刻已在窗口内，则在剩余窗口内随机。
+- 暂停是 `active` 任务的属性，写入 `paused_until`；`status` 仍为 `active`。
+- 暂停中的任务不会触发 timer，但每日 cron 继续存在，用于恢复日之后的兜底规划。
+- 取消暂停（`resume`）会清除 `paused_until` 并立即重新规划；停止任务也会清除暂停标记。
+- 暂停不中断已经发出的请求，该请求会正常完成并写日志，之后再按暂停规则规划下一次。
+
 ## 成功通知
 
 新建任务时可额外配置“成功通知”：
@@ -155,7 +167,8 @@ bun run typecheck   # tsc --noEmit
 | GET | `/api/tasks` | 任务列表 |
 | POST | `/api/tasks` | 新建任务（curl 或结构化字段） |
 | POST | `/api/tasks/:id/stop` | 停止（幂等） |
-| POST | `/api/tasks/:id/resume` | 恢复 |
+| POST | `/api/tasks/:id/resume` | 恢复；对暂停中的任务表示「取消暂停」并立即恢复调度 |
+| POST | `/api/tasks/:id/pause` | 暂停 1–15 天（body：`{ days, starts_today? }`，`starts_today` 默认 `false`） |
 | GET | `/api/tasks/:id/logs?limit=50&before=<id>` | 倒序游标分页（默认/上限来自配置），返回 `{ logs, has_more }` |
 | GET | `/api/logs/:id` | 单条日志详情 |
 | GET | `/api/config` | 前端可用的配置（分页、默认窗口、轮询、响应体上限） |
@@ -183,7 +196,7 @@ bun run typecheck   # tsc --noEmit
 
 在需求给定结构上增加了通知与日志分类字段：
 
-- `tasks`：`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`、`request_options` / `notify_options`（JSON：`insecure`、`redirect`、`timeoutMs`、`proxy`、`proxyAuthorization`）
+- `tasks`：`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`、`request_options` / `notify_options`（JSON：`insecure`、`redirect`、`timeoutMs`、`proxy`、`proxyAuthorization`），以及暂停截止时间 `paused_until`
 - `logs`：`kind`（`task` / `notify` / `missed`）、`parent_log_id`、`matched`
 
 `data/` 整个目录已被 `.gitignore` 忽略。日志无自动清理，长期保留。
