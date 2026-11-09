@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   window_end       TEXT NOT NULL,
   status           TEXT NOT NULL DEFAULT 'active',
   next_run_at      INTEGER,
+  paused_until     INTEGER,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,
   notify_enabled   INTEGER NOT NULL DEFAULT 0,
@@ -65,6 +66,7 @@ interface Statements {
   getTask: AnyStatement;
   listTasks: AnyStatement;
   updateNextRun: AnyStatement;
+  updatePause: AnyStatement;
   updateStatus: AnyStatement;
   insertLog: AnyStatement;
   getLog: AnyStatement;
@@ -92,6 +94,7 @@ function ensureColumn(
 function migrate(db: Database): void {
   ensureColumn(db, "tasks", "request_options", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, "tasks", "notify_options", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, "tasks", "paused_until", "INTEGER");
 }
 
 export function resolveDbPath(path?: string): string {
@@ -126,14 +129,17 @@ export function initDb(path?: string): Database {
     insertTask: db.query(
       `INSERT INTO tasks (
         id, name, curl_command, request_url, request_method, request_headers, request_body, request_options,
-        window_start, window_end, status, next_run_at, created_at, updated_at,
+        window_start, window_end, status, next_run_at, paused_until, created_at, updated_at,
         notify_enabled, notify_curl_command, notify_url, notify_method, notify_headers, notify_body, notify_options,
         expect_status, expect_body
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ),
     getTask: db.query("SELECT * FROM tasks WHERE id = ?"),
     listTasks: db.query("SELECT * FROM tasks ORDER BY created_at DESC"),
     updateNextRun: db.query("UPDATE tasks SET next_run_at = ?, updated_at = ? WHERE id = ?"),
+    updatePause: db.query(
+      "UPDATE tasks SET paused_until = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
+    ),
     updateStatus: db.query("UPDATE tasks SET status = ?, next_run_at = ?, updated_at = ? WHERE id = ?"),
     insertLog: db.query(
       `INSERT INTO logs (
@@ -196,6 +202,7 @@ export function createTask(
     input.window_end,
     "active",
     null,
+    null,
     now,
     now,
     notifyEnabled,
@@ -225,6 +232,16 @@ export function listTasks(): TaskRow[] {
 
 export function updateTaskNextRun(id: string, nextRunAt: number | null, now: number = Date.now()): void {
   getStatements().updateNextRun.run(nextRunAt, now, id);
+}
+
+/** Set or clear the pause deadline together with the replanned next run. */
+export function setTaskPause(
+  id: string,
+  pausedUntil: number | null,
+  nextRunAt: number | null,
+  now: number = Date.now(),
+): void {
+  getStatements().updatePause.run(pausedUntil, nextRunAt, now, id);
 }
 
 export function updateTaskStatus(

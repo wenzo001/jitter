@@ -11,7 +11,7 @@ import {
   listTasks,
 } from "./db";
 import { CurlParseError, normalizeStructured, parseCurlCommand } from "./curl-parser";
-import { resumeTask, scheduleNewTask, stopTask } from "./scheduler";
+import { PauseError, pauseTask, resumeTask, scheduleNewTask, stopTask } from "./scheduler";
 import { WindowError, validateWindow } from "./window";
 import type { NewTaskInput, RequestSpec, TaskRow } from "./types";
 
@@ -142,7 +142,11 @@ function createAndSchedule(input: NewTaskInput): TaskRow {
 
 export const app = new Elysia()
   .onError(({ code, error, set }) => {
-    if (error instanceof CurlParseError || error instanceof WindowError) {
+    if (
+      error instanceof CurlParseError ||
+      error instanceof WindowError ||
+      error instanceof PauseError
+    ) {
       set.status = 400;
       return { error: error.message };
     }
@@ -185,6 +189,21 @@ export const app = new Elysia()
   })
   .post("/api/tasks/:id/resume", ({ params, set }) => {
     const task = resumeTask(params.id);
+    if (!task) {
+      set.status = 404;
+      return { error: "任务不存在" };
+    }
+    return { task };
+  })
+  .post("/api/tasks/:id/pause", ({ params, body, set }) => {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      set.status = 400;
+      return { error: "请求体必须是 JSON 对象" };
+    }
+    const input = body as Record<string, unknown>;
+    const days = typeof input.days === "number" ? input.days : Number.NaN;
+    const startsToday = toBoolean(input.starts_today);
+    const task = pauseTask(params.id, { days, startsToday });
     if (!task) {
       set.status = 404;
       return { error: "任务不存在" };

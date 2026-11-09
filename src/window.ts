@@ -25,6 +25,9 @@ export interface RecoveryPlan {
   reason: "future" | "in-window" | "missed" | "next-window";
 }
 
+/** Longest pause exposed to the UI, in days. */
+export const MAX_PAUSE_DAYS = 15;
+
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 function parseHHMM(value: string, label: string): number {
@@ -59,6 +62,18 @@ export function validateWindow(start: string, end: string): string | null {
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
+}
+
+/**
+ * First moment a paused task may run again. Counting starts at local midnight
+ * of today or tomorrow, and a pause of N days ends at midnight N days after
+ * that start day. Example: 3 days starting today ends at 00:00 on day +3.
+ */
+export function pauseResumeAt(now: number, days: number, startsToday: boolean): number {
+  const date = new Date(now);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + (startsToday ? 0 : 1) + days);
+  return date.getTime();
 }
 
 function localAt(now: number, minutes: number): number {

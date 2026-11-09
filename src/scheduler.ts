@@ -1,8 +1,17 @@
-import { getTask, insertLog, listTasks, updateTaskNextRun, updateTaskStatus } from "./db";
+import {
+  getTask,
+  insertLog,
+  listTasks,
+  setTaskPause,
+  updateTaskNextRun,
+  updateTaskStatus,
+} from "./db";
 import { executeTaskRun } from "./executor";
 import {
+  MAX_PAUSE_DAYS,
   classifyTimerFire,
   parseWindow,
+  pauseResumeAt,
   planNewTask,
   planNextWindowAfter,
   planRecovery,
@@ -10,6 +19,18 @@ import {
   type WindowSpec,
 } from "./window";
 import type { TaskRow } from "./types";
+
+export class PauseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PauseError";
+  }
+}
+
+export interface PauseOptions {
+  days: number;
+  startsToday?: boolean;
+}
 
 export interface SchedulerRuntime {
   generation: number;
@@ -42,6 +63,11 @@ function ensureRuntime(taskId: string): SchedulerRuntime {
     runtimes.set(taskId, runtime);
   }
   return runtime;
+}
+
+/** The pause deadline while it is still in the future, otherwise null. */
+function activePause(task: TaskRow, now: number): number | null {
+  return task.paused_until !== null && task.paused_until > now ? task.paused_until : null;
 }
 
 export function cronExpressionFor(spec: WindowSpec): string {
@@ -127,6 +153,7 @@ function onCron(taskId: string): void {
 
   const spec = parseWindow(task.window_start, task.window_end);
   const now = Date.now();
+  if (activePause(task, now) !== null) return;
   const current = windowInstanceAt(now, spec);
   const pending = task.next_run_at;
 
@@ -173,6 +200,16 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
     return;
   }
 
+  const pausedUntil = activePause(task, now);
+  if (pausedUntil !== null) {
+    try {
+      replan(taskId, planNewTask(pausedUntil, spec));
+    } catch (error) {
+      console.error(`[jitter] 任务 ${taskId} 规划暂停后的执行失败`, error);
+    }
+    return;
+  }
+
   if (classifyTimerFire(now, target, spec) === "miss") {
     recordMiss(task, target);
     try {
@@ -193,17 +230,21 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
     console.error(`[jitter] 任务 ${taskId} 执行异常`, error);
   } finally {
     const current = runtimes.get(taskId);
-    if (current !== runtime || runtime.generation !== generation) {
-      return;
-    }
+    if (current !== runtime) return;
     runtime.running = false;
     runtime.abortController = null;
+    if (runtime.generation !== generation) return;
 
     const latest = getTask(taskId);
     if (latest && latest.status === "active") {
       try {
         const spec = parseWindow(latest.window_start, latest.window_end);
-        replan(taskId, planNextWindowAfter(Date.now(), spec));
+        const now = Date.now();
+        const pausedUntil = activePause(latest, now);
+        replan(
+          taskId,
+          pausedUntil !== null ? planNewTask(pausedUntil, spec) : planNextWindowAfter(now, spec),
+        );
       } catch (error) {
         console.error(`[jitter] 任务 ${taskId} 规划下一次执行失败`, error);
       }
@@ -216,11 +257,54 @@ export function scheduleNewTask(task: TaskRow): TaskRow {
   const spec = parseWindow(task.window_start, task.window_end);
   const runtime = ensureRuntime(task.id);
   runtime.generation += 1;
-  const target = planNewTask(Date.now(), spec);
-  updateTaskNextRun(task.id, target);
+  const now = Date.now();
+  const pausedUntil = activePause(task, now);
+  const target = planNewTask(pausedUntil ?? now, spec);
+  if (task.paused_until !== null) {
+    setTaskPause(task.id, pausedUntil, target, now);
+  } else {
+    updateTaskNextRun(task.id, target);
+  }
   registerCron(task, spec);
   armTimer(task.id, target, runtime.generation);
   return getTask(task.id) ?? task;
+}
+
+/**
+ * Pause an active task for 1–15 days. Counting starts at today or tomorrow
+ * (tomorrow by default), and the first run is planned inside the window of the
+ * resume day. A request already in flight is allowed to finish.
+ */
+export function pauseTask(
+  taskId: string,
+  options: PauseOptions,
+  now: number = Date.now(),
+): TaskRow | null {
+  const task = getTask(taskId);
+  if (!task) return null;
+  if (task.status !== "active") {
+    throw new PauseError("任务已停止，无法暂停；请先恢复任务");
+  }
+  if (!Number.isInteger(options.days) || options.days < 1 || options.days > MAX_PAUSE_DAYS) {
+    throw new PauseError(`暂停天数必须是 1–${MAX_PAUSE_DAYS} 的整数`);
+  }
+
+  const spec = parseWindow(task.window_start, task.window_end);
+  const resumeAt = pauseResumeAt(now, options.days, options.startsToday === true);
+  const target = planNewTask(resumeAt, spec);
+
+  const runtime = ensureRuntime(taskId);
+  runtime.generation += 1;
+  if (runtime.timeout !== null) {
+    clearTimeout(runtime.timeout);
+  }
+  runtime.timeout = null;
+  runtime.timeoutTarget = null;
+
+  setTaskPause(taskId, resumeAt, target, now);
+  registerCron(task, spec);
+  armTimer(taskId, target, runtime.generation);
+  return getTask(taskId);
 }
 
 export function startScheduler(): StartSummary {
@@ -231,14 +315,31 @@ export function startScheduler(): StartSummary {
   for (const task of active) {
     try {
       const spec = parseWindow(task.window_start, task.window_end);
-      const plan = planRecovery(Date.now(), task.next_run_at, spec);
+      const now = Date.now();
+      const runtime = ensureRuntime(task.id);
+      runtime.generation += 1;
+
+      const pausedUntil = activePause(task, now);
+      if (pausedUntil !== null) {
+        const target = planNewTask(pausedUntil, spec);
+        updateTaskNextRun(task.id, target);
+        registerCron(task, spec);
+        armTimer(task.id, target, runtime.generation);
+        recovered += 1;
+        continue;
+      }
+
+      const plan = planRecovery(now, task.next_run_at, spec);
       if (plan.missed) {
         recordMiss(task, plan.missed.plannedAt);
         missed += 1;
       }
-      const runtime = ensureRuntime(task.id);
-      runtime.generation += 1;
-      updateTaskNextRun(task.id, plan.target);
+      if (task.paused_until !== null) {
+        // The pause expired while the process was down; clear it on the way.
+        setTaskPause(task.id, null, plan.target, now);
+      } else {
+        updateTaskNextRun(task.id, plan.target);
+      }
       registerCron(task, spec);
       armTimer(task.id, plan.target, runtime.generation);
       recovered += 1;
@@ -270,13 +371,34 @@ export function stopTask(taskId: string): TaskRow | null {
   }
 
   updateTaskStatus(taskId, "stopped", null);
+  if (task.paused_until !== null) {
+    setTaskPause(taskId, null, null);
+  }
   return getTask(taskId);
 }
 
 export function resumeTask(taskId: string): TaskRow | null {
   const task = getTask(taskId);
   if (!task) return null;
+
   if (task.status === "active") {
+    const now = Date.now();
+    if (activePause(task, now) !== null) {
+      // Cancelling a pause resumes scheduling immediately, even mid-window.
+      const spec = parseWindow(task.window_start, task.window_end);
+      const runtime = ensureRuntime(taskId);
+      runtime.generation += 1;
+      if (runtime.timeout !== null) {
+        clearTimeout(runtime.timeout);
+      }
+      runtime.timeout = null;
+      runtime.timeoutTarget = null;
+      const target = planNewTask(now, spec);
+      setTaskPause(taskId, null, target, now);
+      registerCron(task, spec);
+      armTimer(taskId, target, runtime.generation);
+      return getTask(taskId);
+    }
     // Repair an active task that lost its plan (e.g. crash between insert and schedule).
     return task.next_run_at === null ? scheduleNewTask(task) : task;
   }
@@ -293,6 +415,9 @@ export function resumeTask(taskId: string): TaskRow | null {
   }
 
   updateTaskStatus(taskId, "active", null);
+  if (task.paused_until !== null) {
+    setTaskPause(taskId, null, null);
+  }
   const active = getTask(taskId);
   return active ? scheduleNewTask(active) : null;
 }
