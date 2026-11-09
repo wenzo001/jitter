@@ -52,7 +52,17 @@ const els = {
   usageWal: document.getElementById("usage-wal"),
   usageTotal: document.getElementById("usage-total"),
   usageCount: document.getElementById("usage-count"),
+  pauseDialog: document.getElementById("pause-dialog"),
+  pauseClose: document.getElementById("pause-close"),
+  pauseCancel: document.getElementById("pause-cancel"),
+  pauseConfirm: document.getElementById("pause-confirm"),
+  pauseTask: document.getElementById("pause-task"),
+  pauseDays: document.getElementById("pause-days"),
+  pauseSummary: document.getElementById("pause-summary"),
+  pauseError: document.getElementById("pause-error"),
 };
+
+const MAX_PAUSE_DAYS = 15;
 
 const CLIENT_CONFIG_DEFAULTS = {
   logsPageSize: 50,
@@ -73,6 +83,7 @@ const state = {
   statusTimer: null,
   clientConfig: { ...CLIENT_CONFIG_DEFAULTS },
   cleanup: { preview: null, selected: null, busy: false, view: "loading" },
+  pause: { taskId: null, busy: false },
 };
 
 function h(tag, props = {}, ...children) {
@@ -109,6 +120,20 @@ function formatTime(timestamp) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
     date.getHours(),
   )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatDay(timestamp) {
+  const date = new Date(timestamp);
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** A deadline in the past means the pause is already over. */
+function isPaused(task, now = Date.now()) {
+  return (
+    task.paused_until !== null &&
+    task.paused_until !== undefined &&
+    task.paused_until > now
+  );
 }
 
 function formatBytes(bytes) {
@@ -247,6 +272,7 @@ function formatTimeout(ms) {
 function renderTaskCard(task) {
   const cross = task.window_end < task.window_start;
   const active = task.status === "active";
+  const paused = active && isPaused(task);
   const conditions = [];
   if (task.expect_status !== null) conditions.push(`状态=${task.expect_status}`);
   if (task.expect_body !== null) conditions.push("响应体相等");
@@ -281,9 +307,15 @@ function renderTaskCard(task) {
           h(
             "span",
             {
-              class: `badge ${active ? "badge-active" : "badge-stopped"}`,
+              class: `badge ${
+                active ? (paused ? "badge-paused" : "badge-active") : "badge-stopped"
+              }`,
             },
-            active ? "运行中" : "已停止",
+            active
+              ? paused
+                ? `暂停至 ${formatDay(task.paused_until)}`
+                : "运行中"
+              : "已停止",
           ),
           cross ? h("span", { class: "badge badge-cross" }, "跨午夜") : null,
           requestOptions.insecure
@@ -303,6 +335,11 @@ function renderTaskCard(task) {
         "div",
         { class: "task-actions" },
         active
+          ? paused
+            ? h("button", { class: "btn", type: "button", dataset: { action: "resume" } }, "取消暂停")
+            : h("button", { class: "btn", type: "button", dataset: { action: "pause" } }, "暂停")
+          : null,
+        active
           ? h("button", { class: "btn btn-danger", type: "button", dataset: { action: "stop" } }, "停止")
           : h("button", { class: "btn", type: "button", dataset: { action: "resume" } }, "恢复"),
       ),
@@ -311,7 +348,11 @@ function renderTaskCard(task) {
     h(
       "div",
       { class: "task-extra" },
-      active ? `下次执行：${formatTime(task.next_run_at)}` : `已停止，历史日志保留`,
+      active
+        ? paused
+          ? `已暂停至 ${formatTime(task.paused_until)}，期间不会执行；恢复后下次执行：${formatTime(task.next_run_at)}`
+          : `下次执行：${formatTime(task.next_run_at)}`
+        : `已停止，历史日志保留`,
     ),
     h(
       "div",
@@ -431,7 +472,9 @@ async function loadTasks({ silent = false } = {}) {
   try {
     const data = await api("/api/tasks");
     const tasks = data?.tasks ?? [];
-    const signature = JSON.stringify(tasks);
+    const now = Date.now();
+    const pauseState = tasks.map((task) => (isPaused(task, now) ? task.paused_until : 0));
+    const signature = `${JSON.stringify(tasks)}#${pauseState.join(",")}`;
     state.tasks = tasks;
 
     let selectionChanged = false;
@@ -636,10 +679,14 @@ async function onTaskAction(button) {
   if (!card) return;
   const taskId = card.dataset.id;
   const action = button.dataset.action;
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  const wasPaused = task ? isPaused(task) : false;
   button.disabled = true;
   try {
     await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: "POST" });
-    setStatus(action === "stop" ? "任务已停止" : "任务已恢复");
+    setStatus(
+      action === "stop" ? "任务已停止" : wasPaused ? "已取消暂停，任务恢复调度" : "任务已恢复",
+    );
     await loadTasks({ silent: true });
     if (state.selectedTaskId === taskId) {
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -883,6 +930,90 @@ async function executeCleanup() {
   }
 }
 
+function initPauseDays() {
+  const options = [];
+  for (let days = 1; days <= MAX_PAUSE_DAYS; days += 1) {
+    options.push(h("option", { value: String(days) }, `${days} 天`));
+  }
+  els.pauseDays.replaceChildren(...options);
+  els.pauseDays.value = "1";
+}
+
+function pauseStartsToday() {
+  return document.querySelector('input[name="pause-start"]:checked')?.value === "today";
+}
+
+function pauseResumeAt(days, startsToday) {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + (startsToday ? 0 : 1) + days);
+  return date.getTime();
+}
+
+function updatePauseSummary() {
+  const task = state.tasks.find((entry) => entry.id === state.pause.taskId);
+  if (!task) {
+    els.pauseSummary.textContent = "";
+    return;
+  }
+  const days = Number(els.pauseDays.value);
+  const startsToday = pauseStartsToday();
+  const resumeAt = pauseResumeAt(days, startsToday);
+  els.pauseSummary.textContent =
+    `将从 ${formatTime(resumeAt)} 起恢复调度（${startsToday ? "今天" : "明天"}起算 ${days} 天）。` +
+    `暂停期间不会执行，恢复当天在窗口 ${task.window_start}–${task.window_end} 内随机执行一次。`;
+}
+
+function openPauseDialog(taskId) {
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  if (!task) return;
+  state.pause.taskId = taskId;
+  state.pause.busy = false;
+  els.pauseTask.textContent = `任务「${task.name}」`;
+  els.pauseError.hidden = true;
+  els.pauseError.textContent = "";
+  els.pauseDays.value = "1";
+  const tomorrow = document.querySelector('input[name="pause-start"][value="tomorrow"]');
+  if (tomorrow) tomorrow.checked = true;
+  els.pauseConfirm.disabled = false;
+  els.pauseConfirm.textContent = "暂停任务";
+  updatePauseSummary();
+  if (!els.pauseDialog.open) els.pauseDialog.showModal();
+}
+
+function closePauseDialog() {
+  if (state.pause.busy) return;
+  if (els.pauseDialog.open) els.pauseDialog.close();
+}
+
+async function executePause() {
+  const task = state.tasks.find((entry) => entry.id === state.pause.taskId);
+  if (!task || state.pause.busy) return;
+  const days = Number(els.pauseDays.value);
+  const startsToday = pauseStartsToday();
+  state.pause.busy = true;
+  els.pauseConfirm.disabled = true;
+  els.pauseConfirm.textContent = "暂停中…";
+  els.pauseError.hidden = true;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(task.id)}/pause`, {
+      method: "POST",
+      body: JSON.stringify({ days, starts_today: startsToday }),
+    });
+    state.pause.busy = false;
+    if (els.pauseDialog.open) els.pauseDialog.close();
+    setStatus(`任务「${task.name}」已暂停 ${days} 天`);
+    await loadTasks({ silent: true });
+    if (state.selectedTaskId === task.id) await loadLogs({ reset: false });
+  } catch (error) {
+    state.pause.busy = false;
+    els.pauseConfirm.disabled = false;
+    els.pauseConfirm.textContent = "暂停任务";
+    els.pauseError.textContent = error.message;
+    els.pauseError.hidden = false;
+  }
+}
+
 function bindEvents() {
   document.querySelectorAll('input[name="mode"]').forEach((radio) => {
     radio.addEventListener("change", syncMode);
@@ -911,15 +1042,34 @@ function bindEvents() {
     state.cleanup.busy = false;
   });
 
+  document.querySelectorAll('input[name="pause-start"]').forEach((radio) => {
+    radio.addEventListener("change", updatePauseSummary);
+  });
+  els.pauseDays.addEventListener("change", updatePauseSummary);
+  els.pauseConfirm.addEventListener("click", executePause);
+  els.pauseClose.addEventListener("click", closePauseDialog);
+  els.pauseCancel.addEventListener("click", closePauseDialog);
+  els.pauseDialog.addEventListener("cancel", (event) => {
+    if (state.pause.busy) event.preventDefault();
+  });
+  els.pauseDialog.addEventListener("close", () => {
+    state.pause.busy = false;
+  });
+
   els.taskList.addEventListener("click", (event) => {
+    const card = event.target.closest(".task-card");
+    if (!card) return;
     const button = event.target.closest("button[data-action]");
     if (button) {
       event.stopPropagation();
-      onTaskAction(button);
+      if (button.dataset.action === "pause") {
+        openPauseDialog(card.dataset.id);
+      } else {
+        onTaskAction(button);
+      }
       return;
     }
-    const card = event.target.closest(".task-card");
-    if (card) selectTask(card.dataset.id);
+    selectTask(card.dataset.id);
   });
 
   els.taskList.addEventListener("keydown", (event) => {
@@ -955,6 +1105,7 @@ function startPolling() {
 async function init() {
   syncMode();
   syncNotify();
+  initPauseDays();
   bindEvents();
   setStatus("加载中…");
   await loadClientConfig();

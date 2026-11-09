@@ -158,6 +158,7 @@
       .badge-cross { color: var(--warn); background: var(--warn-soft); }
       .badge-insecure { color: var(--err); background: var(--err-soft); }
       .badge-timeout { color: var(--warn); background: var(--warn-soft); }
+      .badge-paused { color: var(--warn); background: var(--warn-soft); }
       .badge-task { color: var(--accent); background: var(--accent-soft); }
       .badge-notify { color: #6b3fa0; background: #f1eafb; }
       .badge-missed { color: var(--warn); background: var(--warn-soft); }
@@ -255,6 +256,7 @@
         box-shadow: 0 24px 64px rgba(16, 24, 40, 0.24);
       }
       .cleanup-dialog::backdrop { background: rgba(16, 24, 40, 0.36); }
+      .pause-dialog { width: min(460px, calc(100vw - 32px)); }
       .cleanup-head {
         display: flex;
         align-items: center;
@@ -512,6 +514,38 @@
       <div class="cleanup-foot">
         <button id="cleanup-cancel" class="btn" type="button">取消</button>
         <button id="cleanup-execute" class="btn btn-danger" type="button" disabled>执行清理</button>
+      </div>
+    </dialog>
+
+    <dialog id="pause-dialog" class="cleanup-dialog pause-dialog" aria-labelledby="pause-title">
+      <div class="cleanup-head">
+        <h2 id="pause-title">暂停任务</h2>
+        <button id="pause-close" class="btn btn-quiet" type="button">关闭</button>
+      </div>
+
+      <div class="cleanup-body">
+        <p id="pause-task" class="hint"></p>
+
+        <div class="field">
+          <label for="pause-days">暂停天数</label>
+          <select id="pause-days"></select>
+        </div>
+
+        <div class="field">
+          <span class="field-label">从哪天开始计算</span>
+          <div class="segmented" role="group" aria-label="暂停开始日">
+            <label><input type="radio" name="pause-start" value="tomorrow" checked />明天开始（默认）</label>
+            <label><input type="radio" name="pause-start" value="today" />今天开始</label>
+          </div>
+        </div>
+
+        <p id="pause-summary" class="hint"></p>
+        <div id="pause-error" class="form-error" role="alert" hidden></div>
+      </div>
+
+      <div class="cleanup-foot">
+        <button id="pause-cancel" class="btn" type="button">取消</button>
+        <button id="pause-confirm" class="btn btn-primary" type="button">暂停任务</button>
       </div>
     </dialog>
 
