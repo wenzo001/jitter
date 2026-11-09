@@ -216,6 +216,46 @@ describe("api", () => {
     expect(missing.status).toBe(404);
   });
 
+  test("pauses a task for 1-15 days and clears the pause on resume", async () => {
+    const created = await post("/api/tasks", payload());
+    const id = created.body.task.id;
+
+    const paused = await post(`/api/tasks/${id}/pause`, { days: 3, starts_today: true });
+    expect(paused.status).toBe(200);
+    expect(paused.body.task.status).toBe("active");
+    expect(paused.body.task.paused_until).toBeGreaterThan(Date.now());
+    expect(paused.body.task.next_run_at).toBeGreaterThanOrEqual(paused.body.task.paused_until);
+
+    const defaulted = await post(`/api/tasks/${id}/pause`, { days: 1 });
+    expect(defaulted.status).toBe(200);
+    const defaultStart = new Date();
+    defaultStart.setHours(0, 0, 0, 0);
+    defaultStart.setDate(defaultStart.getDate() + 1 + 1);
+    expect(defaulted.body.task.paused_until).toBe(defaultStart.getTime());
+
+    for (const days of [0, 16, 1.5, "3"]) {
+      const invalid = await post(`/api/tasks/${id}/pause`, { days });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.error).toContain("暂停天数");
+    }
+
+    const resumed = await post(`/api/tasks/${id}/resume`, {});
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.task.paused_until).toBeNull();
+    expect(resumed.body.task.next_run_at).toBeGreaterThan(Date.now());
+
+    await post(`/api/tasks/${id}/stop`, {});
+    const stopPause = await post(`/api/tasks/${id}/pause`, { days: 2 });
+    expect(stopPause.status).toBe(400);
+    expect(stopPause.body.error).toContain("已停止");
+
+    const missing = await post("/api/tasks/missing/pause", { days: 2 });
+    expect(missing.status).toBe(404);
+
+    const badBody = await post(`/api/tasks/${id}/pause`, null);
+    expect(badBody.status).toBe(400);
+  });
+
   test("paginates logs, defaults an empty limit, and returns log detail", async () => {
     const created = await post("/api/tasks", payload());
     const taskId = created.body.task.id;

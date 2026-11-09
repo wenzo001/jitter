@@ -7,7 +7,13 @@ import {
   listLogs,
   updateTaskNextRun,
 } from "./db";
-import { startScheduler, stopAll, stopTask } from "./scheduler";
+import {
+  pauseTask,
+  resumeTask,
+  startScheduler,
+  stopAll,
+  stopTask,
+} from "./scheduler";
 import type { LogRow, NewTaskInput, TaskRow } from "./types";
 
 let target: ReturnType<typeof Bun.serve>;
@@ -170,5 +176,31 @@ describe("scheduler runtime", () => {
 
     const latest = await waitForFuturePlan(task.id);
     expect(latest.status).toBe("active");
+  });
+
+  test("a paused task does not fire until the pause ends", async () => {
+    const task = makeTask("paused run", urlOf("/ok"), currentWindow());
+    const paused = pauseTask(task.id, { days: 1, startsToday: true });
+    expect(paused?.paused_until).not.toBeNull();
+    expect(paused?.paused_until).toBeGreaterThan(Date.now());
+
+    startScheduler();
+    await Bun.sleep(300);
+    expect(okHits).toBe(0);
+
+    const latest = getTask(task.id)!;
+    expect(latest.next_run_at).not.toBeNull();
+    expect(latest.next_run_at!).toBeGreaterThanOrEqual(latest.paused_until!);
+  });
+
+  test("cancelling a pause clears the deadline and resumes scheduling", () => {
+    const task = makeTask("cancel pause", urlOf("/ok"), currentWindow());
+    pauseTask(task.id, { days: 2 });
+    const paused = getTask(task.id)!;
+    expect(paused.paused_until).not.toBeNull();
+
+    const resumed = resumeTask(task.id);
+    expect(resumed?.paused_until).toBeNull();
+    expect(resumed?.next_run_at).not.toBeNull();
   });
 });

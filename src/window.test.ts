@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_PAUSE_DAYS,
   WindowError,
   classifyTimerFire,
   nextWindowStartAfter,
   parseWindow,
+  pauseResumeAt,
   planNewTask,
   planNextWindowAfter,
   planRecovery,
@@ -189,6 +191,19 @@ describe("classifyTimerFire", () => {
   test("treats a cross-midnight timer from a closed instance as missed", () => {
     expect(classifyTimerFire(at(7, 0, 20), at(7, 0, 5), cross)).toBe("miss");
     expect(classifyTimerFire(at(6, 12, 0), at(6, 23, 55), cross)).toBe("miss");
+  });
+});
+
+describe("pauseResumeAt", () => {
+  test("counts from today when startsToday is true", () => {
+    expect(pauseResumeAt(at(9, 15, 30), 1, true)).toBe(at(10, 0, 0));
+    expect(pauseResumeAt(at(9, 15, 30), 3, true)).toBe(at(12, 0, 0));
+    expect(pauseResumeAt(at(9, 0, 0), MAX_PAUSE_DAYS, true)).toBe(at(24, 0, 0));
+  });
+
+  test("defaults to counting from tomorrow", () => {
+    expect(pauseResumeAt(at(9, 15, 30), 1, false)).toBe(at(11, 0, 0));
+    expect(pauseResumeAt(at(9, 15, 30), 3, false)).toBe(at(13, 0, 0));
   });
 });
 

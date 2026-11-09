@@ -14,6 +14,7 @@ import {
   listLogs,
   listTasks,
   resolveDbPath,
+  setTaskPause,
   updateTaskNextRun,
   updateTaskStatus,
 } from "./db";
@@ -144,6 +145,21 @@ describe("db", () => {
     expect(getTask(task.id)?.status).toBe("active");
   });
 
+  test("stores and clears a pause deadline", () => {
+    const task = createTask(sampleTask({ name: "pause lifecycle" }));
+    expect(task.paused_until).toBeNull();
+
+    const resumeAt = Date.now() + 2 * 24 * 60 * 60 * 1000;
+    const planned = resumeAt + 30_000;
+    setTaskPause(task.id, resumeAt, planned, Date.now());
+    const paused = getTask(task.id)!;
+    expect(paused.paused_until).toBe(resumeAt);
+    expect(paused.next_run_at).toBe(planned);
+
+    setTaskPause(task.id, null, planned, Date.now());
+    expect(getTask(task.id)?.paused_until).toBeNull();
+  });
+
   test("paginates logs newest first and isolates tasks", () => {
     const task = createTask(sampleTask({ name: "paginate" }));
     const other = createTask(sampleTask({ name: "other" }));
@@ -272,8 +288,10 @@ describe("db", () => {
     );
     expect(columns).toContain("request_options");
     expect(columns).toContain("notify_options");
+    expect(columns).toContain("paused_until");
     expect(getTask(existing.id)?.request_options).toBe("{}");
     expect(getTask(existing.id)?.notify_options).toBe("{}");
+    expect(getTask(existing.id)?.paused_until).toBeNull();
 
     const task = createTask(sampleTask({ name: "after migration" }));
     expect(task.request_options).toBe("{}");
