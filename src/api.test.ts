@@ -220,18 +220,25 @@ describe("api", () => {
     const created = await post("/api/tasks", payload());
     const id = created.body.task.id;
 
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
     const paused = await post(`/api/tasks/${id}/pause`, { days: 3, starts_today: true });
     expect(paused.status).toBe(200);
     expect(paused.body.task.status).toBe("active");
+    expect(paused.body.task.paused_from).toBe(todayStart.getTime());
     expect(paused.body.task.paused_until).toBeGreaterThan(Date.now());
     expect(paused.body.task.next_run_at).toBeGreaterThanOrEqual(paused.body.task.paused_until);
 
     const defaulted = await post(`/api/tasks/${id}/pause`, { days: 1 });
     expect(defaulted.status).toBe(200);
-    const defaultStart = new Date();
-    defaultStart.setHours(0, 0, 0, 0);
+    const tomorrowStart = new Date(todayStart.getTime());
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+    const defaultStart = new Date(todayStart.getTime());
     defaultStart.setDate(defaultStart.getDate() + 1 + 1);
+    expect(defaulted.body.task.paused_from).toBe(tomorrowStart.getTime());
     expect(defaulted.body.task.paused_until).toBe(defaultStart.getTime());
+    expect(defaulted.body.task.next_run_at).toBeGreaterThan(Date.now());
 
     for (const days of [0, 16, 1.5, "3"]) {
       const invalid = await post(`/api/tasks/${id}/pause`, { days });

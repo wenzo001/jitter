@@ -36,7 +36,7 @@ bun run src/index.ts
 其他命令：
 
 ```bash
-bun test            # 147 项核心逻辑 / curl / 配置 / 调度 / API / 数据库 / 执行器测试
+bun test            # 169 项核心逻辑 / curl / 配置 / 调度 / API / 数据库 / 执行器测试
 bun run typecheck   # tsc --noEmit
 ```
 
@@ -102,17 +102,23 @@ bun run typecheck   # tsc --noEmit
 
 正在进行的请求被中断后，会在日志中记录 `aborted=1`、`error="请求已中断"`。停止后的任务不再被调度；恢复会重新规划并注册 cron。
 
-### 暂停
+### 暂停（按完整自然日，与当前是几点无关）
 
-任务卡片上的「暂停」可以暂时跳过 1–15 天的调度：
+任务卡片上的「暂停」按**完整自然日**跳过调度，天数 1–15 天，起算日选 **明天（默认）** 或 **今天**。数据库里存的是半开区间 `paused_from` / `paused_until`（本地时区的日 00:00）：
 
-- 暂停天数可选 1–15 天；起算日选择 **明天（默认）** 或 **今天**。
-- 暂停截止到起算日 + N 天的本地 00:00，例如「从今天开始 3 天」将在第 3 天的 00:00 恢复。
-- 恢复后的第一次执行仍遵循窗口：落在恢复日窗口内随机执行一次；若恢复时刻已在窗口内，则在剩余窗口内随机。
-- 暂停是 `active` 任务的属性，写入 `paused_until`；`status` 仍为 `active`。
-- 暂停中的任务不会触发 timer，但每日 cron 继续存在，用于恢复日之后的兜底规划。
-- 取消暂停（`resume`）会清除 `paused_until` 并立即重新规划；停止任务也会清除暂停标记。
-- 暂停不中断已经发出的请求，该请求会正常完成并写日志，之后再按暂停规则规划下一次。
+| 选择 | 区间 | 被暂停的自然日 | 恢复 |
+|---|---|---|---|
+| 今天开始 N 天 | `[今天 00:00, 今天+N 天 00:00)` | 今天 … 第 N-1 天（共 N 天） | 第 N 天 00:00 |
+| 明天开始 N 天 | `[明天 00:00, 明天+N 天 00:00)` | 明天 … 第 N 天（共 N 天） | 第 N+1 天 00:00 |
+
+- **今天开始**：今天算一个完整暂停日，与现在是中午还是 23:00 无关；今天剩余的所有窗口（包括尚未到达的下午/晚上窗口）都不再触发。周一中午选「今天开始 2 天」→ 暂停周一、周二，周三 00:00 恢复。
+- **明天开始**：今天完全不受影响，今天已排好的计划不会被取消，下午/晚上的窗口照常执行；从明天 00:00 起才跳过 N 个自然日。周一中午选「明天开始 2 天」→ 今天照常，暂停周二、周三，周四 00:00 恢复。
+- 判定依据是**窗口实例的归属日**（见「窗口归属」），既不是「设置暂停的那一刻」，也不是「请求实际发出的时刻」。跨午夜窗口 `23:50–00:10` 属于开始日 D：即使随机点落在 D+1 的 00:05，仍按 D 判断，所以「从明天开始」不会误伤今天窗口的尾巴，「从今天开始」也不会让它漏跑。
+- 恢复后的第一次执行落在**恢复日自己的窗口实例**内随机一次，而不是恢复日 00:00 所在的那个窗口实例（否则跨午夜窗口会落回暂停日的尾巴）。
+- 暂停是 `active` 任务的属性，`status` 仍为 `active`；每日 cron 继续存在，用于暂停期间的兜底规划和恢复日重新规划。设置暂停时，起算日之前已经排好的计划保持不变；启动恢复同样保留它。
+- 取消暂停（`resume`）清除区间并立即重新规划；停止任务也会清除暂停标记；暂停过期后由 cron / timer / 启动恢复自动清理。
+- 暂停不中断已经发出的请求，该请求正常完成并写日志，之后再按暂停规则规划下一次。
+- 旧版本只存 `paused_until`，无法还原起算日（也正是「从明天开始却跳过今天下午」这个 bug 的根源）。`updated_at` 会被每次 cron / timer 重规划改写，不能用来推断设置时刻。升级时改用确定性规则：已过期的直接清除；仍有效的保留原恢复时刻，把 `paused_from` 设为**升级当天 00:00**，并清掉旧代码错误推到恢复日的 `next_run_at`，由调度器按新区间重新排期。仍有效的暂停必然覆盖升级当天，因此未来的暂停日与原意完全一致；唯一偏差是「设置当天就升级且选了从明天开始」会多暂停当天，启动日志会提示重新设置一次暂停。
 
 ## 成功通知
 
@@ -129,6 +135,15 @@ bun run typecheck   # tsc --noEmit
 - 响应用于比较和存储的正文上限由 `logBodyLimitBytes` 决定（默认 100 KiB）；超过上限会追加 `[truncated]`，且此时“期望响应体”视为不匹配。
 
 错过窗口只写 `kind='missed'` 日志并在启动时打印提示，不补跑，也不会触发成功通知（通知只用于成功命中）。
+
+## 日志清理
+
+页面上的「日志清理」先拉预检（`GET /api/logs/cleanup/preview`），展示数据库/WAL/SHM 占用、日志总数与时间范围，以及 10 天 / 30 天 / 半年 / 一年四档各自会删除的条数与估算字节，另有「全部清除」。
+
+- 档位按 `logs.executed_at < now - N 天` 删除，不按任务区分、不保留每个任务的最近一条。
+- 普通档位需勾选确认（`confirm: true`）；全部清除需输入「删除全部」并且请求带 `confirm: "DELETE_ALL"`。
+- 删除后执行 `VACUUM` 与 WAL checkpoint，让文件真正缩小。`VACUUM` 在 Bun 单线程内同步执行，期间 HTTP 请求会排队，前端的 15 秒超时提示即针对此场景。
+- 清理是全局操作，不可撤销；预检只是快照，执行前可重新统计。
 
 ## curl 解析
 
@@ -173,6 +188,8 @@ bun run typecheck   # tsc --noEmit
 | GET | `/api/logs/:id` | 单条日志详情 |
 | GET | `/api/config` | 前端可用的配置（分页、默认窗口、轮询、响应体上限） |
 | GET | `/api/health` | 健康检查 |
+| GET | `/api/logs/cleanup/preview` | 日志清理预检：总条数、占用、各档位可删条数与估算字节 |
+| POST | `/api/logs/cleanup` | 执行清理；`{ days, confirm: true }` 或 `{ all: true, confirm: "DELETE_ALL" }` |
 
 创建请求示例（curl 文本）：
 
@@ -196,7 +213,7 @@ bun run typecheck   # tsc --noEmit
 
 在需求给定结构上增加了通知与日志分类字段：
 
-- `tasks`：`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`、`request_options` / `notify_options`（JSON：`insecure`、`redirect`、`timeoutMs`、`proxy`、`proxyAuthorization`），以及暂停截止时间 `paused_until`
+- `tasks`：`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`、`request_options` / `notify_options`（JSON：`insecure`、`redirect`、`timeoutMs`、`proxy`、`proxyAuthorization`），以及暂停区间 `paused_from` / `paused_until`（本地日 00:00 的毫秒时间戳，半开区间 `[from, until)`）
 - `logs`：`kind`（`task` / `notify` / `missed`）、`parent_log_id`、`matched`
 
 `data/` 整个目录已被 `.gitignore` 忽略。日志无自动清理，长期保留。

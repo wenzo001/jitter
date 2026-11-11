@@ -159,6 +159,7 @@
       .badge-insecure { color: var(--err); background: var(--err-soft); }
       .badge-timeout { color: var(--warn); background: var(--warn-soft); }
       .badge-paused { color: var(--warn); background: var(--warn-soft); }
+      .badge-pending { color: var(--accent); background: var(--accent-soft); }
       .badge-task { color: var(--accent); background: var(--accent-soft); }
       .badge-notify { color: #6b3fa0; background: #f1eafb; }
       .badge-missed { color: var(--warn); background: var(--warn-soft); }
@@ -537,6 +538,7 @@
             <label><input type="radio" name="pause-start" value="tomorrow" checked />明天开始（默认）</label>
             <label><input type="radio" name="pause-start" value="today" />今天开始</label>
           </div>
+          <p class="hint">今天开始 = 今天剩余时间也不执行；明天开始 = 今天照常执行，明天 00:00 起才暂停。两种都按完整自然日计数，与当前是几点无关。</p>
         </div>
 
         <p id="pause-summary" class="hint"></p>

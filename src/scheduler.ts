@@ -11,11 +11,14 @@ import {
   MAX_PAUSE_DAYS,
   classifyTimerFire,
   parseWindow,
-  pauseResumeAt,
+  pauseInterval,
+  planAfterRunWithPause,
   planNewTask,
-  planNextWindowAfter,
+  planPaused,
   planRecovery,
+  planWithPause,
   windowInstanceAt,
+  type PauseInterval,
   type WindowSpec,
 } from "./window";
 import type { TaskRow } from "./types";
@@ -65,9 +68,57 @@ function ensureRuntime(taskId: string): SchedulerRuntime {
   return runtime;
 }
 
-/** The pause deadline while it is still in the future, otherwise null. */
-function activePause(task: TaskRow, now: number): number | null {
-  return task.paused_until !== null && task.paused_until > now ? task.paused_until : null;
+/**
+ * The pause interval while it still matters, otherwise null.
+ *
+ * `from` may be in the FUTURE (a pause configured "starting tomorrow"): the
+ * interval is still live, it just does not cover today's windows — `planPaused`
+ * decides that per window day. Judging `paused_until > now` alone was the old
+ * bug: configuring a pause at noon immediately swallowed that afternoon's run.
+ */
+function currentPause(task: TaskRow, now: number): PauseInterval | null {
+  if (task.paused_until === null || task.paused_until <= now) return null;
+  if (task.paused_from === null || task.paused_until <= task.paused_from) return null;
+  return { from: task.paused_from, until: task.paused_until };
+}
+
+/** Return the live interval and clear stale pause columns once it has expired. */
+function livePause(task: TaskRow, now: number): PauseInterval | null {
+  const pause = currentPause(task, now);
+  if (pause === null && task.paused_until !== null) {
+    setTaskPause(task.id, null, task.next_run_at, now);
+  }
+  return pause;
+}
+
+/**
+ * Pick the next run for a paused task. An existing plan is reused ONLY when it
+ * belongs to the same window instance a fresh plan would choose. That keeps
+ * "start tomorrow" from re-randomising today's afternoon moment, while also
+ * preventing a shorter pause from inheriting a far-future plan left over by a
+ * previous longer pause (which would silently skip the resume day).
+ */
+function preferredPlan(
+  task: TaskRow,
+  now: number,
+  spec: WindowSpec,
+  pause: PauseInterval | null,
+): number {
+  const candidate = planWithPause(now, spec, pause);
+  const pending = task.next_run_at;
+  if (pending === null || pending <= now || planPaused(pending, spec, pause)) {
+    return candidate;
+  }
+  const pendingWindow = windowInstanceAt(pending, spec);
+  const candidateWindow = windowInstanceAt(candidate, spec);
+  if (
+    pendingWindow === null ||
+    candidateWindow === null ||
+    pendingWindow.start !== candidateWindow.start
+  ) {
+    return candidate;
+  }
+  return pending;
 }
 
 export function cronExpressionFor(spec: WindowSpec): string {
@@ -153,18 +204,20 @@ function onCron(taskId: string): void {
 
   const spec = parseWindow(task.window_start, task.window_end);
   const now = Date.now();
-  if (activePause(task, now) !== null) return;
+  const pause = livePause(task, now);
   const current = windowInstanceAt(now, spec);
   const pending = task.next_run_at;
 
   // A restart may already have planned a moment inside the window that just
-  // opened. Keep that plan instead of re-randomizing it.
+  // opened. Keep it instead of re-randomizing, but only if that window's day
+  // is not paused.
   if (
     pending !== null &&
     pending > now &&
     current !== null &&
     pending >= current.start &&
-    pending < current.end
+    pending < current.end &&
+    !planPaused(pending, spec, pause)
   ) {
     if (runtime.timeout === null || runtime.timeoutTarget !== pending) {
       armTimer(taskId, pending, runtime.generation);
@@ -172,7 +225,7 @@ function onCron(taskId: string): void {
     return;
   }
 
-  replan(taskId, planNewTask(now, spec));
+  replan(taskId, planWithPause(now, spec, pause));
 }
 
 async function onTimer(taskId: string, generation: number, target: number): Promise<void> {
@@ -200,10 +253,10 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
     return;
   }
 
-  const pausedUntil = activePause(task, now);
-  if (pausedUntil !== null) {
+  const pause = livePause(task, now);
+  if (planPaused(target, spec, pause)) {
     try {
-      replan(taskId, planNewTask(pausedUntil, spec));
+      replan(taskId, planWithPause(now, spec, pause));
     } catch (error) {
       console.error(`[jitter] 任务 ${taskId} 规划暂停后的执行失败`, error);
     }
@@ -213,7 +266,7 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
   if (classifyTimerFire(now, target, spec) === "miss") {
     recordMiss(task, target);
     try {
-      replan(taskId, planNewTask(now, spec));
+      replan(taskId, planWithPause(now, spec, pause));
     } catch (error) {
       console.error(`[jitter] 任务 ${taskId} 规划下一次执行失败`, error);
     }
@@ -238,13 +291,10 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
     const latest = getTask(taskId);
     if (latest && latest.status === "active") {
       try {
-        const spec = parseWindow(latest.window_start, latest.window_end);
+        const latestSpec = parseWindow(latest.window_start, latest.window_end);
         const now = Date.now();
-        const pausedUntil = activePause(latest, now);
-        replan(
-          taskId,
-          pausedUntil !== null ? planNewTask(pausedUntil, spec) : planNextWindowAfter(now, spec),
-        );
+        const pause = livePause(latest, now);
+        replan(taskId, planAfterRunWithPause(now, latestSpec, pause));
       } catch (error) {
         console.error(`[jitter] 任务 ${taskId} 规划下一次执行失败`, error);
       }
@@ -258,10 +308,12 @@ export function scheduleNewTask(task: TaskRow): TaskRow {
   const runtime = ensureRuntime(task.id);
   runtime.generation += 1;
   const now = Date.now();
-  const pausedUntil = activePause(task, now);
-  const target = planNewTask(pausedUntil ?? now, spec);
-  if (task.paused_until !== null) {
-    setTaskPause(task.id, pausedUntil, target, now);
+  const pause = livePause(task, now);
+  const target = planWithPause(now, spec, pause);
+  if (pause !== null) {
+    setTaskPause(task.id, pause, target, now);
+  } else if (task.paused_until !== null) {
+    setTaskPause(task.id, null, target, now);
   } else {
     updateTaskNextRun(task.id, target);
   }
@@ -271,9 +323,11 @@ export function scheduleNewTask(task: TaskRow): TaskRow {
 }
 
 /**
- * Pause an active task for 1–15 days. Counting starts at today or tomorrow
- * (tomorrow by default), and the first run is planned inside the window of the
- * resume day. A request already in flight is allowed to finish.
+ * Pause an active task for 1–15 WHOLE CALENDAR DAYS starting today or tomorrow
+ * (tomorrow by default). A plan whose window day is outside the interval is
+ * kept, so "start tomorrow" configured at noon still runs this afternoon.
+ * The first run after the pause lands in the resume day's own window.
+ * A request already in flight is allowed to finish.
  */
 export function pauseTask(
   taskId: string,
@@ -290,8 +344,11 @@ export function pauseTask(
   }
 
   const spec = parseWindow(task.window_start, task.window_end);
-  const resumeAt = pauseResumeAt(now, options.days, options.startsToday === true);
-  const target = planNewTask(resumeAt, spec);
+  const pause = pauseInterval(now, options.days, options.startsToday === true);
+
+  // Keep today's already-randomised plan when the pause starts tomorrow, but
+  // never keep a plan that belongs to a different (e.g. far-future) window.
+  const target = preferredPlan(task, now, spec, pause);
 
   const runtime = ensureRuntime(taskId);
   runtime.generation += 1;
@@ -301,7 +358,7 @@ export function pauseTask(
   runtime.timeout = null;
   runtime.timeoutTarget = null;
 
-  setTaskPause(taskId, resumeAt, target, now);
+  setTaskPause(taskId, pause, target, now);
   registerCron(task, spec);
   armTimer(taskId, target, runtime.generation);
   return getTask(taskId);
@@ -319,9 +376,12 @@ export function startScheduler(): StartSummary {
       const runtime = ensureRuntime(task.id);
       runtime.generation += 1;
 
-      const pausedUntil = activePause(task, now);
-      if (pausedUntil !== null) {
-        const target = planNewTask(pausedUntil, spec);
+      const pause = livePause(task, now);
+      if (pause !== null) {
+        // "Start tomorrow" must survive a restart without losing today's
+        // afternoon run, but a stale far-future plan must not outlive a
+        // shortened pause.
+        const target = preferredPlan(task, now, spec, pause);
         updateTaskNextRun(task.id, target);
         registerCron(task, spec);
         armTimer(task.id, target, runtime.generation);
@@ -335,7 +395,7 @@ export function startScheduler(): StartSummary {
         missed += 1;
       }
       if (task.paused_until !== null) {
-        // The pause expired while the process was down; clear it on the way.
+        // The pause expired (or predates paused_from); clear it on the way.
         setTaskPause(task.id, null, plan.target, now);
       } else {
         updateTaskNextRun(task.id, plan.target);
@@ -383,7 +443,8 @@ export function resumeTask(taskId: string): TaskRow | null {
 
   if (task.status === "active") {
     const now = Date.now();
-    if (activePause(task, now) !== null) {
+    const pause = livePause(task, now);
+    if (pause !== null || task.paused_until !== null) {
       // Cancelling a pause resumes scheduling immediately, even mid-window.
       const spec = parseWindow(task.window_start, task.window_end);
       const runtime = ensureRuntime(taskId);

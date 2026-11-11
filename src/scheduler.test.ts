@@ -178,6 +178,75 @@ describe("scheduler runtime", () => {
     expect(latest.status).toBe("active");
   });
 
+  test("regression: pausing 'from tomorrow' at noon keeps today's afternoon run", async () => {
+    const task = makeTask("afternoon run", urlOf("/ok"), currentWindow());
+    const planned = Date.now() + 400;
+    updateTaskNextRun(task.id, planned);
+
+    const paused = pauseTask(task.id, { days: 1, startsToday: false });
+    expect(paused?.paused_from).not.toBeNull();
+    expect(paused?.paused_from).toBeGreaterThan(Date.now());
+    expect(paused?.paused_until).toBeGreaterThan(Date.now());
+    expect(paused?.next_run_at).toBe(planned);
+
+    // A restart must not discard the plan either (this used to push it to the
+    // resume day and silently skip today's window).
+    startScheduler();
+    expect(getTask(task.id)?.next_run_at).toBe(planned);
+
+    const log = await waitForLog(task.id, (entry) => entry.kind === "task");
+    expect(log.response_status).toBe(200);
+    expect(okHits).toBe(1);
+  });
+
+  test("after today's run, the next plan skips the paused days", async () => {
+    const task = makeTask("replan after run", urlOf("/ok"), currentWindow());
+    updateTaskNextRun(task.id, Date.now() + 400);
+    const paused = pauseTask(task.id, { days: 1, startsToday: false });
+
+    startScheduler();
+    await waitForLog(task.id, (entry) => entry.kind === "task");
+    const latest = await waitForFuturePlan(task.id);
+    expect(latest.next_run_at!).toBeGreaterThanOrEqual(paused!.paused_until!);
+  });
+
+  test("pausing 'from today' cancels the whole remaining day and resumes after N days", async () => {
+    const task = makeTask("skip today", urlOf("/ok"), currentWindow());
+    updateTaskNextRun(task.id, Date.now() + 400);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const resume = new Date(today.getTime());
+    resume.setDate(resume.getDate() + 2);
+
+    const paused = pauseTask(task.id, { days: 2, startsToday: true });
+    expect(paused?.paused_from).toBe(today.getTime());
+    expect(paused?.paused_until).toBe(resume.getTime());
+    expect(paused?.next_run_at).toBeGreaterThanOrEqual(resume.getTime());
+
+    startScheduler();
+    await Bun.sleep(800);
+    expect(okHits).toBe(0);
+    expect(getTask(task.id)?.next_run_at).toBeGreaterThanOrEqual(resume.getTime());
+  });
+
+  test("shortening a pause replaces the far-future plan left by a longer one", () => {
+    const task = makeTask("re-pause", urlOf("/ok"), currentWindow());
+
+    const long = pauseTask(task.id, { days: 15, startsToday: true });
+    const farPlan = long!.next_run_at!;
+    expect(farPlan).toBeGreaterThan(Date.now() + 10 * 86_400_000);
+
+    const shorter = pauseTask(task.id, { days: 1, startsToday: true });
+    expect(shorter!.paused_until).toBeLessThan(farPlan);
+    expect(shorter!.next_run_at).toBeGreaterThanOrEqual(shorter!.paused_until!);
+    expect(shorter!.next_run_at).toBeLessThan(farPlan);
+
+    // A restart must honour the shortened interval as well.
+    startScheduler();
+    expect(getTask(task.id)?.next_run_at).toBeLessThan(farPlan);
+  });
+
   test("a paused task does not fire until the pause ends", async () => {
     const task = makeTask("paused run", urlOf("/ok"), currentWindow());
     const paused = pauseTask(task.id, { days: 1, startsToday: true });

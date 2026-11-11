@@ -124,16 +124,33 @@ function formatTime(timestamp) {
 
 function formatDay(timestamp) {
   const date = new Date(timestamp);
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const monthDay = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  // A pause can cross New Year (up to 15 days), so include the year when needed.
+  return date.getFullYear() === new Date().getFullYear()
+    ? monthDay
+    : `${date.getFullYear()}-${monthDay}`;
 }
 
-/** A deadline in the past means the pause is already over. */
-function isPaused(task, now = Date.now()) {
-  return (
-    task.paused_until !== null &&
-    task.paused_until !== undefined &&
-    task.paused_until > now
-  );
+/**
+ * A live pause is [paused_from, paused_until). `started: false` means the
+ * interval begins in the future ("starts tomorrow"), so TODAY still runs.
+ * A deadline in the past means the pause is already over.
+ */
+function pauseStateOf(task, now = Date.now()) {
+  const until = task.paused_until;
+  if (until === null || until === undefined || until <= now) return null;
+  // A legacy row may lack paused_from: treat it as already started so the card
+  // never reports an absurd day count.
+  const from = task.paused_from ?? now;
+  return { from, until, started: from <= now };
+}
+
+function calendarDays(from, until) {
+  const a = new Date(from);
+  a.setHours(0, 0, 0, 0);
+  const b = new Date(until);
+  b.setHours(0, 0, 0, 0);
+  return Math.max(1, Math.round((b.getTime() - a.getTime()) / 86400000));
 }
 
 function formatBytes(bytes) {
@@ -187,7 +204,20 @@ async function api(path, options = {}) {
   if (init.body !== undefined) {
     init.headers = { "Content-Type": "application/json", ...(init.headers ?? {}) };
   }
-  const response = await fetch(path, init);
+  // A synchronous VACUUM during log cleanup can block the single Bun thread;
+  // without a timeout the polling loop would hang forever on that request.
+  if (!init.signal) init.signal = AbortSignal.timeout(15_000);
+  let response;
+  try {
+    response = await fetch(path, init);
+  } catch (error) {
+    const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
+    throw new Error(
+      timedOut
+        ? "请求超时：服务可能正忙（例如日志清理），请稍后重试"
+        : "无法连接 Jitter 服务，请确认服务仍在运行",
+    );
+  }
   let data = null;
   try {
     data = await response.json();
@@ -272,7 +302,7 @@ function formatTimeout(ms) {
 function renderTaskCard(task) {
   const cross = task.window_end < task.window_start;
   const active = task.status === "active";
-  const paused = active && isPaused(task);
+  const pause = active ? pauseStateOf(task) : null;
   const conditions = [];
   if (task.expect_status !== null) conditions.push(`状态=${task.expect_status}`);
   if (task.expect_body !== null) conditions.push("响应体相等");
@@ -308,12 +338,20 @@ function renderTaskCard(task) {
             "span",
             {
               class: `badge ${
-                active ? (paused ? "badge-paused" : "badge-active") : "badge-stopped"
+                active
+                  ? pause
+                    ? pause.started
+                      ? "badge-paused"
+                      : "badge-pending"
+                    : "badge-active"
+                  : "badge-stopped"
               }`,
             },
             active
-              ? paused
-                ? `暂停至 ${formatDay(task.paused_until)}`
+              ? pause
+                ? pause.started
+                  ? `暂停至 ${formatDay(pause.until)}`
+                  : `${formatDay(pause.from)} 起暂停`
                 : "运行中"
               : "已停止",
           ),
@@ -335,8 +373,19 @@ function renderTaskCard(task) {
         "div",
         { class: "task-actions" },
         active
-          ? paused
-            ? h("button", { class: "btn", type: "button", dataset: { action: "resume" } }, "取消暂停")
+          ? pause
+            ? [
+                h(
+                  "button",
+                  { class: "btn", type: "button", dataset: { action: "pause" } },
+                  "调整暂停",
+                ),
+                h(
+                  "button",
+                  { class: "btn", type: "button", dataset: { action: "resume" } },
+                  "取消暂停",
+                ),
+              ]
             : h("button", { class: "btn", type: "button", dataset: { action: "pause" } }, "暂停")
           : null,
         active
@@ -349,8 +398,10 @@ function renderTaskCard(task) {
       "div",
       { class: "task-extra" },
       active
-        ? paused
-          ? `已暂停至 ${formatTime(task.paused_until)}，期间不会执行；恢复后下次执行：${formatTime(task.next_run_at)}`
+        ? pause
+          ? pause.started
+            ? `已暂停 ${calendarDays(pause.from, pause.until)} 个自然日（${formatDay(pause.from)} 起），${formatTime(pause.until)} 恢复；恢复后下次执行：${formatTime(task.next_run_at)}`
+            : `今天剩余时间照常执行（下次 ${formatTime(task.next_run_at)}）；${formatDay(pause.from)} 00:00 起暂停 ${calendarDays(pause.from, pause.until)} 个自然日，${formatTime(pause.until)} 恢复`
           : `下次执行：${formatTime(task.next_run_at)}`
         : `已停止，历史日志保留`,
     ),
@@ -427,7 +478,7 @@ function renderLog(log) {
     card.append(h("div", { class: "log-error" }, log.error));
   }
 
-  const details = h("details");
+  const details = h("details", { dataset: { logId: log.id } });
   details.append(h("summary", {}, "请求 / 响应详情"));
   const body = h("div", { class: "detail" });
   addDetail(body, "请求头", prettyJson(log.request_headers));
@@ -451,8 +502,17 @@ function renderLog(log) {
 }
 
 function renderLogs() {
+  // Polling rebuilds the whole list; keep expanded detail panels expanded.
+  const openIds = new Set(
+    [...els.logList.querySelectorAll("details[open][data-log-id]")].map(
+      (node) => node.dataset.logId,
+    ),
+  );
   const rows = [...state.logs.values()].sort((a, b) => a.id - b.id);
   els.logList.replaceChildren(...rows.map(renderLog));
+  for (const node of els.logList.querySelectorAll("details[data-log-id]")) {
+    if (openIds.has(node.dataset.logId)) node.open = true;
+  }
   els.loadMore.hidden = !state.hasMore;
 
   if (!state.selectedTaskId) {
@@ -473,7 +533,13 @@ async function loadTasks({ silent = false } = {}) {
     const data = await api("/api/tasks");
     const tasks = data?.tasks ?? [];
     const now = Date.now();
-    const pauseState = tasks.map((task) => (isPaused(task, now) ? task.paused_until : 0));
+    // `started` flips at the interval's local midnight without any DB write,
+    // so it must be part of the signature: otherwise a "start tomorrow" card
+    // keeps claiming "today still runs" after the pause has taken effect.
+    const pauseState = tasks.map((task) => {
+      const pause = pauseStateOf(task, now);
+      return pause ? `${pause.until}:${pause.started ? 1 : 0}` : "0";
+    });
     const signature = `${JSON.stringify(tasks)}#${pauseState.join(",")}`;
     state.tasks = tasks;
 
@@ -537,11 +603,10 @@ async function loadLogs({ reset = false, older = false } = {}) {
 
     const ids = [...state.logs.keys()];
     state.oldestId = ids.length ? Math.min(...ids) : null;
-    if (reset || older) {
-      state.hasMore = Boolean(data?.has_more);
-    } else if (sizeBefore === 0) {
-      state.hasMore = Boolean(data?.has_more);
-    }
+    // A normal poll only sees the newest page. New logs can push the total past
+    // the page size, so "load older" must become available again even when the
+    // user never clicked it — otherwise newer-than-first-page history is stuck.
+    if (data) state.hasMore = Boolean(data.has_more);
 
     const changed = reset || older || state.logs.size !== sizeBefore;
     if (!changed) return;
@@ -680,7 +745,7 @@ async function onTaskAction(button) {
   const taskId = card.dataset.id;
   const action = button.dataset.action;
   const task = state.tasks.find((entry) => entry.id === taskId);
-  const wasPaused = task ? isPaused(task) : false;
+  const wasPaused = task ? pauseStateOf(task) !== null : false;
   button.disabled = true;
   try {
     await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: "POST" });
@@ -909,6 +974,9 @@ async function executeCleanup() {
     const result = await api("/api/logs/cleanup", {
       method: "POST",
       body: JSON.stringify(body),
+      // VACUUM on a large database can take a while; the default 15s poll
+      // timeout must not cut this request short.
+      signal: AbortSignal.timeout(120_000),
     });
     state.cleanup.busy = false;
     renderCleanupResult(result);
@@ -943,11 +1011,13 @@ function pauseStartsToday() {
   return document.querySelector('input[name="pause-start"]:checked')?.value === "today";
 }
 
-function pauseResumeAt(days, startsToday) {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() + (startsToday ? 0 : 1) + days);
-  return date.getTime();
+function pauseInterval(days, startsToday) {
+  const from = new Date();
+  from.setHours(0, 0, 0, 0);
+  from.setDate(from.getDate() + (startsToday ? 0 : 1));
+  const until = new Date(from.getTime());
+  until.setDate(until.getDate() + days);
+  return { from: from.getTime(), until: until.getTime() };
 }
 
 function updatePauseSummary() {
@@ -958,10 +1028,14 @@ function updatePauseSummary() {
   }
   const days = Number(els.pauseDays.value);
   const startsToday = pauseStartsToday();
-  const resumeAt = pauseResumeAt(days, startsToday);
+  const { from, until } = pauseInterval(days, startsToday);
+  const covered = days === 1 ? formatDay(from) : `${formatDay(from)}–${formatDay(until - 1)}`;
+  const lead = startsToday
+    ? "今天起算：今天剩余时间（含尚未到达的窗口）一律不再触发，不管现在是几点。"
+    : "明天起算：今天剩余时间照常执行，今天已排好的任务不会被取消。";
   els.pauseSummary.textContent =
-    `将从 ${formatTime(resumeAt)} 起恢复调度（${startsToday ? "今天" : "明天"}起算 ${days} 天）。` +
-    `暂停期间不会执行，恢复当天在窗口 ${task.window_start}–${task.window_end} 内随机执行一次。`;
+    `${lead}暂停 ${days} 个完整自然日（${covered}）；` +
+    `${formatTime(until)} 恢复，恢复当天在窗口 ${task.window_start}–${task.window_end} 内随机执行一次。`;
 }
 
 function openPauseDialog(taskId) {
@@ -1091,7 +1165,7 @@ function startPolling() {
   const configured = Number(state.clientConfig.pollIntervalMs);
   const delay = Number.isFinite(configured) && configured >= 500 ? configured : 4000;
   setInterval(async () => {
-    if (document.hidden || state.polling) return;
+    if (document.hidden || state.polling || state.cleanup.busy) return;
     state.polling = true;
     try {
       await loadTasks({ silent: true });

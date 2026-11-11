@@ -6,3 +6,4 @@ dist/
 .env
 *.local.db
 .playwright-mcp/
+.workbuddy/

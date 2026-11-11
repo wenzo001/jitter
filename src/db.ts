@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   window_end       TEXT NOT NULL,
   status           TEXT NOT NULL DEFAULT 'active',
   next_run_at      INTEGER,
+  paused_from      INTEGER,
   paused_until     INTEGER,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,
@@ -90,11 +91,65 @@ function ensureColumn(
   }
 }
 
+/** Local midnight, optionally shifted by whole calendar days (DST-safe). */
+function localDayStart(timestamp: number, offsetDays: number = 0): number {
+  const date = new Date(timestamp);
+  date.setHours(0, 0, 0, 0);
+  if (offsetDays !== 0) date.setDate(date.getDate() + offsetDays);
+  return date.getTime();
+}
+
+/**
+ * Older builds stored only `paused_until`, which made "start tomorrow" behave
+ * as "start right now" (the bug where an afternoon run was skipped).
+ *
+ * `updated_at` is NOT a usable proxy for "when the pause was configured":
+ * every cron/timer replan rewrites it, so a service that kept running can have
+ * an `updated_at` days newer than the pause. Inferring the start day from it
+ * silently shortens the pause. Use a deterministic rule instead: keep the
+ * original resume time and treat the remaining pause as starting at local
+ * midnight of the UPGRADE day. Any still-live legacy pause must already span
+ * today (otherwise it would have expired), so every future paused day is
+ * preserved. The only divergence is a pause configured earlier the same day
+ * with "start tomorrow"; the log below asks the user to re-set it once.
+ *
+ * Also clear `next_run_at`: legacy builds pushed it to the resume day as soon
+ * as the pause was created, so the scheduler must re-plan from the new interval.
+ */
+function backfillPauseFrom(db: Database): void {
+  const rows = db
+    .query(
+      "SELECT id, paused_until FROM tasks WHERE paused_until IS NOT NULL AND paused_from IS NULL",
+    )
+    .all() as Array<{ id: string; paused_until: number }>;
+  if (rows.length === 0) return;
+
+  const now = Date.now();
+  const today = localDayStart(now);
+  let inferred = 0;
+  for (const row of rows) {
+    if (row.paused_until <= now) {
+      db.query("UPDATE tasks SET paused_from = NULL, paused_until = NULL WHERE id = ?").run(row.id);
+      continue;
+    }
+    db.query("UPDATE tasks SET paused_from = ?, next_run_at = NULL WHERE id = ?").run(
+      today,
+      row.id,
+    );
+    inferred += 1;
+  }
+  console.warn(
+    `[jitter] 已迁移 ${rows.length} 条旧版暂停记录（${inferred} 条按「升级当天 00:00 起继续暂停至原恢复时刻」处理）；如有需要请重新设置一次暂停`,
+  );
+}
+
 /** Additive migrations for databases created by earlier versions. */
 function migrate(db: Database): void {
   ensureColumn(db, "tasks", "request_options", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, "tasks", "notify_options", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, "tasks", "paused_until", "INTEGER");
+  ensureColumn(db, "tasks", "paused_from", "INTEGER");
+  backfillPauseFrom(db);
 }
 
 export function resolveDbPath(path?: string): string {
@@ -129,16 +184,16 @@ export function initDb(path?: string): Database {
     insertTask: db.query(
       `INSERT INTO tasks (
         id, name, curl_command, request_url, request_method, request_headers, request_body, request_options,
-        window_start, window_end, status, next_run_at, paused_until, created_at, updated_at,
+        window_start, window_end, status, next_run_at, paused_from, paused_until, created_at, updated_at,
         notify_enabled, notify_curl_command, notify_url, notify_method, notify_headers, notify_body, notify_options,
         expect_status, expect_body
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ),
     getTask: db.query("SELECT * FROM tasks WHERE id = ?"),
     listTasks: db.query("SELECT * FROM tasks ORDER BY created_at DESC"),
     updateNextRun: db.query("UPDATE tasks SET next_run_at = ?, updated_at = ? WHERE id = ?"),
     updatePause: db.query(
-      "UPDATE tasks SET paused_until = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
+      "UPDATE tasks SET paused_from = ?, paused_until = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
     ),
     updateStatus: db.query("UPDATE tasks SET status = ?, next_run_at = ?, updated_at = ? WHERE id = ?"),
     insertLog: db.query(
@@ -201,8 +256,9 @@ export function createTask(
     input.window_start,
     input.window_end,
     "active",
-    null,
-    null,
+    null, // next_run_at
+    null, // paused_from
+    null, // paused_until
     now,
     now,
     notifyEnabled,
@@ -234,14 +290,19 @@ export function updateTaskNextRun(id: string, nextRunAt: number | null, now: num
   getStatements().updateNextRun.run(nextRunAt, now, id);
 }
 
-/** Set or clear the pause deadline together with the replanned next run. */
+export interface PauseRecord {
+  from: number;
+  until: number;
+}
+
+/** Persist the pause interval (`null` clears it) together with the next run. */
 export function setTaskPause(
   id: string,
-  pausedUntil: number | null,
+  pause: PauseRecord | null,
   nextRunAt: number | null,
   now: number = Date.now(),
 ): void {
-  getStatements().updatePause.run(pausedUntil, nextRunAt, now, id);
+  getStatements().updatePause.run(pause?.from ?? null, pause?.until ?? null, nextRunAt, now, id);
 }
 
 export function updateTaskStatus(

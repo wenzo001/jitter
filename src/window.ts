@@ -28,6 +28,17 @@ export interface RecoveryPlan {
 /** Longest pause exposed to the UI, in days. */
 export const MAX_PAUSE_DAYS = 15;
 
+/**
+ * A pause is a half-open interval of whole LOCAL calendar days:
+ * `[from, until)` = `[start day 00:00, start day + N days 00:00)`.
+ * It is deliberately not "N × 24h from now" — starting a 2-day pause at noon
+ * on Monday pauses Monday and Tuesday, not "48 hours".
+ */
+export interface PauseInterval {
+  from: number;
+  until: number;
+}
+
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 function parseHHMM(value: string, label: string): number {
@@ -64,16 +75,37 @@ export function validateWindow(start: string, end: string): string | null {
   }
 }
 
-/**
- * First moment a paused task may run again. Counting starts at local midnight
- * of today or tomorrow, and a pause of N days ends at midnight N days after
- * that start day. Example: 3 days starting today ends at 00:00 on day +3.
- */
-export function pauseResumeAt(now: number, days: number, startsToday: boolean): number {
+/** Local midnight of `now`, optionally shifted by whole calendar days. */
+export function startOfLocalDay(now: number, offsetDays: number = 0): number {
   const date = new Date(now);
   date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() + (startsToday ? 0 : 1) + days);
+  if (offsetDays !== 0) date.setDate(date.getDate() + offsetDays);
   return date.getTime();
+}
+
+/**
+ * Build the pause interval from the user's two choices.
+ *
+ * - `startsToday: true`  → `[today 00:00, today + N days 00:00)`.
+ *   Today is a FULL paused day regardless of the current clock, so every
+ *   remaining window today (including an afternoon one) is skipped.
+ * - `startsToday: false` → `[tomorrow 00:00, tomorrow + N days 00:00)`.
+ *   Today is untouched: windows later today still fire normally.
+ *
+ * In both cases exactly N whole calendar days are paused. Monday noon +
+ * 2 days starting today = Monday + Tuesday, resume Wednesday 00:00.
+ */
+export function pauseInterval(now: number, days: number, startsToday: boolean): PauseInterval {
+  const startOffset = startsToday ? 0 : 1;
+  return {
+    from: startOfLocalDay(now, startOffset),
+    until: startOfLocalDay(now, startOffset + days),
+  };
+}
+
+/** First moment a paused task may run again; kept for callers using the old API. */
+export function pauseResumeAt(now: number, days: number, startsToday: boolean): number {
+  return pauseInterval(now, days, startsToday).until;
 }
 
 function localAt(now: number, minutes: number): number {
@@ -200,4 +232,71 @@ export function planRecovery(
     missed,
     reason: missed ? "missed" : "next-window",
   };
+}
+
+/**
+ * Whether a planned run belongs to a paused calendar day.
+ *
+ * The decision uses the day the WINDOW INSTANCE STARTED ON (see
+ * `windowInstanceAt`), never the wall-clock instant of the run and never the
+ * instant the pause was configured. This keeps cross-midnight windows correct:
+ * the 23:50–00:10 window belongs to start day D, so a run at D+1 00:05 is
+ * still D's run. A pause "starting tomorrow" must not swallow that tail, and
+ * a pause "starting today" must swallow it.
+ */
+export function planPaused(
+  target: number,
+  spec: WindowSpec,
+  pause: PauseInterval | null,
+): boolean {
+  if (!pause || pause.until <= pause.from) return false;
+  const instance = windowInstanceAt(target, spec);
+  if (!instance) return false;
+  const day = startOfLocalDay(instance.start);
+  return day >= pause.from && day < pause.until;
+}
+
+/**
+ * A random point inside the RESUME DAY'S OWN window instance. `until` is local
+ * midnight, so `localAt(until, ...)` picks that day's window start. Using
+ * `planNewTask(until, ...)` would be wrong for cross-midnight windows:
+ * midnight sits in the PREVIOUS day's 23:50–00:10 instance, which is still
+ * inside the pause.
+ */
+export function planResumeWindow(
+  until: number,
+  spec: WindowSpec,
+  rng: () => number = Math.random,
+): number {
+  const start = localAt(until, spec.startMinutes);
+  return randomPoint(start, endOf(start, spec), rng);
+}
+
+/**
+ * Plan the next run from `from`. When the nearest window's day is paused, jump
+ * to the resume day's window. When `from` is before the interval (e.g. pausing
+ * "from tomorrow" while it is still Monday noon), Monday's plan is kept.
+ */
+export function planWithPause(
+  from: number,
+  spec: WindowSpec,
+  pause: PauseInterval | null,
+  rng: () => number = Math.random,
+): number {
+  if (!pause || from >= pause.until) return planNewTask(from, spec, rng);
+  const candidate = planNewTask(from, spec, rng);
+  if (!planPaused(candidate, spec, pause)) return candidate;
+  return planResumeWindow(pause.until, spec, rng);
+}
+
+/** Plan the window AFTER a completed run, skipping paused days. */
+export function planAfterRunWithPause(
+  now: number,
+  spec: WindowSpec,
+  pause: PauseInterval | null,
+  rng: () => number = Math.random,
+): number {
+  const candidate = planNextWindowAfter(now, spec, rng);
+  if (!pause || !planPaused(candidate, spec, pause)) return candidate;
+  return planResumeWindow(pause.until, spec, rng);
 }

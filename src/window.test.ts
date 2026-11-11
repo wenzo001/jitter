@@ -5,11 +5,17 @@ import {
   classifyTimerFire,
   nextWindowStartAfter,
   parseWindow,
+  pauseInterval,
   pauseResumeAt,
+  planAfterRunWithPause,
   planNewTask,
   planNextWindowAfter,
+  planPaused,
   planRecovery,
+  planResumeWindow,
+  planWithPause,
   randomPoint,
+  startOfLocalDay,
   validateWindow,
   windowInstanceAt,
 } from "./window";
@@ -204,6 +210,151 @@ describe("pauseResumeAt", () => {
   test("defaults to counting from tomorrow", () => {
     expect(pauseResumeAt(at(9, 15, 30), 1, false)).toBe(at(11, 0, 0));
     expect(pauseResumeAt(at(9, 15, 30), 3, false)).toBe(at(13, 0, 0));
+  });
+});
+
+describe("startOfLocalDay", () => {
+  test("ignores the clock and shifts by whole calendar days", () => {
+    expect(startOfLocalDay(at(9, 23, 59))).toBe(at(9, 0, 0));
+    expect(startOfLocalDay(at(9, 23, 59), 1)).toBe(at(10, 0, 0));
+    expect(startOfLocalDay(at(9, 23, 59), -1)).toBe(at(8, 0, 0));
+  });
+
+  test("crosses a month boundary correctly", () => {
+    expect(startOfLocalDay(new Date(2026, 10, 30, 23, 59).getTime(), 1)).toBe(
+      new Date(2026, 11, 1, 0, 0).getTime(),
+    );
+  });
+});
+
+describe("pauseInterval (whole calendar days)", () => {
+  const noon = at(9, 12, 0); // Monday noon
+
+  test("starting today counts today as a FULL day regardless of the clock", () => {
+    expect(pauseInterval(noon, 1, true)).toEqual({ from: at(9, 0, 0), until: at(10, 0, 0) });
+    expect(pauseInterval(noon, 2, true)).toEqual({ from: at(9, 0, 0), until: at(11, 0, 0) });
+    expect(pauseInterval(at(9, 23, 58), 2, true)).toEqual({
+      from: at(9, 0, 0),
+      until: at(11, 0, 0),
+    });
+    expect(pauseInterval(at(9, 0, 0), MAX_PAUSE_DAYS, true)).toEqual({
+      from: at(9, 0, 0),
+      until: at(24, 0, 0),
+    });
+  });
+
+  test("a 2-day pause from Monday noon covers Monday and Tuesday", () => {
+    const pause = pauseInterval(noon, 2, true);
+    expect(pause.from).toBe(at(9, 0, 0)); // Monday 00:00
+    expect(pause.until).toBe(at(11, 0, 0)); // Wednesday 00:00
+  });
+
+  test("starting tomorrow leaves ALL of today untouched", () => {
+    expect(pauseInterval(noon, 1, false)).toEqual({ from: at(10, 0, 0), until: at(11, 0, 0) });
+    expect(pauseInterval(noon, 2, false)).toEqual({ from: at(10, 0, 0), until: at(12, 0, 0) });
+    expect(pauseInterval(at(9, 23, 59), 1, false)).toEqual({
+      from: at(10, 0, 0),
+      until: at(11, 0, 0),
+    });
+  });
+
+  test("the two choices never overlap today", () => {
+    expect(pauseInterval(noon, 1, false).from).toBeGreaterThan(noon);
+    expect(pauseInterval(noon, 1, true).from).toBeLessThan(noon);
+  });
+});
+
+describe("planPaused (judged by window start day)", () => {
+  const afternoon = parseWindow("14:00", "14:10");
+  const cross = parseWindow("23:50", "00:10");
+
+  test("'start tomorrow' at noon keeps today's afternoon run", () => {
+    const pause = pauseInterval(at(9, 12, 0), 1, false);
+    expect(planPaused(at(9, 14, 5), afternoon, pause)).toBe(false);
+    expect(planPaused(at(10, 14, 5), afternoon, pause)).toBe(true);
+    expect(planPaused(at(11, 14, 5), afternoon, pause)).toBe(false); // resume day
+  });
+
+  test("'start today' at noon skips the whole of today, including the afternoon", () => {
+    const pause = pauseInterval(at(9, 12, 0), 2, true);
+    expect(planPaused(at(9, 14, 5), afternoon, pause)).toBe(true);
+    expect(planPaused(at(10, 14, 5), afternoon, pause)).toBe(true);
+    expect(planPaused(at(11, 14, 5), afternoon, pause)).toBe(false);
+  });
+
+  test("cross-midnight windows are judged by the day they START on", () => {
+    const startsTomorrow = pauseInterval(at(9, 12, 0), 1, false);
+    const startsToday = pauseInterval(at(9, 12, 0), 1, true);
+    const tail = at(10, 0, 5); // 00:05 belongs to DAY 9's 23:50–00:10 instance
+
+    expect(windowInstanceAt(tail, cross)?.start).toBe(at(9, 23, 50));
+    expect(planPaused(tail, cross, startsTomorrow)).toBe(false); // today's tail still runs
+    expect(planPaused(tail, cross, startsToday)).toBe(true); // today's tail is skipped
+    expect(planPaused(at(10, 23, 55), cross, startsTomorrow)).toBe(true); // tomorrow's own window
+  });
+
+  test("no pause or an empty interval never blocks a run", () => {
+    const pause = pauseInterval(at(9, 12, 0), 1, true);
+    expect(planPaused(at(9, 14, 5), afternoon, null)).toBe(false);
+    expect(planPaused(at(9, 14, 5), afternoon, { from: pause.until, until: pause.until })).toBe(
+      false,
+    );
+  });
+});
+
+describe("planWithPause / planResumeWindow", () => {
+  const afternoon = parseWindow("14:00", "14:10");
+  const morning = parseWindow("09:00", "09:10");
+  const cross = parseWindow("23:50", "00:10");
+
+  test("keeps today's plan when the pause starts tomorrow", () => {
+    const noon = at(9, 12, 0);
+    const pause = pauseInterval(noon, 1, false);
+    const target = planWithPause(noon, afternoon, pause, fixed(0));
+    expect(target).toBe(at(9, 14, 0));
+    expect(planPaused(target, afternoon, pause)).toBe(false);
+  });
+
+  test("jumps to the resume day when the pause starts today", () => {
+    const noon = at(9, 12, 0);
+    const pause = pauseInterval(noon, 2, true); // Mon + Tue, resume Wed
+    const target = planWithPause(noon, afternoon, pause, fixed(0));
+    expect(target).toBe(at(11, 14, 0));
+    expect(target).toBeGreaterThanOrEqual(pause.until);
+  });
+
+  test("a pause already in progress still lands on the resume day", () => {
+    const pause = pauseInterval(at(9, 12, 0), 3, true); // Mon–Wed, resume Thu
+    expect(planWithPause(at(10, 9, 0), morning, pause, fixed(0))).toBe(at(12, 9, 0));
+  });
+
+  test("resume uses the resume day's OWN window for cross-midnight windows", () => {
+    // Midnight sits in the previous day's 23:50–00:10 instance: the old
+    // planNewTask(until) would schedule a run that still belongs to a paused day.
+    expect(planNewTask(at(11, 0, 0), cross, fixed(0))).toBe(at(11, 0, 0));
+    expect(planResumeWindow(at(11, 0, 0), cross, fixed(0))).toBe(at(11, 23, 50));
+  });
+
+  test("no pause behaves exactly like planNewTask", () => {
+    expect(planWithPause(at(9, 12, 0), afternoon, null, fixed(0))).toBe(at(9, 14, 0));
+  });
+});
+
+describe("planAfterRunWithPause", () => {
+  const afternoon = parseWindow("14:00", "14:10");
+
+  test("after today's run, a pause starting tomorrow skips tomorrow", () => {
+    const pause = pauseInterval(at(9, 12, 0), 1, false); // Tue paused, resume Wed
+    expect(planAfterRunWithPause(at(9, 14, 5), afternoon, pause, fixed(0))).toBe(at(11, 14, 0));
+  });
+
+  test("after today's run, the next window is used when there is no pause", () => {
+    expect(planAfterRunWithPause(at(9, 14, 5), afternoon, null, fixed(0))).toBe(at(10, 14, 0));
+  });
+
+  test("a pause that has already ended does not push the next window", () => {
+    const expired = pauseInterval(at(5, 12, 0), 1, true);
+    expect(planAfterRunWithPause(at(9, 14, 5), afternoon, expired, fixed(0))).toBe(at(10, 14, 0));
   });
 });
 

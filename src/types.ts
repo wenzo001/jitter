@@ -31,6 +31,7 @@ export interface TaskRow {
   window_end: string;
   status: TaskStatus;
   next_run_at: number | null;
+  paused_from: number | null;
   paused_until: number | null;
   created_at: number;
   updated_at: number;

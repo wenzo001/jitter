@@ -145,19 +145,23 @@ describe("db", () => {
     expect(getTask(task.id)?.status).toBe("active");
   });
 
-  test("stores and clears a pause deadline", () => {
+  test("stores and clears a pause interval", () => {
     const task = createTask(sampleTask({ name: "pause lifecycle" }));
     expect(task.paused_until).toBeNull();
+    expect(task.paused_from).toBeNull();
 
+    const from = Date.now() - 24 * 60 * 60 * 1000;
     const resumeAt = Date.now() + 2 * 24 * 60 * 60 * 1000;
     const planned = resumeAt + 30_000;
-    setTaskPause(task.id, resumeAt, planned, Date.now());
+    setTaskPause(task.id, { from, until: resumeAt }, planned, Date.now());
     const paused = getTask(task.id)!;
+    expect(paused.paused_from).toBe(from);
     expect(paused.paused_until).toBe(resumeAt);
     expect(paused.next_run_at).toBe(planned);
 
     setTaskPause(task.id, null, planned, Date.now());
     expect(getTask(task.id)?.paused_until).toBeNull();
+    expect(getTask(task.id)?.paused_from).toBeNull();
   });
 
   test("paginates logs newest first and isolates tasks", () => {
@@ -289,6 +293,7 @@ describe("db", () => {
     expect(columns).toContain("request_options");
     expect(columns).toContain("notify_options");
     expect(columns).toContain("paused_until");
+    expect(columns).toContain("paused_from");
     expect(getTask(existing.id)?.request_options).toBe("{}");
     expect(getTask(existing.id)?.notify_options).toBe("{}");
     expect(getTask(existing.id)?.paused_until).toBeNull();
@@ -296,6 +301,47 @@ describe("db", () => {
     const task = createTask(sampleTask({ name: "after migration" }));
     expect(task.request_options).toBe("{}");
     expect(task.notify_options).toBe("{}");
+
+    initDb(dbPath);
+  });
+
+  test("backfills paused_from deterministically even when updated_at was rewritten", () => {
+    const legacyPath = join(tempDir, "legacy-pause.db");
+    initDb(legacyPath);
+    const live = createTask(sampleTask({ name: "legacy live pause" }));
+    const expired = createTask(sampleTask({ name: "legacy expired pause" }));
+    closeDb();
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const resumeAt = new Date(today.getTime());
+    resumeAt.setDate(resumeAt.getDate() + 2);
+
+    const raw = new Database(legacyPath);
+    raw.exec("ALTER TABLE tasks DROP COLUMN paused_from");
+    // A cron/timer replan after the pause rewrites updated_at; the migration
+    // must NOT use it to guess the original start day.
+    raw.query(
+      "UPDATE tasks SET paused_until = ?, updated_at = ?, next_run_at = ? WHERE id = ?",
+    ).run(
+      resumeAt.getTime(),
+      today.getTime() + 23 * 3600_000,
+      resumeAt.getTime() + 60_000, // legacy builds pushed the plan to the resume day
+      live.id,
+    );
+    raw.query("UPDATE tasks SET paused_until = ? WHERE id = ?").run(
+      Date.now() - 86_400_000,
+      expired.id,
+    );
+    raw.close();
+
+    initDb(legacyPath);
+    const migrated = getTask(live.id)!;
+    expect(migrated.paused_until).toBe(resumeAt.getTime());
+    expect(migrated.paused_from).toBe(today.getTime());
+    expect(migrated.next_run_at).toBeNull();
+    expect(getTask(expired.id)?.paused_until).toBeNull();
+    expect(getTask(expired.id)?.paused_from).toBeNull();
 
     initDb(dbPath);
   });
