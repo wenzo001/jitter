@@ -377,6 +377,22 @@ describe("api", () => {
     });
     expect(futureCutoff.status).toBe(400);
 
+    // A cutoff must stay bound to this tier's preview; otherwise a plain
+    // confirm: true could wipe everything and bypass "delete all".
+    const widenedCutoff = await post("/api/logs/cleanup", {
+      days: 30,
+      confirm: true,
+      cutoff: Date.now(),
+    });
+    expect(widenedCutoff.status).toBe(400);
+
+    const staleCutoff = await post("/api/logs/cleanup", {
+      days: 30,
+      confirm: true,
+      cutoff: now - 400 * day,
+    });
+    expect(staleCutoff.status).toBe(400);
+
     const cleaned = await post("/api/logs/cleanup", {
       days: 30,
       confirm: true,

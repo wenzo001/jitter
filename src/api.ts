@@ -273,16 +273,22 @@ export const app = new Elysia()
       set.status = 400;
       return { error: "清理前需要二次确认：confirm 必须为 true" };
     }
+    const DAY_MS = 24 * 60 * 60 * 1000;
     const cutoffRaw = input.cutoff;
     if (cutoffRaw !== undefined && cutoffRaw !== null) {
+      // Bind the supplied cutoff to THIS tier's preview. A newer cutoff would
+      // widen the deletion and bypass the stronger "delete all" confirmation;
+      // a very old one means the user confirmed a stale snapshot.
+      const expectedCutoff = Date.now() - days * DAY_MS;
       if (
         typeof cutoffRaw !== "number" ||
         !Number.isInteger(cutoffRaw) ||
         cutoffRaw <= 0 ||
-        cutoffRaw > Date.now()
+        cutoffRaw > expectedCutoff + 5 * 60_000 ||
+        cutoffRaw < expectedCutoff - DAY_MS
       ) {
         set.status = 400;
-        return { error: "cutoff 必须是有效的过去时间戳（来自清理预检）" };
+        return { error: "cutoff 必须来自对应档位的清理预检（不得放大删除范围或使用过期预检）" };
       }
     }
     // A preview cutoff makes deletion match the confirmed count exactly.
