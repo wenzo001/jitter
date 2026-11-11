@@ -134,10 +134,12 @@ function formatLocal(timestamp: number): string {
   )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-function recordMiss(task: TaskRow, plannedAt: number): void {
+/** `executed_at` is the write time; the missed plan is kept in the message so
+ * retention (which filters on executed_at) never deletes a fresh miss. */
+function recordMiss(task: TaskRow, plannedAt: number, now: number = Date.now()): void {
   insertLog({
     task_id: task.id,
-    executed_at: plannedAt,
+    executed_at: now,
     request_url: task.request_url,
     request_method: task.request_method,
     request_headers: task.request_headers,
@@ -345,12 +347,22 @@ export function pauseTask(
 
   const spec = parseWindow(task.window_start, task.window_end);
   const pause = pauseInterval(now, options.days, options.startsToday === true);
+  const runtime = ensureRuntime(taskId);
+
+  // A request is in flight: its own onTimer finally owns the next plan and
+  // reads the latest pause state from the DB. Bumping the generation here
+  // would suppress that finally, and arming a timer in the ALREADY CONSUMED
+  // window would either run the window twice or strand the task with no timer
+  // (if the request outlives the new timer). Persist the interval only.
+  if (runtime.running) {
+    setTaskPause(taskId, pause, task.next_run_at, now);
+    return getTask(taskId);
+  }
 
   // Keep today's already-randomised plan when the pause starts tomorrow, but
   // never keep a plan that belongs to a different (e.g. far-future) window.
   const target = preferredPlan(task, now, spec, pause);
 
-  const runtime = ensureRuntime(taskId);
   runtime.generation += 1;
   if (runtime.timeout !== null) {
     clearTimeout(runtime.timeout);
@@ -445,9 +457,16 @@ export function resumeTask(taskId: string): TaskRow | null {
     const now = Date.now();
     const pause = livePause(task, now);
     if (pause !== null || task.paused_until !== null) {
+      const runtime = ensureRuntime(taskId);
+      // Same in-flight rule as pauseTask: only clear the pause, let the
+      // running request's finally plan the next window. Planning here would
+      // target the already-consumed window and cause a double run / stall.
+      if (runtime.running) {
+        setTaskPause(taskId, null, task.next_run_at, now);
+        return getTask(taskId);
+      }
       // Cancelling a pause resumes scheduling immediately, even mid-window.
       const spec = parseWindow(task.window_start, task.window_end);
-      const runtime = ensureRuntime(taskId);
       runtime.generation += 1;
       if (runtime.timeout !== null) {
         clearTimeout(runtime.timeout);

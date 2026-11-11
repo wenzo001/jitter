@@ -500,11 +500,23 @@ export function getLogCleanupPreview(now: number = Date.now()): LogCleanupPrevie
  * its log lands afterwards and is not part of this cleanup.
  */
 export function cleanupLogs(
-  input: { days: number } | { all: true },
+  input: { days: number; cutoff?: number } | { all: true },
   now: number = Date.now(),
 ): LogCleanupOutcome {
   const db = getDatabase();
-  const cutoff = "all" in input ? null : now - input.days * DAY_MS;
+  let cutoff: number | null;
+  if ("all" in input) {
+    cutoff = null;
+  } else if (input.cutoff !== undefined) {
+    // The preview's cutoff is authoritative: the count the user confirmed is
+    // exactly the count deleted, even if the dialog stayed open for a while.
+    if (!Number.isInteger(input.cutoff) || input.cutoff <= 0 || input.cutoff > now) {
+      throw new Error("无效的清理截止时间");
+    }
+    cutoff = input.cutoff;
+  } else {
+    cutoff = now - input.days * DAY_MS;
+  }
   const before = getLogStorageUsage();
 
   const result =

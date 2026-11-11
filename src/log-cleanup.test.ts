@@ -88,10 +88,12 @@ describe("log cleanup", () => {
     expect(preview.storage.total_bytes).toBeGreaterThanOrEqual(preview.storage.db_bytes);
   });
 
-  test("deletes rows older than the cutoff, keeps newer ones, and shrinks the file", () => {
+  test("deletes rows older than the preview cutoff, keeps newer ones, and shrinks the file", () => {
     const before = getLogStorageUsage();
-    const outcome = cleanupLogs({ days: 30 });
+    const cutoff = getLogCleanupPreview().options.find((option) => option.days === 30)!.cutoff;
+    const outcome = cleanupLogs({ days: 30, cutoff });
 
+    expect(outcome.cutoff).toBe(cutoff);
     expect(outcome.deleted).toBe(130);
     expect(outcome.remaining).toBe(5);
     expect(outcome.vacuum_error).toBeNull();
@@ -129,5 +131,20 @@ describe("log cleanup", () => {
     const cleared = cleanupLogs({ all: true });
     expect(cleared.deleted).toBe(1);
     expect(cleared.remaining).toBe(0);
+  });
+
+  test("an explicit preview cutoff wins over recomputing from now", () => {
+    const now = Date.now();
+    addLogs(3, now - 400 * DAY_MS); // older than either cutoff
+    addLogs(2, now - 60 * DAY_MS); // older than 30 days, newer than 100 days
+
+    // days: 30 would delete all 5; the preview cutoff deletes only 3.
+    const cutoff = now - 100 * DAY_MS;
+    const outcome = cleanupLogs({ days: 30, cutoff }, now);
+    expect(outcome.cutoff).toBe(cutoff);
+    expect(outcome.deleted).toBe(3);
+    expect(outcome.remaining).toBe(2);
+
+    cleanupLogs({ all: true });
   });
 });

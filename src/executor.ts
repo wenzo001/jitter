@@ -1,8 +1,9 @@
-import { getActiveConfig } from "./config";
+import { DEFAULT_CONFIG, getActiveConfig } from "./config";
 import { insertLog } from "./db";
 import type { RequestOptions, TaskRow } from "./types";
 
-export const RESPONSE_BODY_LIMIT = 100 * 1024;
+/** Mirrors the configurable cap from one source; the live limit is the config. */
+export const RESPONSE_BODY_LIMIT = DEFAULT_CONFIG.logBodyLimitBytes;
 
 export interface SuccessInput {
   status: number | null;

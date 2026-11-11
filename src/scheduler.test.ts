@@ -167,11 +167,14 @@ describe("scheduler runtime", () => {
     updateTaskNextRun(task.id, stalePlan);
 
     const hitsBefore = okHits;
+    const bootAt = Date.now();
     startScheduler();
 
     const log = await waitForLog(task.id, (entry) => entry.kind === "missed");
     expect(log.error).toContain("错过执行窗口");
-    expect(log.executed_at).toBe(stalePlan);
+    // The write time, not the stale plan time: retention filters on this column
+    // and must not immediately delete a freshly recorded miss.
+    expect(log.executed_at).toBeGreaterThanOrEqual(bootAt);
     expect(okHits).toBe(hitsBefore);
 
     const latest = await waitForFuturePlan(task.id);
@@ -260,6 +263,46 @@ describe("scheduler runtime", () => {
     const latest = getTask(task.id)!;
     expect(latest.next_run_at).not.toBeNull();
     expect(latest.next_run_at!).toBeGreaterThanOrEqual(latest.paused_until!);
+  });
+
+  test("pausing while a request is in flight never re-runs the same window", async () => {
+    const task = makeTask("in-flight pause", urlOf("/slow"), currentWindow());
+    updateTaskNextRun(task.id, Date.now() + 80);
+    startScheduler();
+
+    const start = Date.now();
+    while (slowHits === 0 && Date.now() - start < 2000) await Bun.sleep(10);
+    expect(slowHits).toBe(1);
+
+    const paused = pauseTask(task.id, { days: 1, startsToday: false });
+    expect(paused?.paused_from).toBeGreaterThan(Date.now());
+    // The consumed target must stay. A fresh plan inside the current window
+    // would fire a second time (or strand the task if its timer wins).
+    expect(paused!.next_run_at).toBeLessThanOrEqual(Date.now());
+
+    await Bun.sleep(700); // /slow takes 400ms; give the finally time to replan
+    expect(slowHits).toBe(1);
+    const latest = getTask(task.id)!;
+    expect(latest.next_run_at).toBeGreaterThanOrEqual(latest.paused_until!);
+  });
+
+  test("cancelling a pause while a request is in flight never re-runs the window", async () => {
+    const task = makeTask("in-flight resume", urlOf("/slow"), currentWindow());
+    updateTaskNextRun(task.id, Date.now() + 80);
+    pauseTask(task.id, { days: 1, startsToday: false }); // keeps today's plan
+    startScheduler();
+
+    const start = Date.now();
+    while (slowHits === 0 && Date.now() - start < 2000) await Bun.sleep(10);
+    expect(slowHits).toBe(1);
+
+    const resumed = resumeTask(task.id);
+    expect(resumed?.paused_until).toBeNull();
+    expect(resumed!.next_run_at).toBeLessThanOrEqual(Date.now());
+
+    await Bun.sleep(700);
+    expect(slowHits).toBe(1);
+    expect(getTask(task.id)!.next_run_at).toBeGreaterThan(Date.now());
   });
 
   test("cancelling a pause clears the deadline and resumes scheduling", () => {

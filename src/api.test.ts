@@ -363,8 +363,27 @@ describe("api", () => {
     const wrongAllConfirm = await post("/api/logs/cleanup", { all: true, confirm: true });
     expect(wrongAllConfirm.status).toBe(400);
 
-    const cleaned = await post("/api/logs/cleanup", { days: 30, confirm: true });
+    const badCutoff = await post("/api/logs/cleanup", {
+      days: 30,
+      confirm: true,
+      cutoff: "30d",
+    });
+    expect(badCutoff.status).toBe(400);
+
+    const futureCutoff = await post("/api/logs/cleanup", {
+      days: 30,
+      confirm: true,
+      cutoff: Date.now() + day,
+    });
+    expect(futureCutoff.status).toBe(400);
+
+    const cleaned = await post("/api/logs/cleanup", {
+      days: 30,
+      confirm: true,
+      cutoff: thirty.cutoff,
+    });
     expect(cleaned.status).toBe(200);
+    expect(cleaned.body.cutoff).toBe(thirty.cutoff);
     expect(cleaned.body.deleted).toBe(3);
     expect(cleaned.body.remaining).toBe(1);
     expect(cleaned.body.vacuum_error).toBeNull();

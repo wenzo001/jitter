@@ -967,10 +967,19 @@ async function executeCleanup() {
   state.cleanup.busy = true;
   setCleanupView("running");
   try {
+    const selectedOption = preview.options.find((entry) => entry.days === selected);
     const body =
       selected === "all"
         ? { all: true, confirm: "DELETE_ALL" }
-        : { days: selected, confirm: true };
+        : {
+            days: selected,
+            confirm: true,
+            // Delete exactly what the preview counted: the backend must not
+            // recompute a newer cutoff while the dialog was open.
+            ...(Number.isInteger(selectedOption?.cutoff)
+              ? { cutoff: selectedOption.cutoff }
+              : {}),
+          };
     const result = await api("/api/logs/cleanup", {
       method: "POST",
       body: JSON.stringify(body),

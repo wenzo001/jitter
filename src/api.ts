@@ -273,7 +273,23 @@ export const app = new Elysia()
       set.status = 400;
       return { error: "清理前需要二次确认：confirm 必须为 true" };
     }
-    return cleanupLogs({ days });
+    const cutoffRaw = input.cutoff;
+    if (cutoffRaw !== undefined && cutoffRaw !== null) {
+      if (
+        typeof cutoffRaw !== "number" ||
+        !Number.isInteger(cutoffRaw) ||
+        cutoffRaw <= 0 ||
+        cutoffRaw > Date.now()
+      ) {
+        set.status = 400;
+        return { error: "cutoff 必须是有效的过去时间戳（来自清理预检）" };
+      }
+    }
+    // A preview cutoff makes deletion match the confirmed count exactly.
+    return cleanupLogs({
+      days,
+      ...(typeof cutoffRaw === "number" ? { cutoff: cutoffRaw } : {}),
+    });
   })
   .get("/api/logs/:id", ({ params, set }) => {
     const id = Number(params.id);
