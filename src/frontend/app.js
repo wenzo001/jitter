@@ -83,7 +83,7 @@ const state = {
   statusTimer: null,
   clientConfig: { ...CLIENT_CONFIG_DEFAULTS },
   cleanup: { preview: null, selected: null, busy: false, view: "loading" },
-  pause: { taskId: null, busy: false },
+  pause: { taskId: null, busy: false, label: "暂停任务" },
 };
 
 function h(tag, props = {}, ...children) {
@@ -603,10 +603,13 @@ async function loadLogs({ reset = false, older = false } = {}) {
 
     const ids = [...state.logs.keys()];
     state.oldestId = ids.length ? Math.min(...ids) : null;
-    // A normal poll only sees the newest page. New logs can push the total past
-    // the page size, so "load older" must become available again even when the
-    // user never clicked it — otherwise newer-than-first-page history is stuck.
-    if (data) state.hasMore = Boolean(data.has_more);
+    // `has_more` on a poll means "rows older than the NEWEST page", not "rows
+    // older than our oldest loaded row". Trusting it during polling resurrects
+    // "load older" after the user already paged to the bottom. Only requests
+    // that advance the cursor (reset / older / first load) own this flag.
+    if (reset || older || sizeBefore === 0) {
+      state.hasMore = Boolean(data?.has_more);
+    }
 
     const changed = reset || older || state.logs.size !== sizeBefore;
     if (!changed) return;
@@ -1052,14 +1055,38 @@ function openPauseDialog(taskId) {
   if (!task) return;
   state.pause.taskId = taskId;
   state.pause.busy = false;
-  els.pauseTask.textContent = `任务「${task.name}」`;
   els.pauseError.hidden = true;
   els.pauseError.textContent = "";
-  els.pauseDays.value = "1";
-  const tomorrow = document.querySelector('input[name="pause-start"][value="tomorrow"]');
-  if (tomorrow) tomorrow.checked = true;
+
+  const current = pauseStateOf(task);
+  if (current) {
+    // "调整暂停" must open on the CURRENT interval. Otherwise submitting
+    // without touching anything silently shortens the pause to 1 day.
+    const days = Math.min(
+      MAX_PAUSE_DAYS,
+      Math.max(1, calendarDays(current.from, current.until)),
+    );
+    els.pauseDays.value = String(days);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const startsToday = current.from <= today.getTime();
+    const radio = document.querySelector(
+      `input[name="pause-start"][value="${startsToday ? "today" : "tomorrow"}"]`,
+    );
+    if (radio) radio.checked = true;
+    els.pauseTask.textContent =
+      `任务「${task.name}」 · 当前 ${formatDay(current.from)} 起暂停，${formatDay(current.until)} 恢复`;
+    state.pause.label = "保存调整";
+  } else {
+    els.pauseDays.value = "1";
+    const tomorrow = document.querySelector('input[name="pause-start"][value="tomorrow"]');
+    if (tomorrow) tomorrow.checked = true;
+    els.pauseTask.textContent = `任务「${task.name}」`;
+    state.pause.label = "暂停任务";
+  }
+
   els.pauseConfirm.disabled = false;
-  els.pauseConfirm.textContent = "暂停任务";
+  els.pauseConfirm.textContent = state.pause.label;
   updatePauseSummary();
   if (!els.pauseDialog.open) els.pauseDialog.showModal();
 }
@@ -1085,13 +1112,17 @@ async function executePause() {
     });
     state.pause.busy = false;
     if (els.pauseDialog.open) els.pauseDialog.close();
-    setStatus(`任务「${task.name}」已暂停 ${days} 天`);
+    setStatus(
+      state.pause.label === "保存调整"
+        ? `任务「${task.name}」的暂停已调整为 ${days} 天`
+        : `任务「${task.name}」已暂停 ${days} 天`,
+    );
     await loadTasks({ silent: true });
     if (state.selectedTaskId === task.id) await loadLogs({ reset: false });
   } catch (error) {
     state.pause.busy = false;
     els.pauseConfirm.disabled = false;
-    els.pauseConfirm.textContent = "暂停任务";
+    els.pauseConfirm.textContent = state.pause.label;
     els.pauseError.textContent = error.message;
     els.pauseError.hidden = false;
   }

@@ -428,7 +428,7 @@
                     <textarea id="expect-body" rows="2" placeholder='例如 {"code":0}'></textarea>
                   </div>
                 </div>
-                <p class="hint">两项都不填时，任意 2xx 视为成功；填写后需全部相等才发送通知。响应体按最多 <span id="body-limit">100</span> KiB 比较。</p>
+                <p class="hint">两项都不填时，任意 2xx 视为成功；填写后需全部相等才发送通知。响应体按最多 <span id="body-limit">100</span> KiB 比较；超过上限会追加 [truncated]，且此时期望响应体视为不匹配，不会发送通知。</p>
               </div>
             </div>
 
@@ -538,7 +538,7 @@
             <label><input type="radio" name="pause-start" value="tomorrow" checked />明天开始（默认）</label>
             <label><input type="radio" name="pause-start" value="today" />今天开始</label>
           </div>
-          <p class="hint">今天开始 = 今天剩余时间也不执行；明天开始 = 今天照常执行，明天 00:00 起才暂停。两种都按完整自然日计数，与当前是几点无关。</p>
+          <p class="hint">今天开始 = 今天剩余时间也不执行；明天开始 = 今天照常执行，明天 00:00 起才暂停。两种都按完整自然日计数，与当前是几点无关。判定按窗口实例的归属日：跨午夜窗口 23:50–00:10 属于开始日，不会被「明天开始」误伤。</p>
         </div>
 
         <p id="pause-summary" class="hint"></p>
