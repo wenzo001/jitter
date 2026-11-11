@@ -36,7 +36,7 @@ bun run src/index.ts
 其他命令：
 
 ```bash
-bun test            # 169 项核心逻辑 / curl / 配置 / 调度 / API / 数据库 / 执行器测试
+bun test            # 170 项核心逻辑 / curl / 配置 / 调度 / API / 数据库 / 执行器测试
 bun run typecheck   # tsc --noEmit
 ```
 
