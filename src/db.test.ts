@@ -209,10 +209,43 @@ describe("db", () => {
 
     const first = listLogs(task.id, 2, null);
     expect(first.map((row) => row.id)).toEqual([ids[4]!, ids[3]!]);
-    const second = listLogs(task.id, 2, ids[3]!);
+    const second = listLogs(task.id, 2, { executedAt: 1003, id: ids[3]! });
     expect(second.map((row) => row.id)).toEqual([ids[2]!, ids[1]!]);
     expect(getLog(ids[4]!)?.response_body).toBe("body-4");
     expect(listLogs(other.id, 10, null)).toHaveLength(1);
+  });
+
+  test("orders logs by execution time desc and pages with a time cursor", () => {
+    const task = createTask(sampleTask({ name: "log order" }));
+    const insert = (executedAt: number): number =>
+      insertLog({
+        task_id: task.id,
+        executed_at: executedAt,
+        request_url: "https://example.com",
+        request_method: "GET",
+        request_headers: "{}",
+        request_body: null,
+        response_status: 200,
+        response_headers: "{}",
+        response_body: `at-${executedAt}`,
+        duration_ms: 1,
+        error: null,
+        aborted: 0,
+        kind: "task",
+        parent_log_id: null,
+        matched: 1,
+      });
+
+    const newer = insert(2_000);
+    // Inserted last but executed earlier: it must sort by time, not by id.
+    const older = insert(1_000);
+    const middle = insert(1_500);
+
+    expect(listLogs(task.id, 10, null).map((row) => row.id)).toEqual([newer, middle, older]);
+    expect(listLogs(task.id, 2, null).map((row) => row.id)).toEqual([newer, middle]);
+    expect(listLogs(task.id, 2, { executedAt: 1_500, id: middle }).map((row) => row.id)).toEqual([
+      older,
+    ]);
   });
 
   test("stores notify, missed and aborted log rows", () => {

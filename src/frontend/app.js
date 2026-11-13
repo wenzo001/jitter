@@ -77,7 +77,7 @@ const state = {
   selectedTaskId: null,
   selectionEpoch: 0,
   logs: new Map(),
-  oldestId: null,
+  oldestCursor: null,
   hasMore: false,
   polling: false,
   statusTimer: null,
@@ -501,6 +501,12 @@ function renderLog(log) {
   return card;
 }
 
+/** Newest first: execution time desc, id desc as the tiebreaker. */
+function compareLogsDesc(a, b) {
+  if (b.executed_at !== a.executed_at) return b.executed_at - a.executed_at;
+  return b.id - a.id;
+}
+
 function renderLogs() {
   // Polling rebuilds the whole list; keep expanded detail panels expanded.
   const openIds = new Set(
@@ -508,7 +514,7 @@ function renderLogs() {
       (node) => node.dataset.logId,
     ),
   );
-  const rows = [...state.logs.values()].sort((a, b) => a.id - b.id);
+  const rows = [...state.logs.values()].sort(compareLogsDesc);
   els.logList.replaceChildren(...rows.map(renderLog));
   for (const node of els.logList.querySelectorAll("details[data-log-id]")) {
     if (openIds.has(node.dataset.logId)) node.open = true;
@@ -552,7 +558,7 @@ async function loadTasks({ silent = false } = {}) {
       state.selectedTaskId = tasks[0]?.id ?? null;
       state.selectionEpoch += 1;
       state.logs.clear();
-      state.oldestId = null;
+      state.oldestCursor = null;
       state.hasMore = false;
       selectionChanged = true;
     }
@@ -579,15 +585,14 @@ async function loadLogs({ reset = false, older = false } = {}) {
   // Responses for an older selection (A -> B -> A) must not be merged.
   const epoch = state.selectionEpoch;
   const list = els.logList;
-  const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
-  const previousHeight = list.scrollHeight;
+  const nearTop = list.scrollTop < 80;
   const sizeBefore = state.logs.size;
 
   try {
     const pageSize = Number(state.clientConfig.logsPageSize) || 50;
     let url = `/api/tasks/${encodeURIComponent(taskId)}/logs?limit=${pageSize}`;
-    if (older && state.oldestId !== null) {
-      url += `&before=${state.oldestId}`;
+    if (older && state.oldestCursor !== null) {
+      url += `&before=${state.oldestCursor.executedAt}:${state.oldestCursor.id}`;
     }
     const data = await api(url);
     if (epoch !== state.selectionEpoch || state.selectedTaskId !== taskId) return;
@@ -601,8 +606,11 @@ async function loadLogs({ reset = false, older = false } = {}) {
       state.logs.set(row.id, row);
     }
 
-    const ids = [...state.logs.keys()];
-    state.oldestId = ids.length ? Math.min(...ids) : null;
+    // The cursor points at the oldest loaded row, in the same order the list
+    // is rendered (execution time desc, id desc).
+    const sorted = [...state.logs.values()].sort(compareLogsDesc);
+    const oldest = sorted.length ? sorted[sorted.length - 1] : null;
+    state.oldestCursor = oldest ? { executedAt: oldest.executed_at, id: oldest.id } : null;
     // `has_more` on a poll means "rows older than the NEWEST page", not "rows
     // older than our oldest loaded row". Trusting it during polling resurrects
     // "load older" after the user already paged to the bottom. Only requests
@@ -616,11 +624,11 @@ async function loadLogs({ reset = false, older = false } = {}) {
 
     renderLogs();
     if (reset) {
-      list.scrollTop = list.scrollHeight;
+      list.scrollTop = 0;
     } else if (older) {
-      list.scrollTop += list.scrollHeight - previousHeight;
-    } else if (nearBottom) {
-      list.scrollTop = list.scrollHeight;
+      // Older rows are appended below the current ones, so the viewport stays.
+    } else if (nearTop) {
+      list.scrollTop = 0;
     }
   } catch (error) {
     setStatus(error.message, true);
@@ -635,7 +643,7 @@ function selectTask(taskId) {
   state.selectedTaskId = taskId;
   state.selectionEpoch += 1;
   state.logs.clear();
-  state.oldestId = null;
+  state.oldestCursor = null;
   state.hasMore = false;
   renderTasks();
   els.logList.replaceChildren();
@@ -995,7 +1003,7 @@ async function executeCleanup() {
     setCleanupView("result");
 
     state.logs.clear();
-    state.oldestId = null;
+    state.oldestCursor = null;
     state.hasMore = false;
     await loadTasks({ silent: true });
     if (state.selectedTaskId) {

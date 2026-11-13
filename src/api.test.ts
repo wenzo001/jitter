@@ -273,7 +273,7 @@ describe("api", () => {
     expect(first.body.logs.map((log: { id: number }) => log.id)).toEqual([ids[2]!, ids[1]!]);
     expect(first.body.has_more).toBe(true);
 
-    const next = await call(`/api/tasks/${taskId}/logs?limit=2&before=${ids[1]}`);
+    const next = await call(`/api/tasks/${taskId}/logs?limit=2&before=1001:${ids[1]}`);
     expect(next.body.logs.map((log: { id: number }) => log.id)).toEqual([ids[0]!]);
     expect(next.body.has_more).toBe(false);
 
@@ -288,11 +288,34 @@ describe("api", () => {
     const badBefore = await call(`/api/tasks/${taskId}/logs?before=abc`);
     expect(badBefore.status).toBe(400);
 
+    const partialBefore = await call(`/api/tasks/${taskId}/logs?before=1001`);
+    expect(partialBefore.status).toBe(400);
+
+    const badCursor = await call(`/api/tasks/${taskId}/logs?before=1001:abc`);
+    expect(badCursor.status).toBe(400);
+
     const missingLog = await call("/api/logs/999999");
     expect(missingLog.status).toBe(404);
 
     const missingTask = await call("/api/tasks/missing/logs");
     expect(missingTask.status).toBe(404);
+  });
+
+  test("returns logs ordered by execution time desc", async () => {
+    const created = await post("/api/tasks", payload());
+    const taskId = created.body.task.id;
+    const newest = insertLog({ ...logInput(taskId, 0), executed_at: 5_000 });
+    // Inserted later but executed earlier: the API must sort by execution time.
+    const oldest = insertLog({ ...logInput(taskId, 1), executed_at: 1_000 });
+    const middle = insertLog({ ...logInput(taskId, 2), executed_at: 3_000 });
+
+    const response = await call(`/api/tasks/${taskId}/logs`);
+    expect(response.status).toBe(200);
+    expect(response.body.logs.map((log: { id: number }) => log.id)).toEqual([
+      newest,
+      middle,
+      oldest,
+    ]);
   });
 
   test("uses configured log page sizes", async () => {

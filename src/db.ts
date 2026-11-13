@@ -204,9 +204,15 @@ export function initDb(path?: string): Database {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ),
     getLog: db.query("SELECT * FROM logs WHERE id = ?"),
-    listLogs: db.query("SELECT * FROM logs WHERE task_id = ? ORDER BY id DESC LIMIT ?"),
+    listLogs: db.query(
+      "SELECT * FROM logs WHERE task_id = ? ORDER BY executed_at DESC, id DESC LIMIT ?",
+    ),
     listLogsBefore: db.query(
-      "SELECT * FROM logs WHERE task_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
+      `SELECT * FROM logs
+       WHERE task_id = ?
+         AND (executed_at < ? OR (executed_at = ? AND id < ?))
+       ORDER BY executed_at DESC, id DESC
+       LIMIT ?`,
     ),
   };
 
@@ -339,12 +345,27 @@ export function getLog(id: number): LogRow | null {
   return asLog(getStatements().getLog.get(id));
 }
 
-export function listLogs(taskId: string, limit: number, before: number | null = null): LogRow[] {
+/**
+ * Keyset cursor for "load older" paging. Rows are ordered by executed_at DESC
+ * then id DESC, so the cursor has to carry both parts to stay stable.
+ */
+export interface LogCursor {
+  executedAt: number;
+  id: number;
+}
+
+export function listLogs(taskId: string, limit: number, before: LogCursor | null = null): LogRow[] {
   const stmts = getStatements();
   const rows =
     before === null
       ? stmts.listLogs.all(taskId, limit)
-      : stmts.listLogsBefore.all(taskId, before, limit);
+      : stmts.listLogsBefore.all(
+          taskId,
+          before.executedAt,
+          before.executedAt,
+          before.id,
+          limit,
+        );
   return rows as LogRow[];
 }
 

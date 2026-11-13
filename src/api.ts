@@ -9,6 +9,7 @@ import {
   getTask,
   listLogs,
   listTasks,
+  type LogCursor,
 } from "./db";
 import { CurlParseError, normalizeStructured, parseCurlCommand } from "./curl-parser";
 import { PauseError, pauseTask, resumeTask, scheduleNewTask, stopTask } from "./scheduler";
@@ -33,6 +34,21 @@ function toHeadersInput(value: unknown): string | Record<string, string> | null 
 
 function toBoolean(value: unknown): boolean {
   return value === true || value === 1 || value === "1" || value === "true";
+}
+
+/**
+ * Log paging cursor: "<executed_at>:<id>". Logs are sorted by executed_at DESC
+ * then id DESC, so the cursor carries both parts.
+ */
+function parseLogCursor(value: unknown): LogCursor | null {
+  if (typeof value !== "string") return null;
+  const [rawAt, rawId, ...rest] = value.split(":");
+  if (rest.length > 0) return null;
+  const executedAt = Number(rawAt);
+  const id = Number(rawId);
+  if (!Number.isInteger(executedAt) || executedAt < 0) return null;
+  if (!Number.isInteger(id) || id <= 0) return null;
+  return { executedAt, id };
 }
 
 function parseTaskInput(body: unknown): NewTaskInput {
@@ -226,14 +242,14 @@ export const app = new Elysia()
       ? Math.min(Math.max(Math.trunc(rawLimit), 1), config.logsMaxPageSize)
       : config.logsPageSize;
 
-    let before: number | null = null;
+    let before: LogCursor | null = null;
     if (query.before !== undefined && query.before !== "") {
-      const parsed = Number(query.before);
-      if (!Number.isFinite(parsed) || parsed <= 0) {
+      const parsed = parseLogCursor(query.before);
+      if (!parsed) {
         set.status = 400;
-        return { error: "before 必须是正整数" };
+        return { error: "before 必须是 <executed_at>:<id> 形式的游标" };
       }
-      before = Math.trunc(parsed);
+      before = parsed;
     }
 
     const rows = listLogs(params.id, limit + 1, before);
