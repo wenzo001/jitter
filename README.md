@@ -184,7 +184,7 @@ bun run typecheck   # tsc --noEmit
 | POST | `/api/tasks/:id/stop` | 停止（幂等） |
 | POST | `/api/tasks/:id/resume` | 恢复；对暂停中的任务表示「取消暂停」并立即恢复调度 |
 | POST | `/api/tasks/:id/pause` | 暂停 1–15 天（body：`{ days, starts_today? }`，`starts_today` 默认 `false`） |
-| GET | `/api/tasks/:id/logs?limit=50&before=<id>` | 倒序游标分页（默认/上限来自配置），返回 `{ logs, has_more }` |
+| GET | `/api/tasks/:id/logs?limit=50&before=<executed_at>:<id>` | 按执行时间倒序分页（默认/上限来自配置），返回 `{ logs, has_more }` |
 | GET | `/api/logs/:id` | 单条日志详情 |
 | GET | `/api/config` | 前端可用的配置（分页、默认窗口、轮询、响应体上限） |
 | GET | `/api/health` | 健康检查 |
@@ -344,6 +344,6 @@ src/
 2. 页面新建窗口为“当前时间 +1 分钟”的任务，等待随机触发，日志显示完整请求/响应。
 3. 在 `next_run_at` 之前重启服务，任务仍按原定时间触发（实测恢复日志：`已恢复 N/N 个 active 任务`）。
 4. 对慢请求执行中点击“停止”：请求中断，日志 `aborted=1`，任务 `next_run_at` 为 NULL，不再调度。
-5. 日志按任务分页倒序返回，前端“加载更早”使用 `before` 游标。
+5. 日志按任务分页、按执行时间倒序返回（最新在最上面），前端“加载更早”使用 `before=<executed_at>:<id>` 复合游标。
 6. `grep -R "child_process\|eval(\|new Function" src` 无业务命中；无 shell 调用。
 7. README 已写明启动方式、调度语义与限制。
