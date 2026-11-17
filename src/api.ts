@@ -12,6 +12,7 @@ import {
   type LogCursor,
 } from "./db";
 import { CurlParseError, normalizeStructured, parseCurlCommand } from "./curl-parser";
+import { validateCondition } from "./condition";
 import { PauseError, pauseTask, resumeTask, scheduleNewTask, stopTask } from "./scheduler";
 import { WindowError, validateWindow } from "./window";
 import type { NewTaskInput, RequestSpec, TaskRow } from "./types";
@@ -105,6 +106,7 @@ function parseTaskInput(body: unknown): NewTaskInput {
   let notifyCurl: string | null = null;
   let expectStatus: number | null = null;
   let expectBody: string | null = null;
+  let expectExpr: string | null = null;
 
   if (notifyEnabled) {
     if (typeof input.notify_curl !== "string" || !input.notify_curl.trim()) {
@@ -129,6 +131,19 @@ function parseTaskInput(body: unknown): NewTaskInput {
       }
       if (rawBody !== "") expectBody = rawBody;
     }
+
+    const rawExpr = input.expect_expr;
+    if (rawExpr !== undefined && rawExpr !== null) {
+      if (typeof rawExpr !== "string") {
+        throw new CurlParseError("条件表达式必须是字符串");
+      }
+      const trimmed = rawExpr.trim();
+      if (trimmed !== "") {
+        const error = validateCondition(trimmed);
+        if (error !== null) throw new CurlParseError(`条件表达式无效：${error}`);
+        expectExpr = trimmed;
+      }
+    }
   }
 
   return {
@@ -142,6 +157,7 @@ function parseTaskInput(body: unknown): NewTaskInput {
     notify_request: notifyRequest,
     expect_status: expectStatus,
     expect_body: expectBody,
+    expect_expr: expectExpr,
   };
 }
 

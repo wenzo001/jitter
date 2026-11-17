@@ -18,6 +18,7 @@ const els = {
   notifyCurl: document.getElementById("notify-curl"),
   expectStatus: document.getElementById("expect-status"),
   expectBody: document.getElementById("expect-body"),
+  expectExpr: document.getElementById("expect-expr"),
   formError: document.getElementById("form-error"),
   submit: document.getElementById("submit"),
   logsTitle: document.getElementById("logs-title"),
@@ -306,6 +307,7 @@ function renderTaskCard(task) {
   const conditions = [];
   if (task.expect_status !== null) conditions.push(`状态=${task.expect_status}`);
   if (task.expect_body !== null) conditions.push("响应体相等");
+  if (task.expect_expr !== null) conditions.push(`条件=${task.expect_expr}`);
   if (!conditions.length) conditions.push("任意 2xx");
 
   let requestOptions = {};
@@ -727,6 +729,9 @@ async function onCreate(event) {
     }
     if (els.expectBody.value !== "") {
       payload.expect_body = els.expectBody.value;
+    }
+    if (els.expectExpr.value.trim() !== "") {
+      payload.expect_expr = els.expectExpr.value.trim();
     }
   }
 

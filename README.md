@@ -36,7 +36,7 @@ bun run src/index.ts
 其他命令：
 
 ```bash
-bun test            # 173 项核心逻辑 / curl / 配置 / 调度 / API / 数据库 / 执行器测试
+bun test            # 206 项核心逻辑 / curl / 配置 / 调度 / API / 数据库 / 执行器 / 条件表达式测试
 bun run typecheck   # tsc --noEmit
 ```
 
@@ -128,11 +128,66 @@ bun run typecheck   # tsc --noEmit
 - **成功条件**（可组合，全部满足才算命中）：
   - 期望状态码（100–599，可选）
   - 期望响应体（与响应正文**完全相等**，可选；留空表示不启用，暂不支持只匹配空响应体）
-  - 两项都不填时，任意 `2xx` 视为成功。
+  - 条件表达式（对 JSON 响应体按路径取值判断，可选，详见下文）
+  - 三项都不填时，任意 `2xx` 视为成功。
 - 命中后执行通知 curl，并写入一条 `kind='notify'` 日志，`parent_log_id` 指向主请求日志。
 - 未命中则不发送通知。
 - 通知请求失败只影响自己的日志，不影响主任务。
-- 响应用于比较和存储的正文上限由 `logBodyLimitBytes` 决定（默认 100 KiB）；超过上限会追加 `[truncated]`，且此时“期望响应体”视为不匹配。
+- 响应用于比较和存储的正文上限由 `logBodyLimitBytes` 决定（默认 100 KiB）；超过上限会追加 `[truncated]`，且此时“期望响应体”与条件表达式都视为不匹配。
+- 条件表达式在建任务时做语法校验，语法错误返回 `400` 且不会创建任务；执行期即使表达式或响应体异常也不会抛错，只会判为“未命中”，不影响主任务日志。
+
+### 条件表达式
+
+条件表达式把响应正文按 JSON 解析后，在一个受限的“类 JS”语法里求值，结果为真值即命中。它**不调用 `eval` / `new Function`**，只解释执行下面的语法，属性访问一律安全，不能调用方法或执行任意代码。
+
+- **取值路径**：根对象就是响应 JSON。顶层字段直接写 `ok`，嵌套写 `data.result.remindtype`；支持 `data.result['description']`、`data.status.records[0].checktype`、`data?.result?.remindtype`（可选链写法与 `.` 一样安全）。字符串也可按下标取字符，`$body[0]='{'`。
+- **比较**：`=` 与 `==` 都是**宽松相等**（`"0"` 与 `0` 相等、`null` 与 `undefined` 相等）；`===` / `!==` 为严格相等；另有 `!=`、`<`、`<=`、`>`、`>=`。
+- **逻辑与三元**：`&&`、`||`、`!`、`条件 ? 值A : 值B`，可用括号分组；数字运算 `+ - * / %` 也可用，`+` 在任一侧是字符串时按 JS 规则拼接（`'5'+3` 得 `'53'`）。
+- **元变量**：`$status` 为 HTTP 状态码，`$body` 为原始响应体字符串，`$json` 为解析后的 JSON 根对象。注意响应 JSON 里的 `status` 字段要写 `status`（或 `data.status`），HTTP 状态码才写 `$status`，别混。
+- **字面量**：数字、单/双引号字符串、`true`、`false`、`null`、`undefined`。
+- **安全取值**：路径中途为 `null`/`undefined` 时得到“缺失”，任何比较（包括 `!=`）都不成立，且会沿 `!` 与 `==`/`!=` 一致传播——例如 `data.result.missing!=0`、`!(data.missing=0)` 都为 `false`，不会抛错；`__proto__` / `prototype` / `constructor` 等原型键被屏蔽。响应不是 JSON 时路径都取不到，但 `$status`、`$body` 仍可用。
+- 表达式最长 1000 字符，超出视为语法错误。
+
+**完整示例：打卡接口的两种响应。** 成功时：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "result": {
+      "checktime": 1794828938930,
+      "description": "19:35在高新人才大厦签退成功",
+      "remindtype": 0,
+      "checkwarn": null
+    },
+    "status": { "checkIn": 1, "checkOut": 1 }
+  },
+  "error": null
+}
+```
+
+失败时（业务错误，`code` 在根级 `error` 下，**不是** `data.error`）：
+
+```json
+{
+  "ok": false,
+  "data": { "needsMemo": false },
+  "error": { "kind": "business", "code": 900, "explanation": "不在规定时间，不允许打卡" }
+}
+```
+
+针对上面两份响应，可用的表达式：
+
+```
+data.result.remindtype=0              # 成功响应命中；失败响应没有 data.result，不命中
+ok=true && $status=200                # 成功响应命中（注意 ok 在根级）
+error=null                            # 成功响应命中
+error.code=900                        # 失败响应命中；成功响应 error 为 null，不命中
+ok=false && error.kind='business'     # 失败响应命中
+data.result.description!='19:35在高新人才大厦签退成功'   # 负向示例：排除这条签退消息，对成功响应反而不命中
+```
+
+**语义提醒**：只填条件表达式、不填状态码和响应体时，系统**不再隐含要求 2xx**——例如写 `$status=500` 在 500 响应上也会命中并发通知。若要限定成功区间，请写进表达式：`$status>=200 && $status<300 && data.result.remindtype=0`。期望状态码一栏填了 `200` 时则与之 AND，无需在表达式里重复。
 
 错过窗口只写 `kind='missed'` 日志并在启动时打印提示，不补跑，也不会触发成功通知（通知只用于成功命中）。
 
@@ -203,7 +258,8 @@ bun run typecheck   # tsc --noEmit
   "notify_enabled": true,
   "notify_curl": "curl -X POST 'https://notify.example/hook' -d 'checkin ok'",
   "expect_status": 200,
-  "expect_body": "{\"ok\":true}"
+  "expect_body": "{\"ok\":true}",
+  "expect_expr": "data.result.remindtype=0"
 }
 ```
 
@@ -213,7 +269,7 @@ bun run typecheck   # tsc --noEmit
 
 在需求给定结构上增加了通知与日志分类字段：
 
-- `tasks`：`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`、`request_options` / `notify_options`（JSON：`insecure`、`redirect`、`timeoutMs`、`proxy`、`proxyAuthorization`），以及暂停区间 `paused_from` / `paused_until`（本地日 00:00 的毫秒时间戳，半开区间 `[from, until)`）
+- `tasks`：`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`、`expect_expr`、`request_options` / `notify_options`（JSON：`insecure`、`redirect`、`timeoutMs`、`proxy`、`proxyAuthorization`），以及暂停区间 `paused_from` / `paused_until`（本地日 00:00 的毫秒时间戳，半开区间 `[from, until)`）
 - `logs`：`kind`（`task` / `notify` / `missed`）、`parent_log_id`、`matched`
 
 `data/` 整个目录已被 `.gitignore` 忽略。日志无自动清理，长期保留。
@@ -330,6 +386,7 @@ src/
 ├── scheduler.ts      # cron + 随机 timer + 恢复 + 停止/恢复 + 代际防护
 ├── window.ts         # 跨午夜窗口、随机点、恢复矩阵（纯函数）
 ├── executor.ts       # fetch + AbortController + TLS/代理/超时 + 100 KiB 截断 + 通知
+├── condition.ts      # 通知条件表达式的安全解析与求值（无 eval）
 ├── curl-parser.ts    # shell 风格 tokenizer + 宽 curl 参数映射
 ├── types.ts
 ├── *.test.ts         # bun test

@@ -44,6 +44,7 @@ export interface TaskRow {
   notify_options: string | null;
   expect_status: number | null;
   expect_body: string | null;
+  expect_expr: string | null;
 }
 
 export type LogKind = "task" | "notify" | "missed";
@@ -96,4 +97,5 @@ export interface NewTaskInput {
   notify_request: RequestSpec | null;
   expect_status: number | null;
   expect_body: string | null;
+  expect_expr: string | null;
 }

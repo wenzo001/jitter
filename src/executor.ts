@@ -1,4 +1,5 @@
 import { DEFAULT_CONFIG, getActiveConfig } from "./config";
+import { evaluateCondition } from "./condition";
 import { insertLog } from "./db";
 import type { RequestOptions, TaskRow } from "./types";
 
@@ -13,6 +14,7 @@ export interface SuccessInput {
   error: string | null;
   expectStatus: number | null;
   expectBody: string | null;
+  expectExpr: string | null;
 }
 
 export interface RunOutcome {
@@ -51,7 +53,25 @@ export function evaluateSuccess(input: SuccessInput): boolean {
     if (input.truncated) return false;
     if ((input.body ?? "") !== input.expectBody) return false;
   }
-  if (input.expectStatus === null && input.expectBody === null) {
+  if (input.expectExpr !== null) {
+    if (input.truncated) return false;
+    let json: unknown = null;
+    if (input.body !== null) {
+      try {
+        json = JSON.parse(input.body);
+      } catch {
+        json = null;
+      }
+    }
+    if (!evaluateCondition(input.expectExpr, { json, status: input.status, body: input.body })) {
+      return false;
+    }
+  }
+  if (
+    input.expectStatus === null &&
+    input.expectBody === null &&
+    input.expectExpr === null
+  ) {
     return input.status >= 200 && input.status < 300;
   }
   return true;
@@ -270,6 +290,7 @@ export async function executeTaskRun(task: TaskRow, signal: AbortSignal): Promis
     error: main.error,
     expectStatus: task.expect_status,
     expectBody: task.expect_body,
+    expectExpr: task.expect_expr,
   });
 
   const storedBody =

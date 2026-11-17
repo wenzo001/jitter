@@ -49,6 +49,7 @@ function sampleTask(overrides: Partial<NewTaskInput> = {}): NewTaskInput {
     notify_request: null,
     expect_status: null,
     expect_body: null,
+    expect_expr: null,
     ...overrides,
   };
 }
@@ -84,6 +85,7 @@ describe("db", () => {
         },
         expect_status: 200,
         expect_body: '{"ok":true}',
+        expect_expr: "data.result.remindtype=0",
       }),
     );
 
@@ -98,6 +100,7 @@ describe("db", () => {
     expect(JSON.parse(task.notify_headers!)).toEqual({ "Content-Type": "application/json" });
     expect(task.expect_status).toBe(200);
     expect(task.expect_body).toBe('{"ok":true}');
+    expect(task.expect_expr).toBe("data.result.remindtype=0");
 
     expect(getTask(task.id)?.id).toBe(task.id);
     expect(listTasks().some((row) => row.id === task.id)).toBe(true);
@@ -317,6 +320,7 @@ describe("db", () => {
     const raw = new Database(legacyPath);
     raw.exec("ALTER TABLE tasks DROP COLUMN request_options");
     raw.exec("ALTER TABLE tasks DROP COLUMN notify_options");
+    raw.exec("ALTER TABLE tasks DROP COLUMN expect_expr");
     raw.close();
 
     const migrated = initDb(legacyPath);
@@ -327,13 +331,16 @@ describe("db", () => {
     expect(columns).toContain("notify_options");
     expect(columns).toContain("paused_until");
     expect(columns).toContain("paused_from");
+    expect(columns).toContain("expect_expr");
     expect(getTask(existing.id)?.request_options).toBe("{}");
     expect(getTask(existing.id)?.notify_options).toBe("{}");
     expect(getTask(existing.id)?.paused_until).toBeNull();
+    expect(getTask(existing.id)?.expect_expr).toBeNull();
 
     const task = createTask(sampleTask({ name: "after migration" }));
     expect(task.request_options).toBe("{}");
     expect(task.notify_options).toBe("{}");
+    expect(task.expect_expr).toBeNull();
 
     initDb(dbPath);
   });

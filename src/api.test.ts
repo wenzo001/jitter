@@ -137,6 +137,7 @@ describe("api", () => {
         notify_curl: "curl -X POST https://notify.example/hook -d done",
         expect_status: 200,
         expect_body: "ok",
+        expect_expr: "data.result.remindtype=0",
       }),
     );
     expect(response.status).toBe(201);
@@ -145,6 +146,36 @@ describe("api", () => {
     expect(response.body.task.notify_method).toBe("POST");
     expect(response.body.task.expect_status).toBe(200);
     expect(response.body.task.expect_body).toBe("ok");
+    expect(response.body.task.expect_expr).toBe("data.result.remindtype=0");
+  });
+
+  test("rejects an invalid condition expression before inserting", async () => {
+    const before = listTasks().length;
+    const response = await post(
+      "/api/tasks",
+      payload({
+        notify_enabled: true,
+        notify_curl: "curl -X POST https://notify.example/hook -d done",
+        expect_expr: "data.result ==",
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(response.body.error).toContain("条件表达式无效");
+    expect(listTasks().length).toBe(before);
+  });
+
+  test("ignores conditions when notifications are disabled", async () => {
+    const response = await post(
+      "/api/tasks",
+      payload({
+        notify_enabled: false,
+        expect_expr: "data.result.remindtype=0",
+        expect_status: 200,
+      }),
+    );
+    expect(response.status).toBe(201);
+    expect(response.body.task.expect_expr).toBeNull();
+    expect(response.body.task.expect_status).toBeNull();
   });
 
   test("rejects an invalid task curl before inserting", async () => {

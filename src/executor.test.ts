@@ -24,6 +24,12 @@ beforeAll(() => {
       }
       if (url.pathname === "/ok") return new Response("ok");
       if (url.pathname === "/no") return new Response("no");
+      if (url.pathname === "/json-success") {
+        return Response.json({ ok: true, data: { result: { remindtype: 0, checkwarn: null } } });
+      }
+      if (url.pathname === "/json-failure") {
+        return Response.json({ ok: false, data: { error: { code: 900 } } });
+      }
       if (url.pathname === "/slow") {
         await Bun.sleep(5_000);
         return new Response("late");
@@ -73,6 +79,7 @@ function makeTask(overrides: Partial<NewTaskInput> = {}): TaskRow {
     notify_request: null,
     expect_status: null,
     expect_body: null,
+    expect_expr: null,
     ...overrides,
   };
   return createTask(input);
@@ -95,6 +102,7 @@ function withNotify(overrides: Partial<NewTaskInput> = {}): NewTaskInput {
     },
     expect_status: 200,
     expect_body: "ok",
+    expect_expr: null,
     ...overrides,
   };
 }
@@ -108,6 +116,7 @@ describe("evaluateSuccess", () => {
     error: null,
     expectStatus: null,
     expectBody: null,
+    expectExpr: null,
   };
 
   test("defaults to any 2xx", () => {
@@ -141,6 +150,40 @@ describe("evaluateSuccess", () => {
     expect(evaluateSuccess({ ...base, error: "boom" })).toBe(false);
     expect(evaluateSuccess({ ...base, aborted: true })).toBe(false);
     expect(evaluateSuccess({ ...base, status: null })).toBe(false);
+  });
+
+  test("honors a condition expression against the JSON body", () => {
+    const json = '{"ok":true,"data":{"result":{"remindtype":0,"message":"0"}}}';
+    expect(evaluateSuccess({ ...base, body: json, expectExpr: "data.result.remindtype=0" })).toBe(true);
+    expect(evaluateSuccess({ ...base, body: json, expectExpr: "data.result.message=0" })).toBe(true); // 字符串 0 与数字 0
+    expect(evaluateSuccess({ ...base, body: json, expectExpr: "data.result.remindtype=1" })).toBe(false);
+    expect(evaluateSuccess({ ...base, body: json, expectExpr: "data.missing.value=0" })).toBe(false);
+    expect(evaluateSuccess({ ...base, body: json, expectExpr: "$status=200 && ok=true" })).toBe(true);
+  });
+
+  test("combines a condition expression with status and body conditions", () => {
+    const json = '{"ok":true}';
+    expect(
+      evaluateSuccess({ ...base, body: json, expectStatus: 200, expectExpr: "ok=true" }),
+    ).toBe(true);
+    expect(
+      evaluateSuccess({ ...base, body: json, expectStatus: 201, expectExpr: "ok=true" }),
+    ).toBe(false);
+  });
+
+  test("fails on truncated bodies when an expression is set", () => {
+    expect(
+      evaluateSuccess({ ...base, body: "{}", expectExpr: "$status=200", truncated: true }),
+    ).toBe(false);
+  });
+
+  test("treats malformed JSON as missing paths but still allows status checks", () => {
+    expect(evaluateSuccess({ ...base, body: "not json", expectExpr: "ok=true" })).toBe(false);
+    expect(evaluateSuccess({ ...base, body: "not json", expectExpr: "$status=200" })).toBe(true);
+  });
+
+  test("never crashes on an invalid expression at runtime", () => {
+    expect(evaluateSuccess({ ...base, expectExpr: "data." })).toBe(false);
   });
 });
 
@@ -310,6 +353,35 @@ describe("executeTaskRun", () => {
     expect(outcome.notifyLogId).toBeNull();
     expect(notifyHits).toBe(hitsBefore);
     expect(listLogs(task.id, 10)).toHaveLength(1);
+  });
+
+  test("gates the notification on a JSON condition expression", async () => {
+    const hitsBefore = notifyHits;
+    const success = makeTask(
+      withNotify({
+        request: { url: urlOf("/json-success"), method: "GET", headers: {}, body: null },
+        expect_status: null,
+        expect_body: null,
+        expect_expr: "data.result.remindtype=0 && data.result.checkwarn=null",
+      }),
+    );
+    const successOutcome = await executeTaskRun(success, new AbortController().signal);
+    expect(successOutcome.matched).toBe(true);
+    expect(successOutcome.notifyLogId).not.toBeNull();
+    expect(notifyHits).toBe(hitsBefore + 1);
+
+    const failure = makeTask(
+      withNotify({
+        request: { url: urlOf("/json-failure"), method: "GET", headers: {}, body: null },
+        expect_status: null,
+        expect_body: null,
+        expect_expr: "data.result.remindtype=0",
+      }),
+    );
+    const failureOutcome = await executeTaskRun(failure, new AbortController().signal);
+    expect(failureOutcome.matched).toBe(false);
+    expect(failureOutcome.notifyLogId).toBeNull();
+    expect(notifyHits).toBe(hitsBefore + 1);
   });
 
   test("records aborted=1 when the request is interrupted", async () => {

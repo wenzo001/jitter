@@ -34,6 +34,7 @@ beforeAll(() => {
     notify_request: null,
     expect_status: null,
     expect_body: null,
+    expect_expr: null,
   };
   taskId = createTask(input).id;
 });

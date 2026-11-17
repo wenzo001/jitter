@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   notify_body      TEXT,
   notify_options   TEXT NOT NULL DEFAULT '{}',
   expect_status    INTEGER,
-  expect_body      TEXT
+  expect_body      TEXT,
+  expect_expr      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS logs (
@@ -149,6 +150,7 @@ function migrate(db: Database): void {
   ensureColumn(db, "tasks", "notify_options", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, "tasks", "paused_until", "INTEGER");
   ensureColumn(db, "tasks", "paused_from", "INTEGER");
+  ensureColumn(db, "tasks", "expect_expr", "TEXT");
   backfillPauseFrom(db);
 }
 
@@ -186,8 +188,8 @@ export function initDb(path?: string): Database {
         id, name, curl_command, request_url, request_method, request_headers, request_body, request_options,
         window_start, window_end, status, next_run_at, paused_from, paused_until, created_at, updated_at,
         notify_enabled, notify_curl_command, notify_url, notify_method, notify_headers, notify_body, notify_options,
-        expect_status, expect_body
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        expect_status, expect_body, expect_expr
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ),
     getTask: db.query("SELECT * FROM tasks WHERE id = ?"),
     listTasks: db.query("SELECT * FROM tasks ORDER BY created_at DESC"),
@@ -276,6 +278,7 @@ export function createTask(
     notify ? JSON.stringify(notify.options ?? {}) : "{}",
     notifyEnabled ? input.expect_status : null,
     notifyEnabled ? input.expect_body : null,
+    notifyEnabled ? input.expect_expr : null,
   );
   const task = getTask(id);
   if (!task) {

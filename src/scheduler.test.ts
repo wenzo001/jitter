@@ -91,6 +91,7 @@ function makeTask(
     notify_request: null,
     expect_status: null,
     expect_body: null,
+    expect_expr: null,
   };
   return createTask(input);
 }

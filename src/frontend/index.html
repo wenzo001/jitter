@@ -428,7 +428,11 @@
                     <textarea id="expect-body" rows="2" placeholder='例如 {"code":0}'></textarea>
                   </div>
                 </div>
-                <p class="hint">两项都不填时，任意 2xx 视为成功；填写后需全部相等才发送通知。响应体按最多 <span id="body-limit">100</span> KiB 比较；超过上限会追加 [truncated]，且此时期望响应体视为不匹配，不会发送通知。</p>
+                <div class="field" style="margin-top: 8px">
+                  <label for="expect-expr">条件表达式（可选，类 JS）</label>
+                  <textarea id="expect-expr" rows="2" placeholder='例如 data.result.remindtype=0'></textarea>
+                </div>
+                <p class="hint">三项都不填时，任意 2xx 视为成功；填写后需全部满足才发送通知。条件表达式从 JSON 响应体按路径安全取值，例如 <code>data.result.remindtype=0</code>、<code>data.error.code!=null</code>、<code>ok=true &amp;&amp; $status=200</code>；支持 <code>=</code>/<code>==</code>/<code>!=</code>/<code>&gt;</code>/<code>&lt;</code>、<code>&amp;&amp;</code>/<code>||</code>/<code>!</code>、三元与 <code>$status</code>。<code>"0"</code> 与 <code>0</code> 用 <code>=</code> 比较时相等；路径取不到则条件不成立，不会报错。只填表达式时不隐含 2xx 限制，需要限制状态码请写进表达式，如 <code>$status&gt;=200 &amp;&amp; $status&lt;300 &amp;&amp; ...</code>。响应体按最多 <span id="body-limit">100</span> KiB 比较；超过上限会追加 [truncated]，此时条件表达式视为不匹配。</p>
               </div>
             </div>
 
