@@ -8,6 +8,7 @@ import {
   updateTaskNextRun,
 } from "./db";
 import {
+  editTask,
   pauseTask,
   resumeTask,
   startScheduler,
@@ -315,5 +316,179 @@ describe("scheduler runtime", () => {
     const resumed = resumeTask(task.id);
     expect(resumed?.paused_until).toBeNull();
     expect(resumed?.next_run_at).not.toBeNull();
+  });
+});
+
+function editInput(task: TaskRow, overrides: Partial<NewTaskInput> = {}): NewTaskInput {
+  return {
+    name: task.name,
+    curl_command: task.curl_command,
+    request: {
+      url: task.request_url,
+      method: task.request_method,
+      headers: task.request_headers ? JSON.parse(task.request_headers) : {},
+      body: task.request_body,
+    },
+    window_start: task.window_start,
+    window_end: task.window_end,
+    notify_enabled: task.notify_enabled === 1,
+    notify_curl_command: task.notify_curl_command,
+    notify_request: task.notify_url
+      ? {
+          url: task.notify_url,
+          method: task.notify_method ?? "GET",
+          headers: task.notify_headers ? JSON.parse(task.notify_headers) : {},
+          body: task.notify_body,
+        }
+      : null,
+    expect_status: task.expect_status,
+    expect_body: task.expect_body,
+    expect_expr: task.expect_expr,
+    ...overrides,
+  };
+}
+
+describe("editTask", () => {
+  test("editing an active task persists config and keeps it scheduled", () => {
+    const task = makeTask("before edit", urlOf("/ok"), currentWindow());
+    const updated = editTask(task.id, editInput(task, { name: "after edit", window_end: "23:59" }));
+    expect(updated?.name).toBe("after edit");
+    expect(updated?.status).toBe("active");
+    expect(updated?.next_run_at).not.toBeNull();
+    expect(getTask(task.id)?.window_end).toBe("23:59");
+  });
+
+  test("editing an unchanged window keeps the already-randomised pending plan", () => {
+    const task = makeTask("keep plan", urlOf("/ok"), currentWindow());
+    const target = Date.now() + 30_000;
+    updateTaskNextRun(task.id, target);
+    const updated = editTask(task.id, editInput(task, { name: "renamed" }))!;
+    expect(updated.next_run_at).toBe(target);
+  });
+
+  test("editing a stopped task updates config without starting the scheduler", () => {
+    const task = makeTask("stopped", urlOf("/ok"), currentWindow());
+    stopTask(task.id);
+    const updated = editTask(task.id, editInput(task, { name: "stopped edited" }))!;
+    expect(updated.name).toBe("stopped edited");
+    expect(updated.status).toBe("stopped");
+    expect(updated.next_run_at).toBeNull();
+  });
+
+  test("editing while a request is in flight never re-runs the consumed window", async () => {
+    const task = makeTask("in-flight edit", urlOf("/slow"), currentWindow());
+    updateTaskNextRun(task.id, Date.now() + 80);
+    startScheduler();
+
+    const start = Date.now();
+    while (slowHits === 0 && Date.now() - start < 2000) await Bun.sleep(10);
+    expect(slowHits).toBe(1);
+
+    const edited = editTask(task.id, editInput(task, { name: "edited mid-flight" }))!;
+    expect(edited.name).toBe("edited mid-flight");
+
+    await Bun.sleep(700);
+    expect(slowHits).toBe(1);
+    expect(getTask(task.id)!.next_run_at).toBeGreaterThan(Date.now());
+  });
+
+  test("changing the window while a plan is pending replans into the new window", async () => {
+    const task = makeTask("window change", urlOf("/ok"), endedWindow());
+    const future = new Date(Date.now() + 60 * 60_000);
+    future.setSeconds(0, 0);
+    const target = future.getTime();
+    updateTaskNextRun(task.id, target);
+
+    const edited = editTask(
+      task.id,
+      editInput(task, { window_start: "23:00", window_end: "23:10" }),
+    )!;
+    expect(edited.next_run_at).not.toBe(target);
+    expect(edited.next_run_at).toBeGreaterThan(Date.now());
+
+    startScheduler();
+    await Bun.sleep(120);
+    expect(listLogs(task.id, 20, null).filter((log) => log.kind === "missed")).toHaveLength(0);
+  });
+
+  test("editing the window in flight still runs once in the new window today", async () => {
+    const task = makeTask("in-flight window", urlOf("/slow"), currentWindow());
+    updateTaskNextRun(task.id, Date.now() + 60);
+    startScheduler();
+    const start = Date.now();
+    while (slowHits === 0 && Date.now() - start < 2000) await Bun.sleep(10);
+    expect(slowHits).toBe(1);
+
+    // A DIFFERENT window covering "now" that has not run yet today. Its random
+    // point can be anywhere up to `end`, so keep the window short (2 minutes).
+    const other = (() => {
+      const now = new Date();
+      const s = new Date(now.getTime() - 60_000);
+      s.setSeconds(0, 0);
+      const e = new Date(s.getTime() + 2 * 60_000);
+      return { window_start: hhmm(s), window_end: hhmm(e) };
+    })();
+    expect(other.window_start).not.toBe(currentWindow().window_start);
+    // Pin the random point to "now". The in-flight `finally` does the actual
+    // planning, so keep it pinned until that second run has fired.
+    const originalRandom = Math.random;
+    Math.random = () => 0;
+    try {
+      editTask(task.id, editInput(task, other));
+      const deadline = Date.now() + 3_000;
+      while (slowHits < 2 && Date.now() < deadline) await Bun.sleep(20);
+      expect(slowHits).toBe(2);
+    } finally {
+      Math.random = originalRandom;
+    }
+    expect(listLogs(task.id, 20, null).filter((log) => log.kind === "missed")).toHaveLength(0);
+  });
+
+  test("editing keeps an active pause in place", () => {
+    const task = makeTask("paused edit", urlOf("/ok"), currentWindow());
+    pauseTask(task.id, { days: 2 });
+    const paused = getTask(task.id)!;
+    const updated = editTask(task.id, editInput(task, { name: "paused edited" }))!;
+    expect(updated.paused_from).toBe(paused.paused_from);
+    expect(updated.paused_until).toBe(paused.paused_until);
+    expect(updated.next_run_at).not.toBeNull();
+  });
+
+  test("editing a pending task makes the next run use the new config", async () => {
+    const task = makeTask("new url", urlOf("/ok"), currentWindow());
+    const pending = Date.now() + 120;
+    updateTaskNextRun(task.id, pending);
+    const edited = editTask(
+      task.id,
+      editInput(task, {
+        request: { url: urlOf("/slow"), method: "GET", headers: {}, body: null },
+        expect_status: null,
+      }),
+    )!;
+
+    // A live plan is preserved, so the run still happens at the original moment.
+    expect(edited.next_run_at).toBe(pending);
+    startScheduler();
+    const log = await waitForLog(
+      task.id,
+      (entry) => entry.request_url === urlOf("/slow") && entry.response_body === "late",
+    );
+    expect(log.request_url).toBe(urlOf("/slow"));
+  });
+
+  test("editing never schedules a second run in an already-consumed window", async () => {
+    const task = makeTask("no double run", urlOf("/ok"), currentWindow());
+    updateTaskNextRun(task.id, Date.now() + 60);
+    startScheduler();
+    await waitForLog(task.id, (log) => log.kind === "task" && log.response_body === "ok");
+    await Bun.sleep(120);
+
+    const after = getTask(task.id)!;
+    const edited = editTask(task.id, editInput(task, { name: "edited after run" }))!;
+    expect(edited.next_run_at).toBe(after.next_run_at);
+    expect(edited.next_run_at).toBeGreaterThan(Date.now());
+
+    await Bun.sleep(400);
+    expect(listLogs(task.id, 20, null).filter((log) => log.kind === "task")).toHaveLength(1);
   });
 });

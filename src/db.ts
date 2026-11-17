@@ -70,6 +70,7 @@ interface Statements {
   updateNextRun: AnyStatement;
   updatePause: AnyStatement;
   updateStatus: AnyStatement;
+  updateTaskConfig: AnyStatement;
   insertLog: AnyStatement;
   getLog: AnyStatement;
   listLogs: AnyStatement;
@@ -198,6 +199,15 @@ export function initDb(path?: string): Database {
       "UPDATE tasks SET paused_from = ?, paused_until = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
     ),
     updateStatus: db.query("UPDATE tasks SET status = ?, next_run_at = ?, updated_at = ? WHERE id = ?"),
+    updateTaskConfig: db.query(
+      `UPDATE tasks SET
+        name = ?, curl_command = ?, request_url = ?, request_method = ?, request_headers = ?,
+        request_body = ?, request_options = ?, window_start = ?, window_end = ?,
+        notify_enabled = ?, notify_curl_command = ?, notify_url = ?, notify_method = ?,
+        notify_headers = ?, notify_body = ?, notify_options = ?,
+        expect_status = ?, expect_body = ?, expect_expr = ?, updated_at = ?
+       WHERE id = ?`,
+    ),
     insertLog: db.query(
       `INSERT INTO logs (
         task_id, executed_at, request_url, request_method, request_headers, request_body,
@@ -285,6 +295,44 @@ export function createTask(
     throw new Error("任务写入后无法读取");
   }
   return task;
+}
+
+/**
+ * Overwrite a task's editable configuration while deliberately preserving
+ * id/status/next_run_at/paused_* /created_at. Scheduling state belongs to the
+ * scheduler, which replans after this write; a stopped task stays stopped.
+ */
+export function updateTaskConfig(
+  id: string,
+  input: NewTaskInput,
+  now: number = Date.now(),
+): TaskRow | null {
+  const notifyEnabled = input.notify_enabled ? 1 : 0;
+  const notify = notifyEnabled ? input.notify_request : null;
+  getStatements().updateTaskConfig.run(
+    input.name,
+    input.curl_command,
+    input.request.url,
+    input.request.method,
+    JSON.stringify(input.request.headers),
+    input.request.body,
+    JSON.stringify(input.request.options ?? {}),
+    input.window_start,
+    input.window_end,
+    notifyEnabled,
+    notifyEnabled ? input.notify_curl_command : null,
+    notify?.url ?? null,
+    notify?.method ?? null,
+    notify ? JSON.stringify(notify.headers) : null,
+    notify?.body ?? null,
+    notify ? JSON.stringify(notify.options ?? {}) : "{}",
+    notifyEnabled ? input.expect_status : null,
+    notifyEnabled ? input.expect_body : null,
+    notifyEnabled ? input.expect_expr : null,
+    now,
+    id,
+  );
+  return getTask(id);
 }
 
 export function getTask(id: string): TaskRow | null {

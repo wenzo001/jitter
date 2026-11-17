@@ -3,6 +3,7 @@ import {
   insertLog,
   listTasks,
   setTaskPause,
+  updateTaskConfig,
   updateTaskNextRun,
   updateTaskStatus,
 } from "./db";
@@ -21,7 +22,7 @@ import {
   type PauseInterval,
   type WindowSpec,
 } from "./window";
-import type { TaskRow } from "./types";
+import type { NewTaskInput, TaskRow } from "./types";
 
 export class PauseError extends Error {
   constructor(message: string) {
@@ -42,6 +43,10 @@ export interface SchedulerRuntime {
   timeoutTarget: number | null;
   abortController: AbortController | null;
   running: boolean;
+  /** Window in force when the in-flight run started; changed mid-run by editTask. */
+  runWindowKey: string | null;
+  /** Set when editTask changes the window during that run. */
+  windowChangedInFlight: boolean;
 }
 
 export interface StartSummary {
@@ -62,6 +67,8 @@ function ensureRuntime(taskId: string): SchedulerRuntime {
       timeoutTarget: null,
       abortController: null,
       running: false,
+      runWindowKey: null,
+      windowChangedInFlight: false,
     };
     runtimes.set(taskId, runtime);
   }
@@ -276,6 +283,8 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
   }
 
   runtime.running = true;
+  runtime.runWindowKey = `${task.window_start}\u0000${task.window_end}`;
+  runtime.windowChangedInFlight = false;
   const controller = new AbortController();
   runtime.abortController = controller;
 
@@ -296,7 +305,15 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
         const latestSpec = parseWindow(latest.window_start, latest.window_end);
         const now = Date.now();
         const pause = livePause(latest, now);
-        replan(taskId, planAfterRunWithPause(now, latestSpec, pause));
+        // The run consumed the OLD window. If editTask changed the window while
+        // it was in flight, the new window has not run yet today: plan inside
+        // it rather than jumping to tomorrow's instance.
+        const target = runtime.windowChangedInFlight
+          ? planWithPause(now, latestSpec, pause)
+          : planAfterRunWithPause(now, latestSpec, pause);
+        runtime.windowChangedInFlight = false;
+        runtime.runWindowKey = null;
+        replan(taskId, target);
       } catch (error) {
         console.error(`[jitter] 任务 ${taskId} 规划下一次执行失败`, error);
       }
@@ -322,6 +339,70 @@ export function scheduleNewTask(task: TaskRow): TaskRow {
   registerCron(task, spec);
   armTimer(task.id, target, runtime.generation);
   return getTask(task.id) ?? task;
+}
+
+/**
+ * Replace an existing task's configuration and keep it scheduled.
+ *
+ * The new window is validated before anything is written. An existing future
+ * plan is kept ONLY when the window did not change: it is a concrete moment
+ * owned by an armed timer, and re-planning could schedule a SECOND run in the
+ * already-consumed window. When the window DID change, that plan belongs to the
+ * old spec: keeping it would make onTimer judge it "missed" against the new
+ * window (no request, spurious missed log), so we replan into the new window.
+ * A stopped task is only updated — resuming later schedules from the new config.
+ *
+ * While a request is in flight we deliberately do NOT bump the generation or
+ * touch the timer (same rule as pause/resume): that request's `finally` owns
+ * the next plan and reads the just-written config. A window change is recorded
+ * on the runtime so that `finally` plans a fresh point in the new window
+ * instead of treating it as already consumed.
+ */
+export function editTask(taskId: string, input: NewTaskInput): TaskRow | null {
+  const task = getTask(taskId);
+  if (!task) return null;
+
+  const spec = parseWindow(input.window_start, input.window_end);
+  const windowChanged =
+    task.window_start !== input.window_start || task.window_end !== input.window_end;
+  const updated = updateTaskConfig(taskId, input);
+  if (!updated) return null;
+  if (updated.status !== "active") return updated;
+
+  registerCron(updated, spec);
+
+  const runtime = ensureRuntime(taskId);
+  if (runtime.running) {
+    if (windowChanged) runtime.windowChangedInFlight = true;
+    return updated;
+  }
+
+  const now = Date.now();
+  // Keep a live plan only when the window is unchanged: its armed timer still
+  // matches the spec. A changed window makes the old plan meaningless (onTimer
+  // would judge it "missed"), so fall through to a fresh plan in the new window.
+  if (!windowChanged && updated.next_run_at !== null && updated.next_run_at > now) {
+    return updated;
+  }
+  const pause = livePause(updated, now);
+  const target = planWithPause(now, spec, pause);
+
+  runtime.generation += 1;
+  if (runtime.timeout !== null) {
+    clearTimeout(runtime.timeout);
+  }
+  runtime.timeout = null;
+  runtime.timeoutTarget = null;
+
+  if (pause !== null) {
+    setTaskPause(taskId, pause, target, now);
+  } else if (updated.paused_until !== null) {
+    setTaskPause(taskId, null, target, now);
+  } else {
+    updateTaskNextRun(taskId, target);
+  }
+  armTimer(taskId, target, runtime.generation);
+  return getTask(taskId) ?? updated;
 }
 
 /**
@@ -439,6 +520,8 @@ export function stopTask(taskId: string): TaskRow | null {
     runtime.timeoutTarget = null;
     runtime.abortController?.abort();
     runtime.abortController = null;
+    runtime.runWindowKey = null;
+    runtime.windowChangedInFlight = false;
     runtimes.delete(taskId);
   }
 

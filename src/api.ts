@@ -13,7 +13,7 @@ import {
 } from "./db";
 import { CurlParseError, normalizeStructured, parseCurlCommand } from "./curl-parser";
 import { validateCondition } from "./condition";
-import { PauseError, pauseTask, resumeTask, scheduleNewTask, stopTask } from "./scheduler";
+import { PauseError, editTask, pauseTask, resumeTask, scheduleNewTask, stopTask } from "./scheduler";
 import { WindowError, validateWindow } from "./window";
 import type { NewTaskInput, RequestSpec, TaskRow } from "./types";
 
@@ -210,6 +210,19 @@ export const app = new Elysia()
     const scheduled = createAndSchedule(input);
     set.status = 201;
     return { task: scheduled };
+  })
+  .put("/api/tasks/:id", ({ params, body, set }) => {
+    if (!getTask(params.id)) {
+      set.status = 404;
+      return { error: "任务不存在" };
+    }
+    const input = parseTaskInput(body);
+    const task = editTask(params.id, input);
+    if (!task) {
+      set.status = 404;
+      return { error: "任务不存在" };
+    }
+    return { task };
   })
   .post("/api/tasks/:id/stop", ({ params, set }) => {
     const task = stopTask(params.id);

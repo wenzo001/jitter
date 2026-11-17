@@ -3,6 +3,9 @@ const els = {
   taskList: document.getElementById("task-list"),
   tasksEmpty: document.getElementById("tasks-empty"),
   form: document.getElementById("create-form"),
+  formTitle: document.getElementById("form-title"),
+  cancelEdit: document.getElementById("cancel-edit"),
+  editHint: document.getElementById("edit-hint"),
   name: document.getElementById("name"),
   windowStart: document.getElementById("window-start"),
   windowEnd: document.getElementById("window-end"),
@@ -85,6 +88,7 @@ const state = {
   clientConfig: { ...CLIENT_CONFIG_DEFAULTS },
   cleanup: { preview: null, selected: null, busy: false, view: "loading" },
   pause: { taskId: null, busy: false, label: "暂停任务" },
+  editingId: null,
 };
 
 function h(tag, props = {}, ...children) {
@@ -374,6 +378,7 @@ function renderTaskCard(task) {
       h(
         "div",
         { class: "task-actions" },
+        h("button", { class: "btn", type: "button", dataset: { action: "edit" } }, "编辑"),
         active
           ? pause
             ? [
@@ -662,6 +667,73 @@ async function refreshAll() {
   }
 }
 
+function headersToText(raw) {
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return raw;
+    return Object.entries(parsed)
+      .map(([name, value]) => `${name}: ${value}`)
+      .join("\n");
+  } catch {
+    return raw;
+  }
+}
+
+function setEditMode(task) {
+  state.editingId = task.id;
+  els.formTitle.textContent = "编辑任务";
+  els.submit.textContent = "保存修改";
+  els.cancelEdit.hidden = false;
+  els.editHint.hidden = false;
+  showFormError("");
+
+  els.name.value = task.name;
+  els.windowStart.value = task.window_start;
+  els.windowEnd.value = task.window_end;
+
+  const useCurl = task.curl_command !== null;
+  const modeInput = document.querySelector(`input[name="mode"][value="${useCurl ? "curl" : "structured"}"]`);
+  if (modeInput) modeInput.checked = true;
+  syncMode();
+  els.curl.value = task.curl_command ?? "";
+  els.url.value = task.request_url ?? "";
+  const method = task.request_method ?? "GET";
+  // The dropdown is a convenience list, not a whitelist: preserve an uncommon
+  // method (e.g. OPTIONS) instead of letting `.value =` reset it to empty.
+  if (!Array.from(els.method.options).some((option) => option.value === method)) {
+    els.method.append(new Option(method, method));
+  }
+  els.method.value = method;
+  els.headers.value = headersToText(task.request_headers);
+  els.body.value = task.request_body ?? "";
+
+  els.notifyEnabled.checked = task.notify_enabled === 1;
+  syncNotify();
+  els.notifyCurl.value = task.notify_curl_command ?? "";
+  els.expectStatus.value = task.expect_status === null ? "" : String(task.expect_status);
+  els.expectBody.value = task.expect_body ?? "";
+  els.expectExpr.value = task.expect_expr ?? "";
+}
+
+function clearEditMode() {
+  state.editingId = null;
+  els.formTitle.textContent = "新建任务";
+  els.submit.textContent = "创建任务";
+  els.cancelEdit.hidden = true;
+  els.editHint.hidden = true;
+}
+
+function cancelEdit() {
+  els.form.reset();
+  clearEditMode();
+  setDefaultWindow();
+  syncMode();
+  syncNotify();
+  showFormError("");
+  setStatus("已取消编辑");
+}
+
 async function onCreate(event) {
   event.preventDefault();
   showFormError("");
@@ -735,17 +807,24 @@ async function onCreate(event) {
     }
   }
 
+  const editingId = state.editingId;
   els.submit.disabled = true;
   try {
-    const data = await api("/api/tasks", {
-      method: "POST",
+    const data = await api(editingId ? `/api/tasks/${encodeURIComponent(editingId)}` : "/api/tasks", {
+      method: editingId ? "PUT" : "POST",
       body: JSON.stringify(payload),
     });
     els.form.reset();
+    clearEditMode();
     setDefaultWindow();
     syncMode();
     syncNotify();
-    setStatus(`已创建任务「${data.task.name}」`);
+    const savedMessage = !editingId
+      ? `已创建任务「${data.task.name}」`
+      : data.task.status === "active"
+        ? `已保存任务「${data.task.name}」，继续按新配置定时`
+        : `已保存任务「${data.task.name}」，任务仍保持停止；如需定时请点恢复`;
+    setStatus(savedMessage);
     await loadTasks({ silent: true });
     selectTask(data.task.id);
   } catch (error) {
@@ -1147,6 +1226,7 @@ function bindEvents() {
   });
   els.notifyEnabled.addEventListener("change", syncNotify);
   els.form.addEventListener("submit", onCreate);
+  els.cancelEdit.addEventListener("click", cancelEdit);
 
   els.refreshTasks.addEventListener("click", async () => {
     await loadTasks();
@@ -1191,6 +1271,16 @@ function bindEvents() {
       event.stopPropagation();
       if (button.dataset.action === "pause") {
         openPauseDialog(card.dataset.id);
+      } else if (button.dataset.action === "edit") {
+        const task = state.tasks.find((entry) => entry.id === card.dataset.id);
+        if (task) {
+          if (state.editingId && state.editingId !== task.id && !window.confirm("切换编辑目标会丢弃当前未保存的修改，继续吗？")) {
+            return;
+          }
+          setEditMode(task);
+          els.form.scrollIntoView({ behavior: "smooth", block: "start" });
+          setStatus(`正在编辑任务「${task.name}」`);
+        }
       } else {
         onTaskAction(button);
       }

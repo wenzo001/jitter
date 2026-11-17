@@ -358,7 +358,10 @@
         </div>
 
         <div class="panel">
-          <div class="panel-head"><h2>新建任务</h2></div>
+          <div class="panel-head">
+            <h2 id="form-title">新建任务</h2>
+            <button id="cancel-edit" class="btn btn-quiet" type="button" hidden>取消编辑</button>
+          </div>
           <form id="create-form" class="form" novalidate>
             <div class="field">
               <label for="name">任务名称</label>
@@ -438,6 +441,7 @@
 
             <div id="form-error" class="form-error" role="alert" hidden></div>
             <button id="submit" class="btn btn-primary" type="submit">创建任务</button>
+            <p class="hint" id="edit-hint" hidden>正在编辑已有任务。保存后按新配置继续定时；任务保持原有的运行/停止状态。</p>
           </form>
         </div>
       </section>

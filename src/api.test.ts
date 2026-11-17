@@ -38,6 +38,14 @@ function post(path: string, body: unknown) {
   });
 }
 
+function put(path: string, body: unknown) {
+  return call(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 function hhmm(date: Date): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
@@ -176,6 +184,63 @@ describe("api", () => {
     expect(response.status).toBe(201);
     expect(response.body.task.expect_expr).toBeNull();
     expect(response.body.task.expect_status).toBeNull();
+  });
+
+  test("updates an existing task via PUT and keeps it scheduled", async () => {
+    const created = await post("/api/tasks", payload({ name: "before edit" }));
+    const id = created.body.task.id as string;
+
+    const response = await put(
+      `/api/tasks/${id}`,
+      payload({
+        name: "after edit",
+        curl: "curl https://example.com/updated",
+        window_end: "23:58",
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.task.name).toBe("after edit");
+    expect(response.body.task.request_url).toBe("https://example.com/updated");
+    expect(response.body.task.window_end).toBe("23:58");
+    expect(response.body.task.next_run_at).toBeGreaterThan(Date.now());
+    expect(getTask(id)?.name).toBe("after edit");
+  });
+
+  test("PUT returns 404 for a missing task", async () => {
+    const response = await put("/api/tasks/does-not-exist", payload());
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe("任务不存在");
+  });
+
+  test("PUT validates input before changing the stored task", async () => {
+    const created = await post("/api/tasks", payload({ name: "keep me" }));
+    const id = created.body.task.id as string;
+
+    const invalid = await put(
+      `/api/tasks/${id}`,
+      payload({ curl: "curl -F 'file=@a' https://example.com" }),
+    );
+    expect(invalid.status).toBe(400);
+    expect(getTask(id)?.name).toBe("keep me");
+    expect(getTask(id)?.request_url).toBe("https://example.com/ok");
+  });
+
+  test("PUT rejects an invalid condition expression without touching the task", async () => {
+    const created = await post("/api/tasks", payload({ name: "expr guard" }));
+    const id = created.body.task.id as string;
+    const before = getTask(id)!;
+
+    const invalid = await put(
+      `/api/tasks/${id}`,
+      payload({
+        notify_enabled: true,
+        notify_curl: "curl -X POST https://notify.example/hook",
+        expect_expr: "data.result ==",
+      }),
+    );
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.error).toContain("条件表达式无效");
+    expect(getTask(id)?.expect_expr).toBe(before.expect_expr);
   });
 
   test("rejects an invalid task curl before inserting", async () => {

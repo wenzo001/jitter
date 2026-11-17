@@ -15,6 +15,7 @@ import {
   listTasks,
   resolveDbPath,
   setTaskPause,
+  updateTaskConfig,
   updateTaskNextRun,
   updateTaskStatus,
 } from "./db";
@@ -384,5 +385,100 @@ describe("db", () => {
     expect(getTask(expired.id)?.paused_from).toBeNull();
 
     initDb(dbPath);
+  });
+
+  test("updates task config while preserving scheduling and status columns", () => {
+    const original = createTask(
+      sampleTask({
+        name: "before edit",
+        window_start: "10:00",
+        window_end: "10:10",
+        notify_enabled: true,
+        notify_curl_command: "curl -X POST https://notify.example/old",
+        notify_request: {
+          url: "https://notify.example/old",
+          method: "POST",
+          headers: { "X-Old": "1" },
+          body: "old",
+        },
+        expect_status: 200,
+        expect_expr: "ok=true",
+      }),
+    );
+    updateTaskNextRun(original.id, Date.now() + 60_000);
+    setTaskPause(original.id, { from: Date.now(), until: Date.now() + 86_400_000 }, Date.now() + 60_000);
+    const planned = getTask(original.id)!;
+
+    const now = Date.now() + 1_000;
+    const next = updateTaskConfig(
+      original.id,
+      sampleTask({
+        name: "after edit",
+        window_start: "11:00",
+        window_end: "11:20",
+        curl_command: "curl https://example.com/new",
+        request: { url: "https://example.com/new", method: "POST", headers: { "X-New": "2" }, body: "new" },
+        notify_enabled: true,
+        notify_curl_command: "curl -X POST https://notify.example/new",
+        notify_request: {
+          url: "https://notify.example/new",
+          method: "PUT",
+          headers: { "X-New": "2" },
+          body: "new",
+          options: { timeoutMs: 1234 },
+        },
+        expect_status: 201,
+        expect_body: "done",
+        expect_expr: "data.code=0",
+      }),
+      now,
+    )!;
+
+    expect(next.id).toBe(original.id);
+    expect(next.name).toBe("after edit");
+    expect(next.window_start).toBe("11:00");
+    expect(next.window_end).toBe("11:20");
+    expect(next.curl_command).toBe("curl https://example.com/new");
+    expect(next.request_url).toBe("https://example.com/new");
+    expect(next.request_method).toBe("POST");
+    expect(JSON.parse(next.request_headers!)).toEqual({ "X-New": "2" });
+    expect(next.request_body).toBe("new");
+    expect(next.notify_curl_command).toBe("curl -X POST https://notify.example/new");
+    expect(next.notify_method).toBe("PUT");
+    expect(JSON.parse(next.notify_options!)).toEqual({ timeoutMs: 1234 });
+    expect(next.expect_status).toBe(201);
+    expect(next.expect_body).toBe("done");
+    expect(next.expect_expr).toBe("data.code=0");
+    expect(next.updated_at).toBe(now);
+
+    // Scheduling/status provenance is untouched -- the scheduler owns it.
+    expect(next.status).toBe(planned.status);
+    expect(next.next_run_at).toBe(planned.next_run_at);
+    expect(next.paused_from).toBe(planned.paused_from);
+    expect(next.paused_until).toBe(planned.paused_until);
+    expect(next.created_at).toBe(planned.created_at);
+  });
+
+  test("disabling notifications on edit clears notification config", () => {
+    const task = createTask(
+      sampleTask({
+        notify_enabled: true,
+        notify_curl_command: "curl -X POST https://notify.example/hook",
+        notify_request: { url: "https://notify.example/hook", method: "POST", headers: {}, body: null },
+        expect_status: 200,
+        expect_body: "ok",
+        expect_expr: "ok=true",
+      }),
+    );
+    const updated = updateTaskConfig(
+      task.id,
+      sampleTask({ notify_enabled: false, expect_status: 200, expect_body: "ok", expect_expr: "ok=true" }),
+    )!;
+    expect(updated.notify_enabled).toBe(0);
+    expect(updated.notify_curl_command).toBeNull();
+    expect(updated.notify_url).toBeNull();
+    expect(updated.expect_status).toBeNull();
+    expect(updated.expect_body).toBeNull();
+    expect(updated.expect_expr).toBeNull();
   });
 });
