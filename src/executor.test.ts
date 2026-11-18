@@ -269,6 +269,97 @@ describe("executeTaskRun", () => {
     }
   });
 
+  function resetError(): Error {
+    const error = new Error("ECONNRESET: The socket connection was closed unexpectedly");
+    (error as Error & { code: string }).code = "ECONNRESET";
+    return error;
+  }
+
+  test("retries a connection reset before any response and forces a fresh connection", async () => {
+    const original = globalThis.fetch;
+    let attempts = 0;
+    const connections: Array<string | null> = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      attempts += 1;
+      connections.push(new Headers(init?.headers).get("connection"));
+      if (attempts === 1) throw resetError();
+      return new Response("ok");
+    }) as typeof fetch;
+
+    try {
+      const task = makeTask();
+      const outcome = await executeTaskRun(task, new AbortController().signal);
+      expect(outcome.status).toBe(200);
+      expect(outcome.error).toBeNull();
+      expect(attempts).toBe(2);
+      // First attempt uses the original init; retry adds Connection: close.
+      expect(connections[0]).toBeNull();
+      expect(connections[1]).toBe("close");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("gives up after the retry budget on repeated resets", async () => {
+    const original = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = (async () => {
+      attempts += 1;
+      throw resetError();
+    }) as unknown as typeof fetch;
+
+    try {
+      const task = makeTask();
+      const outcome = await executeTaskRun(task, new AbortController().signal);
+      expect(outcome.status).toBeNull();
+      expect(outcome.error).toContain("ECONNRESET");
+      expect(attempts).toBe(3); // initial + 2 retries
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("does not retry a non-reset transport error", async () => {
+    const original = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = (async () => {
+      attempts += 1;
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+
+    try {
+      const task = makeTask();
+      const outcome = await executeTaskRun(task, new AbortController().signal);
+      expect(outcome.status).toBeNull();
+      expect(outcome.error).toContain("fetch failed");
+      expect(attempts).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("does not retry once the caller aborts", async () => {
+    const original = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      attempts += 1;
+      const signal = init?.signal;
+      if (signal) (signal as AbortSignal).throwIfAborted();
+      throw resetError();
+    }) as unknown as typeof fetch;
+
+    try {
+      const task = makeTask();
+      const controller = new AbortController();
+      const done = executeTaskRun(task, controller.signal);
+      controller.abort();
+      await done;
+      expect(attempts).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   test("uses a per-task curl timeout", async () => {
     const task = makeTask({
       request: {

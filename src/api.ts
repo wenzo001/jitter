@@ -13,6 +13,7 @@ import {
 } from "./db";
 import { CurlParseError, normalizeStructured, parseCurlCommand } from "./curl-parser";
 import { validateCondition } from "./condition";
+import { executeTestRequest } from "./executor";
 import {
   PauseError,
   deleteTask,
@@ -211,6 +212,21 @@ export const app = new Elysia()
       pollIntervalMs: config.pollIntervalMs,
       logBodyLimitBytes: config.logBodyLimitBytes,
     };
+  })
+  .post("/api/curl/test", async ({ body, set }) => {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      set.status = 400;
+      return { error: "请求体必须是 JSON 对象" };
+    }
+    const input = body as Record<string, unknown>;
+    if (typeof input.curl !== "string" || input.curl.trim() === "") {
+      set.status = 400;
+      return { error: "请粘贴 curl 命令" };
+    }
+    // parseCurlCommand throws CurlParseError -> onError maps it to 400.
+    const request = parseCurlCommand(input.curl.trim());
+    const result = await executeTestRequest(request);
+    return { result };
   })
   .get("/api/tasks", () => ({ tasks: listTasks() }))
   .post("/api/tasks", ({ body, set }) => {

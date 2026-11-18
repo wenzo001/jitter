@@ -36,7 +36,7 @@ bun run src/index.ts
 其他命令：
 
 ```bash
-bun test            # 225 项核心逻辑 / curl / 配置 / 调度 / 编辑 / 删除 / API / 数据库 / 执行器 / 条件表达式测试
+bun test            # 232 项核心逻辑 / curl / 配置 / 调度 / 编辑 / 删除 / API / 数据库 / 执行器 / 条件表达式测试
 bun run typecheck   # tsc --noEmit
 ```
 
@@ -248,6 +248,15 @@ data.result.description!='19:35在高新人才大厦签退成功'   # 负向示�
 
 所有校验在**创建任务之前**完成；失败返回 400，不落库、不执行。整个项目不执行 shell 命令，不使用 `child_process`、`eval` 或 `new Function` 处理用户输入。
 
+### 测试 curl
+
+新建任务面板的 curl 输入框旁有「测试 curl」按钮，点击弹出测试窗口（会把表单里已填的 curl 带入，也可独立粘贴）。点「发送测试」会通过 `POST /api/curl/test` 用**与真实任务完全相同的传输方式**（连接重置重试、TLS/代理、`--max-time`、100 KiB 响应体上限）立即发送一次，展示 HTTP 状态、耗时、响应体与响应头，便于在正式建任务前验证 curl 能否连通、返回什么。
+
+- 测试请求**不创建任务、不写执行记录**，不影响任务的调度与日志。
+- curl 非法返回 `400`；目标请求本身失败（DNS/TLS/连接拒绝/超时）时接口仍返回 `200`，错误在结果的 `error` 字段里展示。
+- 内置 30 秒超时兜底防止挂死，curl 的 `--max-time` 会覆盖该兜底值；前端另有 40 秒中止保护。
+- 和有副作用的真实任务一样，测试请求会真实发出（例如 POST 打卡），请自行留意目标端点。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -263,6 +272,7 @@ data.result.description!='19:35在高新人才大厦签退成功'   # 负向示�
 | GET | `/api/logs/:id` | 单条日志详情 |
 | GET | `/api/config` | 前端可用的配置（分页、默认窗口、轮询、响应体上限） |
 | GET | `/api/health` | 健康检查 |
+| POST | `/api/curl/test` | 测试一段 curl：body `{ curl }`，解析并立即发送一次，返回 `{ result }`；curl 非法返回 400，目标请求失败仍为 200（错误在 `result.error`）。不创建任务、不写日志 |
 | GET | `/api/logs/cleanup/preview` | 日志清理预检：总条数、占用、各档位可删条数与估算字节 |
 | POST | `/api/logs/cleanup` | 执行清理；`{ days, confirm: true, cutoff? }` 或 `{ all: true, confirm: "DELETE_ALL" }` |
 
@@ -301,11 +311,12 @@ data.result.description!='19:35在高新人才大厦签退成功'   # 负向示�
 - 进程内 cron 依赖服务常驻；服务停止期间错过的窗口不会补跑，只记录 `missed` 日志。
 - 执行过程中崩溃重启时，如果请求已发出但尚未完成落库，重启后可能再次执行一次（窗口内恢复语义）。
 - 请求默认没有超时；可通过全局 `requestTimeoutMs` 或 curl 的 `--max-time` 启用（超时记为 `aborted=1`，错误为“请求超时”）。在请求结束或停止之前，该任务不会进入下一次调度。
+- **连接重置自动重试**：Bun 的 fetch 会复用 keep-alive 连接，远端（CDN 等）可能单方面关闭空闲 socket，下一次请求写进去时收到 `ECONNRESET`，且发生在响应头之前。执行器对这类连接重置错误（`ECONNRESET` / `EPIPE` / “socket connection was closed unexpectedly” 等）自动重试最多 2 次（共 3 次），重试请求带 `Connection: close` 强制换一条新连接，退避带抖动且可随时被停止/超时中止。只对响应头之前的 `fetch()` 阶段重试，body 读取出错不重试，避免对有副作用的 POST 重复发送；DNS/TLS/HTTP 状态码等非重置错误不重试。这正是间隔很长的通知任务偶发失败的主因，重试后通常即可成功。
 - `-k/--insecure` 会为该任务关闭 TLS 证书校验（Bun fetch `tls.rejectUnauthorized=false`），任务卡片会显示“跳过 TLS 校验”；仅对可信内网或自签名测试端点使用。
 - `-x/--proxy` 会让请求经指定代理发出；未指定时 Bun fetch 仍会读取 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境变量。`-U/--proxy-user` 必须配合 `-x`，凭据通过 Bun 代理 headers 发送，不写入普通请求头或日志；代理 URL 中的 userinfo 会被剥离并转换为同一份代理认证。
 - curl 文本、任务配置和日志可能包含 Authorization、Cookie 等敏感信息；请限制数据目录权限，不要把实例暴露到公网。
 - 编译后的单文件在执行目录/可执行文件目录查找 `jitter.config.json`；服务化时应显式设置 `JITTER_CONFIG` 和 `JITTER_DB_PATH` 到可写目录。
-- 输出、重试、协议偏好类 flag 会被接受但不会改变出站请求：不写文件、不执行 curl 层重试，任务仍按窗口调度一次。
+- 输出、重试、协议偏好类 flag 会被接受但不会改变出站请求：不写文件、不执行 curl 层重试（上述「连接重置自动重试」属执行器的传输容错，与 curl 的 `--retry` 无关），任务仍按窗口调度一次。
 - 不支持 multipart/文件上传、自定义 TLS 证书文件、DNS/连接覆盖（见上文拒绝列表）。
 - 一个窗口只执行一次；不提供手动立即执行。请求在途期间不会进入下一次调度，因此被长请求跨过的窗口既不补跑，也不写 `missed` 日志。
 - `missed` 日志的 `executed_at` 是写入时刻，原计划时刻写在错误信息里（否则宕机数日后启动补写的日志会立刻落在清理档位之外）。
@@ -399,13 +410,13 @@ docker-compose.yml    # 命名卷 + 本地端口映射
 dist/                 # bun run build 产物（gitignore）
 src/
 ├── index.ts          # Bun.serve + HTML 路由 + 配置/端口启动 + 退出
-├── api.ts            # Elysia API、创建前校验、/api/config、错误映射
+├── api.ts            # Elysia API、创建前校验、/api/config、/api/curl/test、错误映射
 ├── config.ts         # 配置默认值、JSON 加载、校验、环境变量覆盖、编译态路径
 ├── port.ts           # EADDRINUSE 检测、端口 +1 重试、本机地址校验
 ├── db.ts             # SQLite/WAL、建表、增量迁移、预编译语句、任务与日志读写
 ├── scheduler.ts      # cron + 随机 timer + 恢复 + 停止/恢复 + 代际防护
 ├── window.ts         # 跨午夜窗口、随机点、恢复矩阵（纯函数）
-├── executor.ts       # fetch + AbortController + TLS/代理/超时 + 100 KiB 截断 + 通知
+├── executor.ts       # fetch + AbortController + 连接重置重试 + TLS/代理/超时 + 100 KiB 截断 + 通知 + 测试请求
 ├── condition.ts      # 通知条件表达式的安全解析与求值（无 eval）
 ├── curl-parser.ts    # shell 风格 tokenizer + 宽 curl 参数映射
 ├── types.ts

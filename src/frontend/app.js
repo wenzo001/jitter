@@ -72,6 +72,22 @@ const els = {
   deleteNameHint: document.getElementById("delete-name-hint"),
   deleteConfirmInput: document.getElementById("delete-confirm-input"),
   deleteError: document.getElementById("delete-error"),
+  openTestCurl: document.getElementById("open-test-curl"),
+  testDialog: document.getElementById("test-dialog"),
+  testClose: document.getElementById("test-close"),
+  testCancel: document.getElementById("test-cancel"),
+  testSend: document.getElementById("test-send"),
+  testCurl: document.getElementById("test-curl"),
+  testError: document.getElementById("test-error"),
+  testResult: document.getElementById("test-result"),
+  testStatus: document.getElementById("test-status"),
+  testDuration: document.getElementById("test-duration"),
+  testBody: document.getElementById("test-body"),
+  testBodyWrap: document.getElementById("test-body-wrap"),
+  testBodyEmpty: document.getElementById("test-body-empty"),
+  testTruncated: document.getElementById("test-truncated"),
+  testHeadersWrap: document.getElementById("test-headers-wrap"),
+  testHeaders: document.getElementById("test-headers"),
 };
 
 const MAX_PAUSE_DAYS = 15;
@@ -97,6 +113,7 @@ const state = {
   cleanup: { preview: null, selected: null, busy: false, view: "loading" },
   pause: { taskId: null, busy: false, label: "暂停任务" },
   deleting: { taskId: null, busy: false, name: "" },
+  testing: { busy: false },
   editingId: null,
 };
 
@@ -1293,6 +1310,108 @@ async function executeDelete() {
   }
 }
 
+function openTestDialog() {
+  state.testing.busy = false;
+  els.testSend.disabled = false;
+  els.testSend.textContent = "发送测试";
+  els.testError.hidden = true;
+  els.testError.textContent = "";
+  els.testResult.hidden = true;
+  // Pre-fill from the create form's curl box when available.
+  const draft = els.curl.value.trim();
+  if (draft) els.testCurl.value = draft;
+  if (!els.testDialog.open) els.testDialog.showModal();
+  els.testCurl.focus();
+}
+
+function closeTestDialog() {
+  if (state.testing.busy) return;
+  if (els.testDialog.open) els.testDialog.close();
+}
+
+function renderTestResult(result) {
+  const hasResponse = result.status !== null;
+  const badgeClass = hasResponse
+    ? result.status >= 200 && result.status < 300
+      ? "badge-active"
+      : "badge-paused"
+    : "badge-stopped";
+  els.testStatus.className = `badge ${badgeClass}`;
+  els.testStatus.textContent = hasResponse ? `HTTP ${result.status}` : (result.aborted ? "已中断" : "请求失败");
+  els.testDuration.textContent = `耗时 ${result.durationMs} ms`;
+
+  if (hasResponse && result.body) {
+    els.testBody.textContent = result.body;
+    els.testBodyWrap.hidden = false;
+    els.testBodyEmpty.hidden = true;
+  } else {
+    els.testBody.textContent = "";
+    els.testBodyWrap.hidden = false;
+    els.testBodyEmpty.hidden = false;
+  }
+  els.testTruncated.hidden = !result.truncated;
+
+  const headers = result.headers;
+  if (headers && Object.keys(headers).length > 0) {
+    els.testHeaders.textContent = Object.entries(headers)
+      .map(([key, value]) => `${key}: ${value}`)
+      .join("\n");
+    els.testHeadersWrap.hidden = false;
+  } else {
+    els.testHeaders.textContent = "";
+    els.testHeadersWrap.hidden = true;
+  }
+
+  if (result.error) {
+    els.testError.textContent = result.error;
+    els.testError.hidden = false;
+  } else {
+    els.testError.textContent = "";
+    els.testError.hidden = true;
+  }
+  els.testResult.hidden = false;
+}
+
+async function sendTest() {
+  if (state.testing.busy) return;
+  const curl = els.testCurl.value.trim();
+  if (!curl) {
+    els.testError.textContent = "请粘贴 curl 命令";
+    els.testError.hidden = false;
+    els.testCurl.focus();
+    return;
+  }
+
+  state.testing.busy = true;
+  els.testSend.disabled = true;
+  els.testSend.textContent = "发送中…";
+  els.testError.hidden = true;
+  els.testError.textContent = "";
+  els.testResult.hidden = true;
+  // Dedicated timeout: the test endpoint may wait up to 30s server-side.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 40_000);
+  try {
+    const data = await api("/api/curl/test", {
+      method: "POST",
+      body: JSON.stringify({ curl }),
+      signal: controller.signal,
+    });
+    renderTestResult(data.result);
+    setStatus(`测试完成：${els.testStatus.textContent}`);
+  } catch (error) {
+    els.testError.textContent = error.message;
+    els.testError.hidden = false;
+    els.testResult.hidden = true;
+    setStatus(error.message, true);
+  } finally {
+    clearTimeout(timeout);
+    state.testing.busy = false;
+    els.testSend.disabled = false;
+    els.testSend.textContent = "发送测试";
+  }
+}
+
 function bindEvents() {
   document.querySelectorAll('input[name="mode"]').forEach((radio) => {
     radio.addEventListener("change", syncMode);
@@ -1346,6 +1465,14 @@ function bindEvents() {
   els.deleteDialog.addEventListener("close", () => {
     state.deleting.busy = false;
     els.deleteCancel.disabled = false;
+  });
+
+  els.openTestCurl.addEventListener("click", openTestDialog);
+  els.testSend.addEventListener("click", sendTest);
+  els.testClose.addEventListener("click", closeTestDialog);
+  els.testCancel.addEventListener("click", closeTestDialog);
+  els.testDialog.addEventListener("cancel", (event) => {
+    if (state.testing.busy) event.preventDefault();
   });
 
   els.taskList.addEventListener("click", (event) => {

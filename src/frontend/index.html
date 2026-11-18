@@ -117,6 +117,9 @@
       .btn-primary:hover { background: #1d4ed8; }
       .btn-danger { color: var(--err); border-color: #f3c8c2; background: #fff; }
       .btn-danger:hover { background: var(--err-soft); }
+      .btn-sm { padding: 4px 10px; font-size: 12px; }
+      .field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .field-label-row > label { font-size: 12.5px; font-weight: 650; color: #38445a; }
       .task-list { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
       .task-card {
         border: 1px solid var(--border);
@@ -258,6 +261,26 @@
       }
       .cleanup-dialog::backdrop { background: rgba(16, 24, 40, 0.36); }
       .pause-dialog { width: min(460px, calc(100vw - 32px)); }
+      .test-dialog { width: min(720px, calc(100vw - 32px)); }
+      .test-curl-input { min-height: 84px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .test-result { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+      .test-result-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+      .test-duration { font-size: 12px; color: var(--muted); }
+      .test-truncated { font-size: 11px; color: var(--warn, #b45309); font-weight: 500; }
+      .test-pre {
+        margin: 0;
+        max-height: 240px;
+        overflow: auto;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: #f7f8fa;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
       .cleanup-head {
         display: flex;
         align-items: center;
@@ -386,7 +409,10 @@
             </div>
 
             <div id="curl-wrap" class="field">
-              <label for="curl">curl 命令</label>
+              <div class="field-label-row">
+                <label for="curl">curl 命令</label>
+                <button id="open-test-curl" class="btn btn-quiet btn-sm" type="button">测试 curl</button>
+              </div>
               <textarea id="curl" placeholder="curl -X POST 'https://example.com/api' -H 'Content-Type: application/json' -d '{&quot;ok&quot;:true}'"></textarea>
             </div>
 
@@ -523,6 +549,43 @@
       <div class="cleanup-foot">
         <button id="cleanup-cancel" class="btn" type="button">取消</button>
         <button id="cleanup-execute" class="btn btn-danger" type="button" disabled>执行清理</button>
+      </div>
+    </dialog>
+
+    <dialog id="test-dialog" class="cleanup-dialog test-dialog" aria-labelledby="test-title">
+      <div class="cleanup-head">
+        <h2 id="test-title">测试 curl</h2>
+        <button id="test-close" class="btn btn-quiet" type="button">关闭</button>
+      </div>
+
+      <div class="cleanup-body">
+        <p class="hint">粘贴一段 curl 命令，点「发送测试」立即执行一次。测试请求不会创建任务，也不会写入执行记录。</p>
+        <div class="field">
+          <label for="test-curl">curl 命令</label>
+          <textarea id="test-curl" class="test-curl-input" placeholder="curl -X GET 'https://example.com/api' -H 'Accept: application/json'"></textarea>
+        </div>
+        <div id="test-error" class="form-error" role="alert" hidden></div>
+
+        <div id="test-result" class="test-result" hidden>
+          <div class="test-result-head">
+            <span id="test-status" class="badge"></span>
+            <span id="test-duration" class="test-duration"></span>
+          </div>
+          <div class="field" id="test-body-wrap">
+            <span class="field-label">响应体<span id="test-truncated" class="test-truncated" hidden>（已截断）</span></span>
+            <pre id="test-body" class="test-pre"></pre>
+            <div id="test-body-empty" class="empty" hidden>响应体为空</div>
+          </div>
+          <div class="field" id="test-headers-wrap" hidden>
+            <span class="field-label">响应头</span>
+            <pre id="test-headers" class="test-pre"></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="cleanup-foot">
+        <button id="test-cancel" class="btn" type="button">关闭</button>
+        <button id="test-send" class="btn btn-primary" type="button">发送测试</button>
       </div>
     </dialog>
 

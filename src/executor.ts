@@ -1,7 +1,7 @@
 import { DEFAULT_CONFIG, getActiveConfig } from "./config";
 import { evaluateCondition } from "./condition";
 import { insertLog } from "./db";
-import type { RequestOptions, TaskRow } from "./types";
+import type { RequestOptions, RequestSpec, TaskRow } from "./types";
 
 /** Mirrors the configurable cap from one source; the live limit is the config. */
 export const RESPONSE_BODY_LIMIT = DEFAULT_CONFIG.logBodyLimitBytes;
@@ -198,6 +198,81 @@ interface BunRequestInit extends RequestInit {
       };
 }
 
+/**
+ * Bun's fetch pool reuses keep-alive sockets. A remote peer (often a CDN) may
+ * close an idle socket out from under us; the next fetch then writes into that
+ * half-closed socket and rejects with ECONNRESET before any response byte is
+ * received. Long-interval jobs (e.g. a daily notification) hit this reliably.
+ *
+ * We retry ONLY reset-shaped transport failures, only before response headers
+ * arrive (the `fetch()` call itself), and never on abort/timeout. Retries carry
+ * `Connection: close` so the pool opens a fresh socket instead of handing back
+ * the same stale one. Non-reset errors (DNS, TLS, HTTP status, bad body) are
+ * never retried — an HTTP status is a normal Response, not a thrown error.
+ */
+const FETCH_RESET_RETRIES = 2;
+const FETCH_RETRY_BASE_DELAY_MS = 150;
+
+function isConnectionResetError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "AbortError" || error.name === "TimeoutError") return false;
+  const code = (error as Error & { code?: unknown }).code;
+  if (code === "ECONNRESET" || code === "EPIPE") return true;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("socket connection was closed unexpectedly") ||
+    message.includes("connection reset by peer") ||
+    message.includes("econnreset")
+  );
+}
+
+function headersWithClose(init: RequestInit): HeadersInit {
+  const headers = new Headers(init.headers ?? undefined);
+  headers.set("Connection", "close");
+  return headers;
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("Aborted", "AbortError");
+}
+
+function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortReason(signal));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function fetchWithResetRetry(
+  url: string,
+  init: RequestInit,
+  signal: AbortSignal,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    if (signal.aborted) throw abortReason(signal);
+    try {
+      return await fetch(url, attempt === 0 ? init : { ...init, headers: headersWithClose(init) });
+    } catch (error) {
+      if (signal.aborted) throw abortReason(signal);
+      if (attempt >= FETCH_RESET_RETRIES || !isConnectionResetError(error)) throw error;
+      // Small, jittered backoff; abortable so stop/timeout stay responsive.
+      const delay = FETCH_RETRY_BASE_DELAY_MS * (attempt + 1) + Math.floor(Math.random() * 80);
+      await sleepAbortable(delay, signal);
+    }
+  }
+}
+
 async function performRequest(
   url: string,
   method: string,
@@ -242,7 +317,7 @@ async function performRequest(
           }
         : options.proxy;
     }
-    const response = await fetch(url, init);
+    const response = await fetchWithResetRetry(url, init, effectiveSignal);
     status = response.status;
     headersJson = JSON.stringify(Object.fromEntries(response.headers.entries()));
     const read = await readBodyCapped(response, bodyLimit);
@@ -264,6 +339,58 @@ async function performRequest(
     error,
     aborted,
     durationMs: Math.max(0, Math.round(performance.now() - started)),
+  };
+}
+
+/** A one-off probe request: same transport as a real task run, but no DB log. */
+export interface TestRequestOutcome {
+  status: number | null;
+  headers: Record<string, string> | null;
+  body: string;
+  truncated: boolean;
+  error: string | null;
+  aborted: boolean;
+  durationMs: number;
+}
+
+/** Safety net for the test endpoint so a hanging URL cannot block the caller. */
+const TEST_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Send a single request parsed from a user-pasted curl, reusing the exact
+ * transport (retries, TLS/proxy options, timeout, body cap) as a scheduled run.
+ * Nothing is written to the database — this is a diagnostic probe only.
+ */
+export async function executeTestRequest(request: RequestSpec): Promise<TestRequestOutcome> {
+  const config = getActiveConfig();
+  const result = await performRequest(
+    request.url,
+    request.method,
+    request.headers ? JSON.stringify(request.headers) : null,
+    request.body,
+    new AbortController().signal,
+    { timeoutMs: TEST_REQUEST_TIMEOUT_MS, ...(request.options ?? {}) },
+    config.requestTimeoutMs,
+    config.logBodyLimitBytes,
+  );
+
+  let headers: Record<string, string> | null = null;
+  if (result.headersJson !== null) {
+    try {
+      headers = JSON.parse(result.headersJson) as Record<string, string>;
+    } catch {
+      headers = null;
+    }
+  }
+
+  return {
+    status: result.status,
+    headers,
+    body: result.body,
+    truncated: result.truncated,
+    error: result.error,
+    aborted: result.aborted,
+    durationMs: result.durationMs,
   };
 }
 

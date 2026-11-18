@@ -1,7 +1,14 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { app } from "./api";
 import { DEFAULT_CONFIG, setActiveConfig } from "./config";
-import { closeDb, getTask, initDb, insertLog, listTasks } from "./db";
+import {
+  closeDb,
+  getLogCleanupPreview,
+  getTask,
+  initDb,
+  insertLog,
+  listTasks,
+} from "./db";
 import { stopAll } from "./scheduler";
 import type { NewLogInput } from "./types";
 
@@ -92,6 +99,60 @@ describe("api", () => {
     const response = await call("/api/health");
     expect(response.status).toBe(200);
     expect(response.body.ok).toBe(true);
+  });
+
+  test("tests a curl: parses, sends, returns result, writes no log", async () => {
+    const original = globalThis.fetch;
+    const captured: { sent: { url: string; init: RequestInit } | null } = { sent: null };
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      captured.sent = { url: String(input), init: init ?? {} };
+      return new Response("probe-ok", {
+        status: 201,
+        headers: { "X-Probe": "yes" },
+      });
+    }) as unknown as typeof fetch;
+
+    const logsBefore = getLogCleanupPreview().total_count;
+    try {
+      const response = await post("/api/curl/test", {
+        curl: "curl -X POST 'https://example.com/test' -H 'X-A: 1' -d 'body=1'",
+      });
+      expect(response.status).toBe(200);
+      expect(response.body.result.status).toBe(201);
+      expect(response.body.result.body).toBe("probe-ok");
+      expect(response.body.result.error).toBeNull();
+      expect(response.body.result.headers["x-probe"]).toBe("yes");
+      expect(captured.sent?.url).toBe("https://example.com/test");
+      expect(captured.sent?.init.method).toBe("POST");
+      // No task row was created and nothing was written to the log table.
+      expect(listTasks()).toHaveLength(0);
+      expect(getLogCleanupPreview().total_count).toBe(logsBefore);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("curl test reports transport errors without failing the endpoint", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    try {
+      const response = await post("/api/curl/test", { curl: "curl https://example.com/x" });
+      expect(response.status).toBe(200);
+      expect(response.body.result.status).toBeNull();
+      expect(response.body.result.error).toContain("fetch failed");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("curl test rejects a bad curl with 400", async () => {
+    const empty = await post("/api/curl/test", { curl: "   " });
+    expect(empty.status).toBe(400);
+
+    const notJson = await post("/api/curl/test", { curl: 42 });
+    expect(notJson.status).toBe(400);
   });
 
   test("exposes the client-side configuration", async () => {
