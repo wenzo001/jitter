@@ -347,6 +347,28 @@ function renderTaskCard(task) {
     requestOptions = {};
   }
 
+  const statusBadge = h(
+    "span",
+    {
+      class: `badge ${
+        active
+          ? pause
+            ? pause.started
+              ? "badge-paused"
+              : "badge-pending"
+            : "badge-active"
+          : "badge-stopped"
+      }`,
+    },
+    active
+      ? pause
+        ? pause.started
+          ? `暂停至 ${formatDay(pause.until)}`
+          : `${formatDay(pause.from)} 起暂停`
+        : "运行中"
+      : "已停止",
+  );
+
   const card = h(
     "article",
     {
@@ -358,49 +380,8 @@ function renderTaskCard(task) {
     },
     h(
       "div",
-      { class: "task-top" },
-      h(
-        "div",
-        { style: "min-width:0" },
-        h("h3", { class: "task-name" }, task.name),
-        h(
-          "div",
-          { class: "task-meta" },
-          h(
-            "span",
-            {
-              class: `badge ${
-                active
-                  ? pause
-                    ? pause.started
-                      ? "badge-paused"
-                      : "badge-pending"
-                    : "badge-active"
-                  : "badge-stopped"
-              }`,
-            },
-            active
-              ? pause
-                ? pause.started
-                  ? `暂停至 ${formatDay(pause.until)}`
-                  : `${formatDay(pause.from)} 起暂停`
-                : "运行中"
-              : "已停止",
-          ),
-          cross ? h("span", { class: "badge badge-cross" }, "跨午夜") : null,
-          requestOptions.insecure
-            ? h("span", { class: "badge badge-insecure" }, "跳过 TLS 校验")
-            : null,
-          requestOptions.timeoutMs
-            ? h(
-                "span",
-                { class: "badge badge-timeout" },
-                `超时 ${formatTimeout(requestOptions.timeoutMs)}`,
-              )
-            : null,
-          h("span", {}, `窗口 ${task.window_start}–${task.window_end}`),
-        ),
-      ),
+      { class: "task-head" },
+      h("h3", { class: "task-name" }, task.name),
       h(
         "div",
         { class: "task-actions" },
@@ -409,16 +390,8 @@ function renderTaskCard(task) {
         active
           ? pause
             ? [
-                h(
-                  "button",
-                  { class: "btn", type: "button", dataset: { action: "pause" } },
-                  "调整暂停",
-                ),
-                h(
-                  "button",
-                  { class: "btn", type: "button", dataset: { action: "resume" } },
-                  "取消暂停",
-                ),
+                h("button", { class: "btn", type: "button", dataset: { action: "pause" } }, "调整暂停"),
+                h("button", { class: "btn", type: "button", dataset: { action: "resume" } }, "取消暂停"),
               ]
             : h("button", { class: "btn", type: "button", dataset: { action: "pause" } }, "暂停")
           : null,
@@ -428,24 +401,41 @@ function renderTaskCard(task) {
         h("button", { class: "btn btn-danger", type: "button", dataset: { action: "delete" } }, "删除"),
       ),
     ),
+    h(
+      "div",
+      { class: "task-meta" },
+      statusBadge,
+      cross ? h("span", { class: "badge badge-cross" }, "跨午夜") : null,
+      requestOptions.insecure
+        ? h("span", { class: "badge badge-insecure" }, "跳过 TLS 校验")
+        : null,
+      requestOptions.timeoutMs
+        ? h("span", { class: "badge badge-timeout" }, `超时 ${formatTimeout(requestOptions.timeoutMs)}`)
+        : null,
+      h(
+        "span",
+        { class: "task-window" },
+        h("span", { class: "meta-key" }, "窗口 "),
+        h("span", { class: "task-window-value" }, `${task.window_start}–${task.window_end}`),
+      ),
+    ),
     h("div", { class: "task-request" }, `${task.request_method} ${task.request_url}`),
     h(
       "div",
-      { class: "task-extra" },
-      active
-        ? pause
-          ? pause.started
-            ? `已暂停 ${calendarDays(pause.from, pause.until)} 个自然日（${formatDay(pause.from)} 起），${formatTime(pause.until)} 恢复；恢复后下次执行：${formatTime(task.next_run_at)}`
-            : `今天剩余时间照常执行（下次 ${formatTime(task.next_run_at)}）；${formatDay(pause.from)} 00:00 起暂停 ${calendarDays(pause.from, pause.until)} 个自然日，${formatTime(pause.until)} 恢复`
-          : `下次执行：${formatTime(task.next_run_at)}`
-        : `已停止，历史日志保留`,
-    ),
-    h(
-      "div",
-      { class: "task-extra" },
-      task.notify_enabled
-        ? `成功通知：已开启（${conditions.join(" 且 ")}）`
-        : "成功通知：未开启",
+      { class: "task-foot" },
+      h(
+        "span",
+        {},
+        active
+          ? pause
+            ? pause.started
+              ? `已暂停 ${calendarDays(pause.from, pause.until)} 天（${formatDay(pause.from)} 起），${formatTime(pause.until)} 恢复；下次 ${formatTime(task.next_run_at)}`
+              : `下次 ${formatTime(task.next_run_at)}；${formatDay(pause.from)} 00:00 起暂停 ${calendarDays(pause.from, pause.until)} 天，${formatTime(pause.until)} 恢复`
+            : `下次 ${formatTime(task.next_run_at)}`
+          : "已停止，历史日志保留",
+      ),
+      h("span", { class: "foot-sep", "aria-hidden": "true" }, "·"),
+      h("span", {}, task.notify_enabled ? `通知已开启（${conditions.join(" 且 ")}）` : "通知未开启"),
     ),
   );
 
