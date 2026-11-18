@@ -64,6 +64,14 @@ const els = {
   pauseDays: document.getElementById("pause-days"),
   pauseSummary: document.getElementById("pause-summary"),
   pauseError: document.getElementById("pause-error"),
+  deleteDialog: document.getElementById("delete-dialog"),
+  deleteClose: document.getElementById("delete-close"),
+  deleteCancel: document.getElementById("delete-cancel"),
+  deleteConfirm: document.getElementById("delete-confirm"),
+  deleteTask: document.getElementById("delete-task"),
+  deleteNameHint: document.getElementById("delete-name-hint"),
+  deleteConfirmInput: document.getElementById("delete-confirm-input"),
+  deleteError: document.getElementById("delete-error"),
 };
 
 const MAX_PAUSE_DAYS = 15;
@@ -88,6 +96,7 @@ const state = {
   clientConfig: { ...CLIENT_CONFIG_DEFAULTS },
   cleanup: { preview: null, selected: null, busy: false, view: "loading" },
   pause: { taskId: null, busy: false, label: "暂停任务" },
+  deleting: { taskId: null, busy: false, name: "" },
   editingId: null,
 };
 
@@ -398,6 +407,7 @@ function renderTaskCard(task) {
         active
           ? h("button", { class: "btn btn-danger", type: "button", dataset: { action: "stop" } }, "停止")
           : h("button", { class: "btn", type: "button", dataset: { action: "resume" } }, "恢复"),
+        h("button", { class: "btn btn-danger", type: "button", dataset: { action: "delete" } }, "删除"),
       ),
     ),
     h("div", { class: "task-request" }, `${task.request_method} ${task.request_url}`),
@@ -1220,6 +1230,69 @@ async function executePause() {
   }
 }
 
+function openDeleteDialog(taskId) {
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  if (!task) return;
+  state.deleting.taskId = taskId;
+  state.deleting.name = task.name;
+  state.deleting.busy = false;
+  els.deleteTask.textContent = `任务「${task.name}」及其全部历史日志将被永久删除。`;
+  els.deleteNameHint.textContent = task.name;
+  els.deleteConfirmInput.value = "";
+  els.deleteError.hidden = true;
+  els.deleteError.textContent = "";
+  els.deleteConfirm.disabled = true;
+  els.deleteConfirm.textContent = "确认删除";
+  if (!els.deleteDialog.open) els.deleteDialog.showModal();
+  els.deleteConfirmInput.focus();
+}
+
+function closeDeleteDialog() {
+  if (state.deleting.busy) return;
+  if (els.deleteDialog.open) els.deleteDialog.close();
+}
+
+function updateDeleteConfirm() {
+  if (state.deleting.busy) return;
+  els.deleteConfirm.disabled = els.deleteConfirmInput.value.trim() !== state.deleting.name.trim();
+}
+
+async function executeDelete() {
+  const taskId = state.deleting.taskId;
+  const name = state.deleting.name;
+  if (!taskId || state.deleting.busy) return;
+  if (els.deleteConfirmInput.value.trim() !== name.trim()) return;
+
+  state.deleting.busy = true;
+  els.deleteConfirm.disabled = true;
+  els.deleteCancel.disabled = true;
+  els.deleteConfirm.textContent = "删除中…";
+  els.deleteError.hidden = true;
+  try {
+    const data = await api(`/api/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+    state.deleting.busy = false;
+    if (els.deleteDialog.open) els.deleteDialog.close();
+    setStatus(`已删除任务「${name}」及其 ${data?.deleted_logs ?? 0} 条日志`);
+    if (state.editingId === taskId) clearEditMode();
+    if (state.selectedTaskId === taskId) {
+      state.selectedTaskId = null;
+      state.selectionEpoch += 1;
+      state.logs.clear();
+      state.oldestCursor = null;
+      state.hasMore = false;
+    }
+    await loadTasks({ silent: true });
+    loadLogs({ reset: true });
+  } catch (error) {
+    state.deleting.busy = false;
+    els.deleteCancel.disabled = false;
+    els.deleteConfirm.disabled = false;
+    els.deleteConfirm.textContent = "确认删除";
+    els.deleteError.textContent = error.message;
+    els.deleteError.hidden = false;
+  }
+}
+
 function bindEvents() {
   document.querySelectorAll('input[name="mode"]').forEach((radio) => {
     radio.addEventListener("change", syncMode);
@@ -1263,6 +1336,18 @@ function bindEvents() {
     state.pause.busy = false;
   });
 
+  els.deleteConfirmInput.addEventListener("input", updateDeleteConfirm);
+  els.deleteConfirm.addEventListener("click", executeDelete);
+  els.deleteClose.addEventListener("click", closeDeleteDialog);
+  els.deleteCancel.addEventListener("click", closeDeleteDialog);
+  els.deleteDialog.addEventListener("cancel", (event) => {
+    if (state.deleting.busy) event.preventDefault();
+  });
+  els.deleteDialog.addEventListener("close", () => {
+    state.deleting.busy = false;
+    els.deleteCancel.disabled = false;
+  });
+
   els.taskList.addEventListener("click", (event) => {
     const card = event.target.closest(".task-card");
     if (!card) return;
@@ -1271,6 +1356,8 @@ function bindEvents() {
       event.stopPropagation();
       if (button.dataset.action === "pause") {
         openPauseDialog(card.dataset.id);
+      } else if (button.dataset.action === "delete") {
+        openDeleteDialog(card.dataset.id);
       } else if (button.dataset.action === "edit") {
         const task = state.tasks.find((entry) => entry.id === card.dataset.id);
         if (task) {

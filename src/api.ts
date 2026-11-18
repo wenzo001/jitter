@@ -13,7 +13,15 @@ import {
 } from "./db";
 import { CurlParseError, normalizeStructured, parseCurlCommand } from "./curl-parser";
 import { validateCondition } from "./condition";
-import { PauseError, editTask, pauseTask, resumeTask, scheduleNewTask, stopTask } from "./scheduler";
+import {
+  PauseError,
+  deleteTask,
+  editTask,
+  pauseTask,
+  resumeTask,
+  scheduleNewTask,
+  stopTask,
+} from "./scheduler";
 import { WindowError, validateWindow } from "./window";
 import type { NewTaskInput, RequestSpec, TaskRow } from "./types";
 
@@ -223,6 +231,14 @@ export const app = new Elysia()
       return { error: "任务不存在" };
     }
     return { task };
+  })
+  .delete("/api/tasks/:id", async ({ params, set }) => {
+    const outcome = await deleteTask(params.id);
+    if (!outcome) {
+      set.status = 404;
+      return { error: "任务不存在" };
+    }
+    return { ok: true, id: outcome.task.id, deleted_logs: outcome.deleted_logs };
   })
   .post("/api/tasks/:id/stop", ({ params, set }) => {
     const task = stopTask(params.id);

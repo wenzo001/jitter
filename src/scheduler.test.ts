@@ -8,9 +8,11 @@ import {
   updateTaskNextRun,
 } from "./db";
 import {
+  deleteTask,
   editTask,
   pauseTask,
   resumeTask,
+  runtimeCount,
   startScheduler,
   stopAll,
   stopTask,
@@ -161,6 +163,32 @@ describe("scheduler runtime", () => {
 
     await Bun.sleep(700);
     expect(slowHits).toBe(1);
+  });
+
+  test("delete tears down an in-flight task and leaves no row or log behind", async () => {
+    const task = makeTask("delete in flight", urlOf("/slow"), currentWindow());
+    updateTaskNextRun(task.id, Date.now() + 100);
+
+    startScheduler();
+    const start = Date.now();
+    while (slowHits === 0 && Date.now() - start < 2_000) {
+      await Bun.sleep(10);
+    }
+    expect(slowHits).toBe(1);
+    expect(runtimeCount()).toBe(1);
+
+    const outcome = await deleteTask(task.id);
+    expect(outcome?.task.id).toBe(task.id);
+
+    // The runtime is gone, the task row is gone, and the aborted run's log was
+    // written before the transaction and therefore removed with everything.
+    expect(runtimeCount()).toBe(0);
+    expect(getTask(task.id)).toBeNull();
+    expect(listLogs(task.id, 100)).toHaveLength(0);
+
+    await Bun.sleep(700);
+    expect(slowHits).toBe(1);
+    expect(listLogs(task.id, 100)).toHaveLength(0);
   });
 
   test("startup records a missed window without sending the request", async () => {

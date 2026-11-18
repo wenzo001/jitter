@@ -343,6 +343,34 @@ export function listTasks(): TaskRow[] {
   return getStatements().listTasks.all() as TaskRow[];
 }
 
+export interface DeleteTaskOutcome {
+  /** Whether the task existed and was removed. */
+  deleted: boolean;
+  /** Number of log rows removed together with the task. */
+  deleted_logs: number;
+}
+
+/**
+ * Delete a task together with EVERY log that belongs to it: normal runs,
+ * notify runs and missed-window records all share the same `task_id`.
+ *
+ * `logs.task_id` has a foreign key onto `tasks` and `PRAGMA foreign_keys = ON`,
+ * so logs must be removed before the task row. Both statements run in one
+ * transaction: a failure can never leave an orphan task or stray log rows.
+ */
+export function deleteTask(id: string): DeleteTaskOutcome {
+  const db = getDatabase();
+  const remove = db.transaction(() => {
+    const logs = db.run("DELETE FROM logs WHERE task_id = ?", [id]);
+    const task = db.run("DELETE FROM tasks WHERE id = ?", [id]);
+    return {
+      deleted: Number(task.changes) > 0,
+      deleted_logs: Number(logs.changes),
+    };
+  });
+  return remove();
+}
+
 export function updateTaskNextRun(id: string, nextRunAt: number | null, now: number = Date.now()): void {
   getStatements().updateNextRun.run(nextRunAt, now, id);
 }

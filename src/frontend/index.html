@@ -526,6 +526,30 @@
       </div>
     </dialog>
 
+    <dialog id="delete-dialog" class="cleanup-dialog pause-dialog" aria-labelledby="delete-title">
+      <div class="cleanup-head">
+        <h2 id="delete-title">删除任务</h2>
+        <button id="delete-close" class="btn btn-quiet" type="button">关闭</button>
+      </div>
+
+      <div class="cleanup-body">
+        <p id="delete-task" class="hint"></p>
+        <div class="cleanup-warning">
+          删除后，该任务的全部历史日志（任务执行记录、通知记录与错过记录）会一并永久删除，且不可恢复。
+        </div>
+        <div class="field" style="margin-top: 12px">
+          <label for="delete-confirm-input">请输入任务名称「<span id="delete-name-hint"></span>」以确认</label>
+          <input id="delete-confirm-input" type="text" autocomplete="off" />
+        </div>
+        <div id="delete-error" class="form-error" role="alert" hidden></div>
+      </div>
+
+      <div class="cleanup-foot">
+        <button id="delete-cancel" class="btn" type="button">取消</button>
+        <button id="delete-confirm" class="btn btn-danger" type="button" disabled>确认删除</button>
+      </div>
+    </dialog>
+
     <dialog id="pause-dialog" class="cleanup-dialog pause-dialog" aria-labelledby="pause-title">
       <div class="cleanup-head">
         <h2 id="pause-title">暂停任务</h2>

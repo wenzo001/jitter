@@ -1,4 +1,5 @@
 import {
+  deleteTask as deleteTaskRecord,
   getTask,
   insertLog,
   listTasks,
@@ -43,6 +44,8 @@ export interface SchedulerRuntime {
   timeoutTarget: number | null;
   abortController: AbortController | null;
   running: boolean;
+  /** Resolves when an in-flight executeTaskRun finishes (including its log write). */
+  activeRun: Promise<unknown> | null;
   /** Window in force when the in-flight run started; changed mid-run by editTask. */
   runWindowKey: string | null;
   /** Set when editTask changes the window during that run. */
@@ -67,6 +70,7 @@ function ensureRuntime(taskId: string): SchedulerRuntime {
       timeoutTarget: null,
       abortController: null,
       running: false,
+      activeRun: null,
       runWindowKey: null,
       windowChangedInFlight: false,
     };
@@ -287,9 +291,11 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
   runtime.windowChangedInFlight = false;
   const controller = new AbortController();
   runtime.abortController = controller;
+  const activeRun = executeTaskRun(task, controller.signal);
+  runtime.activeRun = activeRun;
 
   try {
-    await executeTaskRun(task, controller.signal);
+    await activeRun;
   } catch (error) {
     console.error(`[jitter] 任务 ${taskId} 执行异常`, error);
   } finally {
@@ -297,6 +303,7 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
     if (current !== runtime) return;
     runtime.running = false;
     runtime.abortController = null;
+    runtime.activeRun = null;
     if (runtime.generation !== generation) return;
 
     const latest = getTask(taskId);
@@ -530,6 +537,57 @@ export function stopTask(taskId: string): TaskRow | null {
     setTaskPause(taskId, null, null);
   }
   return getTask(taskId);
+}
+
+export interface DeleteTaskOutcome {
+  task: TaskRow;
+  deleted_logs: number;
+}
+
+/**
+ * Delete a task and everything under it.
+ *
+ * The runtime is torn down and removed from the map FIRST: an in-flight
+ * onTimer finally then sees `current !== runtime` and skips replanning, and a
+ * late cron tick finds no runtime and returns. The abort signal is raised so
+ * executeTaskRun settles quickly, and we await it before touching the DB —
+ * its aborted-request log must be written while the task row still exists,
+ * otherwise `logs.task_id -> tasks.id` would reject the insert (or leave an
+ * orphan). Only after that does a single transaction remove the task + logs.
+ */
+export async function deleteTask(taskId: string): Promise<DeleteTaskOutcome | null> {
+  const task = getTask(taskId);
+  if (!task) return null;
+
+  const runtime = runtimes.get(taskId);
+  let pending: Promise<unknown> | null = null;
+  if (runtime) {
+    runtime.generation += 1;
+    runtime.cron?.stop();
+    runtime.cron = null;
+    if (runtime.timeout !== null) clearTimeout(runtime.timeout);
+    runtime.timeout = null;
+    runtime.timeoutTarget = null;
+    runtime.abortController?.abort();
+    runtime.abortController = null;
+    runtime.runWindowKey = null;
+    runtime.windowChangedInFlight = false;
+    pending = runtime.activeRun;
+    // Remove before awaiting so onTimer's finally skips replanning and any
+    // cron/timer callback that slips in finds no runtime.
+    runtimes.delete(taskId);
+  }
+
+  if (pending) {
+    try {
+      await pending;
+    } catch (error) {
+      console.error(`[jitter] 任务 ${taskId} 删除前收尾失败`, error);
+    }
+  }
+
+  const outcome = deleteTaskRecord(taskId);
+  return { task, deleted_logs: outcome.deleted_logs };
 }
 
 export function resumeTask(taskId: string): TaskRow | null {

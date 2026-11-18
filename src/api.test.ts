@@ -312,6 +312,30 @@ describe("api", () => {
     expect(missing.status).toBe(404);
   });
 
+  test("deletes a task with all its logs and reports 404 afterwards", async () => {
+    const created = await post("/api/tasks", payload());
+    const id = created.body.task.id;
+    const other = await post("/api/tasks", payload({ name: "other" }));
+    const otherId = other.body.task.id;
+
+    // One task log + one notify-kind log (same task_id) for the doomed task,
+    // plus a log for the task we keep.
+    insertLog(logInput(id, 1));
+    insertLog({ ...logInput(id, 2), kind: "notify" });
+    insertLog(logInput(otherId, 3));
+
+    const deleted = await call(`/api/tasks/${id}`, { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+    expect(deleted.body).toEqual({ ok: true, id, deleted_logs: 2 });
+
+    expect(getTask(id)).toBeNull();
+    expect((await call(`/api/tasks/${id}/logs`)).status).toBe(404);
+    expect(getTask(otherId)?.name).toBe("other");
+
+    const again = await call(`/api/tasks/${id}`, { method: "DELETE" });
+    expect(again.status).toBe(404);
+  });
+
   test("pauses a task for 1-15 days and clears the pause on resume", async () => {
     const created = await post("/api/tasks", payload());
     const id = created.body.task.id;

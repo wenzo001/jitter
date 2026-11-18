@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   closeDb,
   createTask,
+  deleteTask,
   getJournalMode,
   getLog,
   getTask,
@@ -310,6 +311,47 @@ describe("db", () => {
     expect(notify.kind).toBe("notify");
     expect(notify.parent_log_id).toBe(mainId);
     expect(getLog(missedId)?.kind).toBe("missed");
+  });
+
+  test("deletes a task together with all of its log kinds", () => {
+    const task = createTask(sampleTask({ name: "to delete" }));
+    const other = createTask(sampleTask({ name: "keep me" }));
+    for (const target of [task, other]) {
+      for (const kind of ["task", "notify", "missed"] as const) {
+        insertLog({
+          task_id: target.id,
+          executed_at: 3_000,
+          request_url: "https://example.com",
+          request_method: "GET",
+          request_headers: null,
+          request_body: null,
+          response_status: null,
+          response_headers: null,
+          response_body: null,
+          duration_ms: null,
+          error: null,
+          aborted: 0,
+          kind,
+          parent_log_id: null,
+          matched: null,
+        });
+      }
+    }
+
+    const outcome = deleteTask(task.id);
+    expect(outcome.deleted).toBe(true);
+    expect(outcome.deleted_logs).toBe(3);
+    expect(getTask(task.id)).toBeNull();
+    expect(listLogs(task.id, 100)).toHaveLength(0);
+    // The other task and its logs are untouched.
+    expect(getTask(other.id)?.name).toBe("keep me");
+    expect(listLogs(other.id, 100)).toHaveLength(3);
+  });
+
+  test("deleting a missing task reports false and removes nothing", () => {
+    const outcome = deleteTask("not-a-real-id");
+    expect(outcome.deleted).toBe(false);
+    expect(outcome.deleted_logs).toBe(0);
   });
 
   test("migrates an existing tasks table by adding request option columns", () => {
