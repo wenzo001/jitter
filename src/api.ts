@@ -16,10 +16,12 @@ import { validateCondition } from "./condition";
 import { executeTestRequest } from "./executor";
 import {
   PauseError,
+  RunNowError,
   deleteTask,
   editTask,
   pauseTask,
   resumeTask,
+  runTaskNow,
   scheduleNewTask,
   stopTask,
 } from "./scheduler";
@@ -183,6 +185,10 @@ function createAndSchedule(input: NewTaskInput): TaskRow {
 
 export const app = new Elysia()
   .onError(({ code, error, set }) => {
+    if (error instanceof RunNowError) {
+      set.status = 409;
+      return { error: error.message };
+    }
     if (
       error instanceof CurlParseError ||
       error instanceof WindowError ||
@@ -263,6 +269,22 @@ export const app = new Elysia()
       return { error: "任务不存在" };
     }
     return { task };
+  })
+  .post("/api/tasks/:id/run", async ({ params, set }) => {
+    const result = await runTaskNow(params.id);
+    if (!result) {
+      set.status = 404;
+      return { error: "任务不存在" };
+    }
+    return {
+      ok: true,
+      status: result.outcome.status,
+      matched: result.outcome.matched,
+      error: result.outcome.error,
+      aborted: result.outcome.aborted,
+      durationMs: result.outcome.durationMs,
+      notifySent: result.outcome.notifyLogId !== null,
+    };
   })
   .post("/api/tasks/:id/resume", ({ params, set }) => {
     const task = resumeTask(params.id);

@@ -155,6 +155,35 @@ describe("api", () => {
     expect(notJson.status).toBe(400);
   });
 
+  test("runs a task immediately, logs it, and keeps its plan", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("run-now-ok", { status: 200 })) as unknown as typeof fetch;
+    try {
+      const created = await post("/api/tasks", payload());
+      const id = created.body.task.id;
+      const plannedAt = created.body.task.next_run_at;
+
+      const response = await post(`/api/tasks/${id}/run`, {});
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ ok: true, status: 200, matched: true });
+      expect(response.body.notifySent).toBe(false);
+
+      const list = await call(`/api/tasks/${id}/logs`);
+      expect(list.body.logs).toHaveLength(1);
+      expect(list.body.logs[0].response_body).toBe("run-now-ok");
+
+      const task = getTask(id)!;
+      expect(task.next_run_at).toBe(plannedAt);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("run now returns 404 for a missing task", async () => {
+    const missing = await post("/api/tasks/missing/run", {});
+    expect(missing.status).toBe(404);
+  });
+
   test("exposes the client-side configuration", async () => {
     setActiveConfig({
       ...DEFAULT_CONFIG,

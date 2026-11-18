@@ -8,10 +8,12 @@ import {
   updateTaskNextRun,
 } from "./db";
 import {
+  RunNowError,
   deleteTask,
   editTask,
   pauseTask,
   resumeTask,
+  runTaskNow,
   runtimeCount,
   startScheduler,
   stopAll,
@@ -189,6 +191,53 @@ describe("scheduler runtime", () => {
     await Bun.sleep(700);
     expect(slowHits).toBe(1);
     expect(listLogs(task.id, 100)).toHaveLength(0);
+  });
+
+  test("run now executes once, logs it, and leaves the schedule untouched", async () => {
+    const task = makeTask("run now", urlOf("/ok"), currentWindow());
+    const plannedAt = Date.now() + 3 * 60 * 60_000;
+    updateTaskNextRun(task.id, plannedAt);
+
+    const result = await runTaskNow(task.id);
+    expect(result?.outcome.status).toBe(200);
+    expect(result?.outcome.matched).toBe(true);
+    expect(listLogs(task.id, 100)).toHaveLength(1);
+    expect(listLogs(task.id, 100)[0]?.kind).toBe("task");
+
+    // The manual run must not consume or shift the planned window.
+    expect(getTask(task.id)?.next_run_at).toBe(plannedAt);
+    expect(runtimeCount()).toBe(0);
+  });
+
+  test("run now on a missing task returns null", async () => {
+    expect(await runTaskNow("does-not-exist")).toBeNull();
+  });
+
+  test("run now rejects while the task is already executing", async () => {
+    const task = makeTask("run now busy", urlOf("/slow"), currentWindow());
+    const first = runTaskNow(task.id);
+    // Let the first run reach the in-flight state before attempting a second.
+    const start = Date.now();
+    while (slowHits === 0 && Date.now() - start < 2_000) {
+      await Bun.sleep(10);
+    }
+    expect(slowHits).toBe(1);
+    await expect(runTaskNow(task.id)).rejects.toBeInstanceOf(RunNowError);
+    await first;
+  });
+
+  test("deleting a task mid manual run aborts it without an orphan log", async () => {
+    const task = makeTask("delete during manual", urlOf("/slow"), currentWindow());
+    const running = runTaskNow(task.id);
+    const start = Date.now();
+    while (slowHits === 0 && Date.now() - start < 2_000) {
+      await Bun.sleep(10);
+    }
+    await deleteTask(task.id);
+    const outcome = await running;
+    expect(outcome?.outcome.aborted).toBe(true);
+    expect(listLogs(task.id, 100)).toHaveLength(0);
+    expect(getTask(task.id)).toBeNull();
   });
 
   test("startup records a missed window without sending the request", async () => {

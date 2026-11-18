@@ -405,6 +405,7 @@ function renderTaskCard(task) {
         "div",
         { class: "task-actions" },
         h("button", { class: "btn", type: "button", dataset: { action: "edit" } }, "编辑"),
+        h("button", { class: "btn", type: "button", dataset: { action: "run" } }, "立即执行"),
         active
           ? pause
             ? [
@@ -883,6 +884,45 @@ async function onTaskAction(button) {
     setStatus(error.message, true);
   } finally {
     button.disabled = false;
+  }
+}
+
+async function onRunNow(button) {
+  const card = button.closest(".task-card");
+  if (!card) return;
+  const taskId = card.dataset.id;
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  const name = task?.name ?? "任务";
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "执行中…";
+  // A run may legitimately take a while (tasks can have no timeout); give the
+  // UI a generous cap while still surfacing a stuck request.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const data = await api(`/api/tasks/${encodeURIComponent(taskId)}/run`, {
+      method: "POST",
+      signal: controller.signal,
+    });
+    const parts = [`任务「${name}」已执行一次`];
+    if (data.status !== null) parts.push(`HTTP ${data.status}`);
+    if (data.error) parts.push(data.error);
+    else if (data.matched) parts.push(data.notifySent ? "命中并发通知" : "命中条件");
+    else parts.push("未命中条件");
+    parts.push(`${data.durationMs} ms`);
+    setStatus(parts.join(" · "), Boolean(data.error));
+    await loadTasks({ silent: true });
+    if (state.selectedTaskId === taskId) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await loadLogs({ reset: true });
+    }
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    clearTimeout(timeout);
+    button.disabled = false;
+    button.textContent = originalLabel;
   }
 }
 
@@ -1485,6 +1525,8 @@ function bindEvents() {
         openPauseDialog(card.dataset.id);
       } else if (button.dataset.action === "delete") {
         openDeleteDialog(card.dataset.id);
+      } else if (button.dataset.action === "run") {
+        onRunNow(button);
       } else if (button.dataset.action === "edit") {
         const task = state.tasks.find((entry) => entry.id === card.dataset.id);
         if (task) {

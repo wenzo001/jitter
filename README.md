@@ -36,7 +36,7 @@ bun run src/index.ts
 其他命令：
 
 ```bash
-bun test            # 232 项核心逻辑 / curl / 配置 / 调度 / 编辑 / 删除 / API / 数据库 / 执行器 / 条件表达式测试
+bun test            # 241 项核心逻辑 / curl / 配置 / 调度 / 编辑 / 删除 / 立即执行 / API / 数据库 / 执行器 / 条件表达式测试
 bun run typecheck   # tsc --noEmit
 ```
 
@@ -109,6 +109,17 @@ bun run typecheck   # tsc --noEmit
 删除会依次完成：停止 cron 并清除 `setTimeout`、`abort()` 在途请求、递增 `generation` 使旧回调失效并移除调度状态；**等待在途请求收尾写入其中断日志后**，再在单个数据库事务内先删该任务的全部日志、再删任务行（外键 `logs.task_id → tasks.id` 要求这个顺序）。因此删除完成后该任务不会残留任何日志，也不会出现外键错误或孤儿日志。中断日志在任务行删除前落库，随后一并被清除。
 
 前端为防误删，要求手动输入完整任务名后才会启用「确认删除」按钮；若被删任务正处于编辑中或为当前选中项，会一并退出编辑并清空日志视图。全局日志清理（见下文）仍可用于按时间批量管理其他任务的日志。
+
+### 立即执行
+
+任务卡片上的「立即执行」通过 `POST /api/tasks/:id/run` 让该任务**马上完整执行一次**：复用定时执行同一条链路（发请求、写执行日志、判定条件、命中则发通知），因此执行记录里能看到这次结果，行为与窗口触发的执行一致。
+
+- **不影响定时计划**：`next_run_at`、cron 与 timer 原样保留，本次只是额外插入的一次执行，下一次仍在原窗口运行。
+- **防重复**：同一任务正在执行（定时触发或另一次立即执行）时再次点击会被拒绝，返回 `409`，避免对有副作用的端点（如打卡 POST）重复发送。
+- 任务不存在返回 `404`；删除任务若发生在立即执行途中，会先中止该执行、等其中断日志落库后再删任务与日志，不留孤儿记录。
+- 返回 `{ ok, status, matched, error, aborted, durationMs, notifySent }`。前端显示执行中状态与结果摘要，完成后刷新该任务的日志。
+
+与「测试 curl」的区别：测试 curl 是对**任意粘贴的 curl** 发一次探测、不建任务不写日志；立即执行是针对**已建立的任务**跑一次完整流程、会写日志并可能发通知。
 
 ### 编辑已有任务
 
@@ -266,6 +277,7 @@ data.result.description!='19:35在高新人才大厦签退成功'   # 负向示�
 | PUT | `/api/tasks/:id` | 编辑已有任务（字段与创建接口相同；不存在返回 404） |
 | DELETE | `/api/tasks/:id` | 删除任务及其全部日志；成功返回 `{ ok, id, deleted_logs }`，不存在返回 404 |
 | POST | `/api/tasks/:id/stop` | 停止（幂等） |
+| POST | `/api/tasks/:id/run` | 立即执行一次（不改定时计划、写日志、可能发通知）；在途重复调用返回 409，任务不存在返回 404 |
 | POST | `/api/tasks/:id/resume` | 恢复；对暂停中的任务表示「取消暂停」并立即恢复调度 |
 | POST | `/api/tasks/:id/pause` | 暂停 1–15 天（body：`{ days, starts_today? }`，`starts_today` 默认 `false`） |
 | GET | `/api/tasks/:id/logs?limit=50&before=<executed_at>:<id>` | 按执行时间倒序分页（默认/上限来自配置），返回 `{ logs, has_more }` |
@@ -314,11 +326,12 @@ data.result.description!='19:35在高新人才大厦签退成功'   # 负向示�
 - **连接重置自动重试**：Bun 的 fetch 会复用 keep-alive 连接，远端（CDN 等）可能单方面关闭空闲 socket，下一次请求写进去时收到 `ECONNRESET`，且发生在响应头之前。执行器对这类连接重置错误（`ECONNRESET` / `EPIPE` / “socket connection was closed unexpectedly” 等）自动重试最多 2 次（共 3 次），重试请求带 `Connection: close` 强制换一条新连接，退避带抖动且可随时被停止/超时中止。只对响应头之前的 `fetch()` 阶段重试，body 读取出错不重试，避免对有副作用的 POST 重复发送；DNS/TLS/HTTP 状态码等非重置错误不重试。这正是间隔很长的通知任务偶发失败的主因，重试后通常即可成功。
 - `-k/--insecure` 会为该任务关闭 TLS 证书校验（Bun fetch `tls.rejectUnauthorized=false`），任务卡片会显示“跳过 TLS 校验”；仅对可信内网或自签名测试端点使用。
 - `-x/--proxy` 会让请求经指定代理发出；未指定时 Bun fetch 仍会读取 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境变量。`-U/--proxy-user` 必须配合 `-x`，凭据通过 Bun 代理 headers 发送，不写入普通请求头或日志；代理 URL 中的 userinfo 会被剥离并转换为同一份代理认证。
+- **失效代理自动回退直连**：长期运行的进程（如 PM2）可能继承到过期代理——代理软件换了本地端口但进程没重启，浏览器用系统新代理正常、Jitter 却卡在旧端口直到超时。未指定 `-x` 且存在环境代理时，首次请求用 8 秒探测窗口；若因超时挂起，则清除本进程的环境代理变量并直连重试一次，成功后保持直连（后续请求即恢复快速），失败则恢复原代理。显式 `-x` 视为用户明确选择，不做回退。回退会在控制台打印告警。
 - curl 文本、任务配置和日志可能包含 Authorization、Cookie 等敏感信息；请限制数据目录权限，不要把实例暴露到公网。
 - 编译后的单文件在执行目录/可执行文件目录查找 `jitter.config.json`；服务化时应显式设置 `JITTER_CONFIG` 和 `JITTER_DB_PATH` 到可写目录。
 - 输出、重试、协议偏好类 flag 会被接受但不会改变出站请求：不写文件、不执行 curl 层重试（上述「连接重置自动重试」属执行器的传输容错，与 curl 的 `--retry` 无关），任务仍按窗口调度一次。
 - 不支持 multipart/文件上传、自定义 TLS 证书文件、DNS/连接覆盖（见上文拒绝列表）。
-- 一个窗口只执行一次；不提供手动立即执行。请求在途期间不会进入下一次调度，因此被长请求跨过的窗口既不补跑，也不写 `missed` 日志。
+- 一个窗口只执行一次；「立即执行」是额外的手动一次，不占用也不改动窗口计划。请求在途期间不会进入下一次调度，因此被长请求跨过的窗口既不补跑，也不写 `missed` 日志。
 - `missed` 日志的 `executed_at` 是写入时刻，原计划时刻写在错误信息里（否则宕机数日后启动补写的日志会立刻落在清理档位之外）。
 - 响应正文默认最多保存/比较 100 KiB，可由 `logBodyLimitBytes` 调整；二进制响应按 UTF-8 解码显示。
 - 通知 curl 是固定请求，不做模板变量替换。
@@ -414,9 +427,9 @@ src/
 ├── config.ts         # 配置默认值、JSON 加载、校验、环境变量覆盖、编译态路径
 ├── port.ts           # EADDRINUSE 检测、端口 +1 重试、本机地址校验
 ├── db.ts             # SQLite/WAL、建表、增量迁移、预编译语句、任务与日志读写
-├── scheduler.ts      # cron + 随机 timer + 恢复 + 停止/恢复 + 代际防护
+├── scheduler.ts      # cron + 随机 timer + 恢复 + 停止/恢复 + 立即执行 + 删除 + 代际防护
 ├── window.ts         # 跨午夜窗口、随机点、恢复矩阵（纯函数）
-├── executor.ts       # fetch + AbortController + 连接重置重试 + TLS/代理/超时 + 100 KiB 截断 + 通知 + 测试请求
+├── executor.ts       # fetch + AbortController + 连接重置重试 + 失效代理自愈直连 + TLS/代理/超时 + 100 KiB 截断 + 通知 + 测试请求
 ├── condition.ts      # 通知条件表达式的安全解析与求值（无 eval）
 ├── curl-parser.ts    # shell 风格 tokenizer + 宽 curl 参数映射
 ├── types.ts

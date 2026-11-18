@@ -24,11 +24,19 @@ import {
   type WindowSpec,
 } from "./window";
 import type { NewTaskInput, TaskRow } from "./types";
+import type { RunOutcome } from "./executor";
 
 export class PauseError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "PauseError";
+  }
+}
+
+export class RunNowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunNowError";
   }
 }
 
@@ -59,6 +67,13 @@ export interface StartSummary {
 }
 
 const runtimes = new Map<string, SchedulerRuntime>();
+
+/** Manual "run now" calls in flight, so deletion can abort and await them. */
+interface ManualRun {
+  controller: AbortController;
+  promise: Promise<RunOutcome>;
+}
+const manualRuns = new Map<string, ManualRun>();
 
 function ensureRuntime(taskId: string): SchedulerRuntime {
   let runtime = runtimes.get(taskId);
@@ -539,6 +554,40 @@ export function stopTask(taskId: string): TaskRow | null {
   return getTask(taskId);
 }
 
+export interface RunNowOutcome {
+  task: TaskRow;
+  outcome: RunOutcome;
+}
+
+/**
+ * Run a task once, immediately, without touching its schedule: next_run_at,
+ * cron and timer are left exactly as they are, so the next planned window is
+ * unaffected. The full executeTaskRun path is reused, so the run is logged and
+ * can fire notifications just like a scheduled run.
+ *
+ * Concurrency: a task already executing (scheduled or manual) cannot be run
+ * again — that would duplicate side effects such as a check-in POST.
+ */
+export async function runTaskNow(taskId: string): Promise<RunNowOutcome | null> {
+  const task = getTask(taskId);
+  if (!task) return null;
+
+  const runtime = runtimes.get(taskId);
+  if (runtime?.running || manualRuns.has(taskId)) {
+    throw new RunNowError("任务正在执行中，请等待本次完成后再试");
+  }
+
+  const controller = new AbortController();
+  const promise = executeTaskRun(task, controller.signal);
+  manualRuns.set(taskId, { controller, promise });
+  try {
+    const outcome = await promise;
+    return { task, outcome };
+  } finally {
+    manualRuns.delete(taskId);
+  }
+}
+
 export interface DeleteTaskOutcome {
   task: TaskRow;
   deleted_logs: number;
@@ -560,7 +609,7 @@ export async function deleteTask(taskId: string): Promise<DeleteTaskOutcome | nu
   if (!task) return null;
 
   const runtime = runtimes.get(taskId);
-  let pending: Promise<unknown> | null = null;
+  const pending: Promise<unknown>[] = [];
   if (runtime) {
     runtime.generation += 1;
     runtime.cron?.stop();
@@ -572,15 +621,23 @@ export async function deleteTask(taskId: string): Promise<DeleteTaskOutcome | nu
     runtime.abortController = null;
     runtime.runWindowKey = null;
     runtime.windowChangedInFlight = false;
-    pending = runtime.activeRun;
+    if (runtime.activeRun) pending.push(runtime.activeRun);
     // Remove before awaiting so onTimer's finally skips replanning and any
     // cron/timer callback that slips in finds no runtime.
     runtimes.delete(taskId);
   }
 
-  if (pending) {
+  // A manual "run now" is independent of runtime: abort it too and let it
+  // write its log while the task row still exists, before we delete the row.
+  const manual = manualRuns.get(taskId);
+  if (manual) {
+    manual.controller.abort();
+    pending.push(manual.promise);
+  }
+
+  for (const task of pending) {
     try {
-      await pending;
+      await task;
     } catch (error) {
       console.error(`[jitter] 任务 ${taskId} 删除前收尾失败`, error);
     }
@@ -653,6 +710,10 @@ export function stopAll(): void {
     runtime.abortController?.abort();
   }
   runtimes.clear();
+  for (const manual of manualRuns.values()) {
+    manual.controller.abort();
+  }
+  manualRuns.clear();
 }
 
 export function runtimeCount(): number {

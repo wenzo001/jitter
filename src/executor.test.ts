@@ -50,12 +50,24 @@ afterAll(() => {
   closeDb();
 });
 
+const PROXY_ENV = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"];
+const savedProxyEnv: Record<string, string | undefined> = {};
+
 beforeEach(() => {
   setActiveConfig({ ...DEFAULT_CONFIG });
+  // The executor self-heals a stale proxy by mutating process.env; keep each
+  // test isolated from the host's real proxy settings and from sibling tests.
+  for (const key of PROXY_ENV) savedProxyEnv[key] = process.env[key];
+  for (const key of PROXY_ENV) delete process.env[key];
 });
 
 afterEach(() => {
   setActiveConfig({ ...DEFAULT_CONFIG });
+  for (const key of PROXY_ENV) {
+    const value = savedProxyEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 function urlOf(path: string): string {
@@ -355,6 +367,108 @@ describe("executeTaskRun", () => {
       controller.abort();
       await done;
       expect(attempts).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("falls back to direct when an inherited env proxy times out", async () => {
+    process.env.HTTPS_PROXY = "http://127.0.0.1:7897"; // stale port
+    const original = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      attempts += 1;
+      if (attempts === 1) {
+        // Simulate a hung proxy: never settle until the signal aborts.
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          signal?.addEventListener("abort", () => reject(new DOMException("Timeout", "TimeoutError")));
+        });
+      }
+      return new Response("direct-ok", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    try {
+      const task = makeTask({
+        request: {
+          url: "https://example.com/probe",
+          method: "GET",
+          headers: {},
+          body: null,
+          options: { timeoutMs: 300 },
+        },
+      });
+      const outcome = await executeTaskRun(task, new AbortController().signal);
+      expect(attempts).toBe(2);
+      expect(outcome.status).toBe(200);
+      expect(outcome.error).toBeNull();
+      // A successful direct retry leaves the stale proxy cleared (self-heal).
+      expect(process.env.HTTPS_PROXY).toBeUndefined();
+      const log = listLogs(task.id, 5)[0];
+      expect(log?.response_body).toBe("direct-ok");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("restores the env proxy when the direct retry also fails", async () => {
+    process.env.HTTPS_PROXY = "http://127.0.0.1:7897";
+    const original = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      attempts += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        signal?.addEventListener("abort", () => reject(new DOMException("Timeout", "TimeoutError")));
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      const task = makeTask({
+        request: {
+          url: "https://example.com/probe",
+          method: "GET",
+          headers: {},
+          body: null,
+          options: { timeoutMs: 300 },
+        },
+      });
+      const outcome = await executeTaskRun(task, new AbortController().signal);
+      expect(attempts).toBe(2);
+      expect(outcome.status).toBeNull();
+      expect(outcome.error).toContain("超时");
+      expect(process.env.HTTPS_PROXY).toBe("http://127.0.0.1:7897");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("does not fall back for an explicit -x proxy", async () => {
+    process.env.HTTPS_PROXY = "http://127.0.0.1:7897";
+    const original = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      attempts += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        signal?.addEventListener("abort", () => reject(new DOMException("Timeout", "TimeoutError")));
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      const task = makeTask({
+        request: {
+          url: "https://example.com/probe",
+          method: "GET",
+          headers: {},
+          body: null,
+          options: { timeoutMs: 300, proxy: "http://127.0.0.1:9999" },
+        },
+      });
+      const outcome = await executeTaskRun(task, new AbortController().signal);
+      expect(attempts).toBe(1); // no direct fallback for an explicit proxy
+      expect(process.env.HTTPS_PROXY).toBe("http://127.0.0.1:7897");
+      expect(outcome.status).toBeNull();
     } finally {
       globalThis.fetch = original;
     }

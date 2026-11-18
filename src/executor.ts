@@ -213,6 +213,44 @@ interface BunRequestInit extends RequestInit {
 const FETCH_RESET_RETRIES = 2;
 const FETCH_RETRY_BASE_DELAY_MS = 150;
 
+/**
+ * Long-lived processes (e.g. PM2) can inherit a stale proxy from env: the
+ * proxy app changes its local port, but the daemon never restarts, so every
+ * fetch hangs against the dead port while the browser (using the current
+ * system proxy) works. Bun has no per-request "ignore env proxy" switch, so
+ * the only way to fall back to a direct connection is to clear the proxy
+ * env vars for this process. We snapshot them first and restore them if the
+ * direct retry also fails.
+ */
+const PROXY_ENV_KEYS = [
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+] as const;
+
+/** Cap a first attempt through an env proxy so a dead proxy fails fast. */
+const PROXY_PROBE_TIMEOUT_MS = 8_000;
+
+function snapshotEnvProxy(): Record<string, string> {
+  const snapshot: Record<string, string> = {};
+  for (const key of PROXY_ENV_KEYS) {
+    const value = process.env[key];
+    if (value && value.trim() !== "") snapshot[key] = value;
+  }
+  return snapshot;
+}
+
+function clearEnvProxy(): void {
+  for (const key of PROXY_ENV_KEYS) delete process.env[key];
+}
+
+function restoreEnvProxy(snapshot: Record<string, string>): void {
+  for (const [key, value] of Object.entries(snapshot)) process.env[key] = value;
+}
+
 function isConnectionResetError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (error.name === "AbortError" || error.name === "TimeoutError") return false;
@@ -292,42 +330,101 @@ async function performRequest(
   let aborted = false;
 
   const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
-  const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null;
-  const effectiveSignal = timeoutSignal ? AbortSignal.any([signal, timeoutSignal]) : signal;
 
-  try {
-    const headers = parseStoredHeaders(rawHeaders);
-    const init: BunRequestInit = {
-      method,
-      headers,
-      body: body ?? undefined,
-      signal: effectiveSignal,
-      redirect: options.redirect ?? "follow",
-    };
-    if (options.insecure) {
-      init.tls = { rejectUnauthorized: false };
-    }
-    if (options.proxy) {
-      init.proxy = options.proxyAuthorization
-        ? {
-            url: options.proxy,
-            headers: {
-              "Proxy-Authorization": options.proxyAuthorization,
-            },
-          }
-        : options.proxy;
-    }
-    const response = await fetchWithResetRetry(url, init, effectiveSignal);
+  const headers = parseStoredHeaders(rawHeaders);
+  const init: BunRequestInit = {
+    method,
+    headers,
+    body: body ?? undefined,
+    signal: signal,
+    redirect: options.redirect ?? "follow",
+  };
+  if (options.insecure) {
+    init.tls = { rejectUnauthorized: false };
+  }
+  if (options.proxy) {
+    init.proxy = options.proxyAuthorization
+      ? {
+          url: options.proxy,
+          headers: {
+            "Proxy-Authorization": options.proxyAuthorization,
+          },
+        }
+      : options.proxy;
+  }
+
+  async function attempt(activeSignal: AbortSignal): Promise<void> {
+    const response = await fetchWithResetRetry(url, { ...init, signal: activeSignal }, activeSignal);
     status = response.status;
     headersJson = JSON.stringify(Object.fromEntries(response.headers.entries()));
     const read = await readBodyCapped(response, bodyLimit);
     responseBody = read.text;
     truncated = read.truncated;
-  } catch (caught) {
-    const timedOut = timeoutSignal !== null && timeoutSignal.aborted && !signal.aborted;
-    aborted = effectiveSignal.aborted;
-    error = timedOut
-      ? `请求超时（${timeoutMs} ms）`
+  }
+
+  // An explicit curl `-x` means the user chose a proxy: never second-guess it.
+  // Otherwise, if the process inherited proxy env vars, a dead proxy port can
+  // hang every request. Give the first attempt a short probe timeout; on a
+  // timeout / connection failure, clear the env proxy and retry direct once.
+  const envProxy = options.proxy ? {} : snapshotEnvProxy();
+  const hasEnvProxy = Object.keys(envProxy).length > 0;
+  const firstTimeoutMs = hasEnvProxy
+    ? timeoutMs > 0
+      ? Math.min(timeoutMs, PROXY_PROBE_TIMEOUT_MS)
+      : PROXY_PROBE_TIMEOUT_MS
+    : timeoutMs;
+
+  let caught: unknown = null;
+  let didProxyFallback = false;
+  let lastTimeoutMs = firstTimeoutMs;
+  for (let round = 0; round < 2; round += 1) {
+    if (signal.aborted) break;
+    const activeTimeoutMs = round === 0 ? firstTimeoutMs : timeoutMs;
+    lastTimeoutMs = activeTimeoutMs;
+    const timeoutSignal = activeTimeoutMs > 0 ? AbortSignal.timeout(activeTimeoutMs) : null;
+    const effectiveSignal = timeoutSignal ? AbortSignal.any([signal, timeoutSignal]) : signal;
+    try {
+      // Reset per-attempt outputs so a failed round cannot leak stale state.
+      status = null;
+      headersJson = null;
+      responseBody = "";
+      truncated = false;
+      aborted = false;
+      await attempt(effectiveSignal);
+      caught = null;
+      break;
+    } catch (error) {
+      caught = error;
+      const callerAborted = signal.aborted;
+      const timedOut = timeoutSignal !== null && timeoutSignal.aborted && !callerAborted;
+      aborted = effectiveSignal.aborted;
+      // A dead/stale env proxy typically *hangs* until the probe timeout
+      // (a refused port fails fast and is left alone). Fall back only on that
+      // timeout, only on round 0, only when we actually used an env proxy,
+      // and only before any response headers arrived (status === null).
+      // Use the CALLER's signal for the abort check: the internal timeout also
+      // marks effectiveSignal.aborted, which must not be mistaken for a cancel.
+      const canFallback = round === 0 && hasEnvProxy && !callerAborted && timedOut && status === null;
+      if (canFallback) {
+        clearEnvProxy();
+        didProxyFallback = true;
+        console.warn("[jitter] 环境代理探测超时，已清除失效代理并改用直连重试");
+        continue;
+      }
+      break;
+    }
+  }
+
+  // A direct retry that also fails means the env proxy is needed after all;
+  // put it back so other requests are not stranded without their proxy.
+  if (didProxyFallback && status === null && caught !== null) {
+    restoreEnvProxy(envProxy);
+  }
+
+  if (caught !== null) {
+    const message = caught instanceof Error ? caught.message : String(caught);
+    error = message.includes("timed out") || message.includes("timeout")
+      ? `请求超时（${lastTimeoutMs} ms）`
       : describeError(caught, aborted);
   }
 
