@@ -3,6 +3,7 @@ import { app } from "./api";
 import { DEFAULT_CONFIG, setActiveConfig } from "./config";
 import {
   closeDb,
+  getDatabase,
   getLogCleanupPreview,
   getTask,
   initDb,
@@ -64,6 +65,9 @@ function futureWindow() {
   return { window_start: hhmm(start), window_end: hhmm(end) };
 }
 
+/** Base timestamp for the test logs: recent enough for the retention window. */
+const LOG_BASE = Date.now() - 60_000;
+
 function payload(overrides: Record<string, unknown> = {}) {
   return {
     name: "api task",
@@ -77,7 +81,9 @@ function payload(overrides: Record<string, unknown> = {}) {
 function logInput(taskId: string, index: number): NewLogInput {
   return {
     task_id: taskId,
-    executed_at: 1_000 + index,
+    // Recent on purpose: the log list only answers inside the retention
+    // window (default 30 days), so ancient timestamps would be filtered out.
+    executed_at: LOG_BASE + index * 1000,
     request_url: "https://example.com/ok",
     request_method: "GET",
     request_headers: "{}",
@@ -170,7 +176,11 @@ describe("api", () => {
 
       const list = await call(`/api/tasks/${id}/logs`);
       expect(list.body.logs).toHaveLength(1);
-      expect(list.body.logs[0].response_body).toBe("run-now-ok");
+      // The list carries the summary only; the body is fetched on demand.
+      expect(list.body.logs[0].response_body).toBeUndefined();
+      expect(list.body.logs[0].response_status).toBe(200);
+      const detail = await call(`/api/logs/${list.body.logs[0].id}`);
+      expect(detail.body.log.response_body).toBe("run-now-ok");
 
       const task = getTask(id)!;
       expect(task.next_run_at).toBe(plannedAt);
@@ -199,11 +209,109 @@ describe("api", () => {
       defaultWindowMinutes: 7,
       pollIntervalMs: 2500,
       logBodyLimitBytes: 2048,
+      requestTimeoutMs: DEFAULT_CONFIG.requestTimeoutMs,
+      logRetentionDays: DEFAULT_CONFIG.logRetentionDays,
     });
   });
 
-  test("creates a task and returns its future plan", async () => {
-    const response = await post("/api/tasks", payload({ name: "created" }));
+  test("changes the retention window at runtime", async () => {
+    const updated = await post("/api/settings", { logRetentionDays: 180 });
+    expect(updated.status).toBe(200);
+    expect(updated.body.logRetentionDays).toBe(180);
+
+    const config = await call("/api/config");
+    expect(config.body.logRetentionDays).toBe(180);
+
+    const invalid = await post("/api/settings", { logRetentionDays: -1 });
+    expect(invalid.status).toBe(400);
+
+    // Back to the default so the other tests keep their window.
+    await post("/api/settings", { logRetentionDays: DEFAULT_CONFIG.logRetentionDays });
+  });
+
+  test("lists tasks without the heavy payloads and serves the full one on demand", async () => {
+    const created = await post("/api/tasks", payload({ name: "slim" }));
+    const id = created.body.task.id;
+
+    const list = await call("/api/tasks");
+    const summary = list.body.tasks.find((entry: any) => entry.id === id);
+    // The card does not need the bodies, so the list leaves them out.
+    expect(summary.curl_command).toBeUndefined();
+    expect(summary.request_headers).toBeUndefined();
+    expect(summary.name).toBe("slim");
+    expect(summary.next_run_at).toBeGreaterThan(Date.now());
+
+    const full = await call(`/api/tasks/${id}`);
+    expect(full.status).toBe(200);
+    expect(full.body.task.curl_command).toBeTruthy();
+
+    const missing = await call("/api/tasks/does-not-exist");
+    expect(missing.status).toBe(404);
+  });
+
+  test("serves the run statistics", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
+    try {
+      const created = await post("/api/tasks", payload({ name: "metrics" }));
+      await call(`/api/tasks/${created.body.task.id}/run`, { method: "POST" });
+
+      const response = await call("/api/metrics");
+      expect(response.status).toBe(200);
+      expect(response.body.overview).toBeDefined();
+      expect(response.body.overview.tasks).toBeGreaterThan(0);
+      expect(Array.isArray(response.body.tasks)).toBe(true);
+      const entry = response.body.tasks.find((row: any) => row.task_id === created.body.task.id);
+      expect(entry.runs).toBeGreaterThan(0);
+      expect(entry.success_rate).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("hides logs older than the retention window", async () => {
+    const created = await post("/api/tasks", payload({ name: "window" }));
+    const taskId = created.body.task.id;
+    const day = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    insertLog({ ...logInput(taskId, 0), executed_at: now - 60_000 });
+    insertLog({ ...logInput(taskId, 1), executed_at: now - 40 * day });
+
+    const list = await call(`/api/tasks/${taskId}/logs`);
+    expect(list.body.retention_days).toBe(DEFAULT_CONFIG.logRetentionDays);
+    expect(list.body.logs).toHaveLength(1);
+
+    // Widening the window makes the old log visible again.
+    await post("/api/settings", { logRetentionDays: 180 });
+    const wide = await call(`/api/tasks/${taskId}/logs`);
+    expect(wide.body.logs).toHaveLength(2);
+    await post("/api/settings", { logRetentionDays: DEFAULT_CONFIG.logRetentionDays });
+  });
+
+  test("reports runtime state and schedule health for every task", async () => {
+    const created = await post("/api/tasks", payload({ name: "health" }));
+    expect(created.body.task.running).toBe(false);
+    expect(created.body.task.running_since).toBeNull();
+    expect(created.body.task.schedule_error).toBeNull();
+
+    const list = await call("/api/tasks");
+    const task = list.body.tasks.find((entry: any) => entry.id === created.body.task.id);
+    expect(task.running).toBe(false);
+    expect(task.schedule_error).toBeNull();
+  });
+
+  test("flags a task whose schedule can no longer be parsed", async () => {
+    const created = await post("/api/tasks", payload({ name: "broken" }));
+    const id = created.body.task.id;
+    // Simulate a hand-edited / legacy row: the scheduler would throw on it.
+    getDatabase().run("UPDATE tasks SET window_start = '99:99' WHERE id = ?", [id]);
+
+    const list = await call("/api/tasks");
+    const task = list.body.tasks.find((entry: any) => entry.id === id);
+    expect(task.schedule_error).toContain("HH:mm");
+  });
+
+  test("creates a task and returns its future plan", async () => {    const response = await post("/api/tasks", payload({ name: "created" }));
     expect(response.status).toBe(201);
     expect(response.body.task.name).toBe("created");
     expect(response.body.task.status).toBe("active");
@@ -262,7 +370,9 @@ describe("api", () => {
     expect(listTasks().length).toBe(before);
   });
 
-  test("ignores conditions when notifications are disabled", async () => {
+  test("keeps success conditions even when notifications are disabled", async () => {
+    // Conditions decide the "命中" flag recorded with every run, so they are
+    // independent of whether a notification is configured.
     const response = await post(
       "/api/tasks",
       payload({
@@ -272,8 +382,9 @@ describe("api", () => {
       }),
     );
     expect(response.status).toBe(201);
-    expect(response.body.task.expect_expr).toBeNull();
-    expect(response.body.task.expect_status).toBeNull();
+    expect(response.body.task.notify_enabled).toBe(0);
+    expect(response.body.task.expect_expr).toBe("data.result.remindtype=0");
+    expect(response.body.task.expect_status).toBe(200);
   });
 
   test("updates an existing task via PUT and keeps it scheduled", async () => {
@@ -377,11 +488,40 @@ describe("api", () => {
     const before = listTasks().length;
     const response = await post(
       "/api/tasks",
-      payload({ window_start: "10:00", window_end: "10:00" }),
+      payload({ window_start: "25:00", window_end: "10:00" }),
     );
     expect(response.status).toBe(400);
-    expect(response.body.error).toContain("不能相同");
+    expect(response.body.error).toContain("HH:mm");
     expect(listTasks().length).toBe(before);
+  });
+
+  test("accepts an exact time and stores the ± jitter", async () => {
+    const exact = await post(
+      "/api/tasks",
+      payload({ name: "exact", window_start: "10:00", window_end: "10:00" }),
+    );
+    expect(exact.status).toBe(201);
+    expect(exact.body.task.daily_jitter_minutes).toBe(0);
+
+    const jittered = await post(
+      "/api/tasks",
+      payload({
+        name: "jittered",
+        window_start: "10:00",
+        window_end: "10:00",
+        daily_jitter_minutes: 5,
+      }),
+    );
+    expect(jittered.status).toBe(201);
+    expect(jittered.body.task.daily_jitter_minutes).toBe(5);
+    expect(jittered.body.task.window_start).toBe("10:00");
+
+    const bad = await post(
+      "/api/tasks",
+      payload({ name: "bad", window_start: "09:00", window_end: "10:00", daily_jitter_minutes: 5 }),
+    );
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toContain("精确时间");
   });
 
   test("stops and resumes a task", async () => {
@@ -416,7 +556,7 @@ describe("api", () => {
 
     const deleted = await call(`/api/tasks/${id}`, { method: "DELETE" });
     expect(deleted.status).toBe(200);
-    expect(deleted.body).toEqual({ ok: true, id, deleted_logs: 2 });
+    expect(deleted.body).toEqual({ ok: true, id, deleted_logs: 2, deleted_test_runs: 0 });
 
     expect(getTask(id)).toBeNull();
     expect((await call(`/api/tasks/${id}/logs`)).status).toBe(404);
@@ -483,7 +623,7 @@ describe("api", () => {
     expect(first.body.logs.map((log: { id: number }) => log.id)).toEqual([ids[2]!, ids[1]!]);
     expect(first.body.has_more).toBe(true);
 
-    const next = await call(`/api/tasks/${taskId}/logs?limit=2&before=1001:${ids[1]}`);
+    const next = await call(`/api/tasks/${taskId}/logs?limit=2&before=${LOG_BASE + 1000}:${ids[1]}`);
     expect(next.body.logs.map((log: { id: number }) => log.id)).toEqual([ids[0]!]);
     expect(next.body.has_more).toBe(false);
 
@@ -514,10 +654,10 @@ describe("api", () => {
   test("returns logs ordered by execution time desc", async () => {
     const created = await post("/api/tasks", payload());
     const taskId = created.body.task.id;
-    const newest = insertLog({ ...logInput(taskId, 0), executed_at: 5_000 });
+    const newest = insertLog({ ...logInput(taskId, 0), executed_at: LOG_BASE + 5_000 });
     // Inserted later but executed earlier: the API must sort by execution time.
-    const oldest = insertLog({ ...logInput(taskId, 1), executed_at: 1_000 });
-    const middle = insertLog({ ...logInput(taskId, 2), executed_at: 3_000 });
+    const oldest = insertLog({ ...logInput(taskId, 1), executed_at: LOG_BASE + 1_000 });
+    const middle = insertLog({ ...logInput(taskId, 2), executed_at: LOG_BASE + 3_000 });
 
     const response = await call(`/api/tasks/${taskId}/logs`);
     expect(response.status).toBe(200);

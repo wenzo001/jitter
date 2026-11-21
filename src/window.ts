@@ -12,6 +12,12 @@ export interface WindowSpec {
   endMinutes: number;
   durationMinutes: number;
   crossMidnight: boolean;
+  /**
+   * A zero-length window (`start === end`): "run at exactly this time".
+   * Planning pins the run to `start`; the instance stays open for a short
+   * grace period so a timer that fires a few seconds late still runs.
+   */
+  instant: boolean;
 }
 
 export interface WindowInstance {
@@ -41,6 +47,13 @@ export interface PauseInterval {
 
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
+/**
+ * How long an "exact time" occurrence stays valid. A timer that fires 3s late
+ * still counts as on time; a process that wakes up 5 minutes later records a
+ * miss instead of silently running at the wrong moment.
+ */
+export const INSTANT_GRACE_MS = 60_000;
+
 function parseHHMM(value: string, label: string): number {
   const match = HHMM.exec(value);
   if (!match) {
@@ -49,13 +62,14 @@ function parseHHMM(value: string, label: string): number {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
+/**
+ * `start === end` builds an "instant" window (exact time). Everything else is
+ * the original window behaviour; `end < start` still means crossing midnight.
+ */
 export function parseWindow(start: string, end: string): WindowSpec {
   const startMinutes = parseHHMM(start, "开始时间");
   const endMinutes = parseHHMM(end, "结束时间");
   const durationMinutes = (endMinutes - startMinutes + 24 * 60) % (24 * 60);
-  if (durationMinutes === 0) {
-    throw new WindowError("窗口起止时间不能相同");
-  }
   return {
     start,
     end,
@@ -63,6 +77,7 @@ export function parseWindow(start: string, end: string): WindowSpec {
     endMinutes,
     durationMinutes,
     crossMidnight: endMinutes < startMinutes,
+    instant: durationMinutes === 0,
   };
 }
 
@@ -130,6 +145,11 @@ function endOf(start: number, spec: WindowSpec): number {
   return addMinutes(start, spec.durationMinutes);
 }
 
+/** End used for "is this occurrence still open", which adds the grace period. */
+function instanceEndOf(start: number, spec: WindowSpec): number {
+  return spec.instant ? start + INSTANT_GRACE_MS : endOf(start, spec);
+}
+
 /**
  * Returns the window instance containing `now`. The instance is identified by
  * the day its START falls on, so 23:50–00:10 belongs to the start day and may
@@ -137,12 +157,12 @@ function endOf(start: number, spec: WindowSpec): number {
  */
 export function windowInstanceAt(now: number, spec: WindowSpec): WindowInstance | null {
   const startToday = localAt(now, spec.startMinutes);
-  const endToday = endOf(startToday, spec);
+  const endToday = instanceEndOf(startToday, spec);
   if (now >= startToday && now < endToday) {
     return { start: startToday, end: endToday };
   }
   const startYesterday = addDays(startToday, -1);
-  const endYesterday = endOf(startYesterday, spec);
+  const endYesterday = instanceEndOf(startYesterday, spec);
   if (now >= startYesterday && now < endYesterday) {
     return { start: startYesterday, end: endYesterday };
   }
@@ -183,7 +203,8 @@ export function randomPoint(from: number, to: number, rng: () => number): number
 export function planNewTask(now: number, spec: WindowSpec, rng: () => number = Math.random): number {
   const current = windowInstanceAt(now, spec);
   if (current) {
-    return randomPoint(Math.max(now, current.start), current.end, rng);
+    // Exact-time tasks have nothing to randomize: run as soon as possible.
+    return spec.instant ? Math.max(now, current.start) : randomPoint(Math.max(now, current.start), current.end, rng);
   }
   const start = nextWindowStartAfter(now, spec);
   return randomPoint(start, endOf(start, spec), rng);
@@ -219,7 +240,9 @@ export function planRecovery(
     const missed =
       nextRunAt !== null && nextRunAt < current.start ? { plannedAt: nextRunAt } : null;
     return {
-      target: randomPoint(Math.max(now, current.start), current.end, rng),
+      target: spec.instant
+        ? Math.max(now, current.start)
+        : randomPoint(Math.max(now, current.start), current.end, rng),
       missed,
       reason: "in-window",
     };

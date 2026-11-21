@@ -11,6 +11,10 @@ export interface AppConfig {
   logsPageSize: number;
   logsMaxPageSize: number;
   requestTimeoutMs: number;
+  /** Automatic log retention: delete logs older than this many days (0 = keep). */
+  logRetentionDays: number;
+  /** Automatic log retention: keep only the newest N rows per task (0 = unlimited). */
+  logMaxRowsPerTask: number;
   shutdownGraceMs: number;
   defaultWindowMinutes: number;
   pollIntervalMs: number;
@@ -25,7 +29,11 @@ export const DEFAULT_CONFIG: Readonly<AppConfig> = Object.freeze({
   logBodyLimitBytes: 100 * 1024,
   logsPageSize: 50,
   logsMaxPageSize: 200,
-  requestTimeoutMs: 0,
+  // A request that never returns would keep its task busy forever, so the
+  // default is a bounded timeout. Set 0 to disable it (the UI warns).
+  requestTimeoutMs: 30_000,
+  logRetentionDays: 30,
+  logMaxRowsPerTask: 0,
   shutdownGraceMs: 150,
   defaultWindowMinutes: 5,
   pollIntervalMs: 4000,
@@ -60,6 +68,8 @@ const CONFIG_KEYS = new Set([
   "logsPageSize",
   "logsMaxPageSize",
   "requestTimeoutMs",
+  "logRetentionDays",
+  "logMaxRowsPerTask",
   "shutdownGraceMs",
   "defaultWindowMinutes",
   "pollIntervalMs",
@@ -142,9 +152,14 @@ function validateFileConfig(raw: Record<string, unknown>): Partial<AppConfig> {
       24 * 60 * 60 * 1000,
     );
   }
-  if ("shutdownGraceMs" in raw) {
-    result.shutdownGraceMs = readInteger(raw.shutdownGraceMs, "shutdownGraceMs", 0, 60_000);
+  if ("logRetentionDays" in raw) {
+    result.logRetentionDays = readInteger(raw.logRetentionDays, "logRetentionDays", 0, 3650);
   }
+  if ("logMaxRowsPerTask" in raw) {
+    result.logMaxRowsPerTask = readInteger(raw.logMaxRowsPerTask, "logMaxRowsPerTask", 0, 1_000_000);
+  }
+  if ("shutdownGraceMs" in raw) {
+    result.shutdownGraceMs = readInteger(raw.shutdownGraceMs, "shutdownGraceMs", 0, 60_000);  }
   if ("defaultWindowMinutes" in raw) {
     result.defaultWindowMinutes = readInteger(
       raw.defaultWindowMinutes,

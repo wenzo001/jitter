@@ -14,6 +14,7 @@ import {
   insertLog,
   listLogs,
   listTasks,
+  pruneLogs,
   resolveDbPath,
   setTaskPause,
   updateTaskConfig,
@@ -402,7 +403,7 @@ describe("db", () => {
 
     const raw = new Database(legacyPath);
     raw.exec("ALTER TABLE tasks DROP COLUMN paused_from");
-    // A cron/timer replan after the pause rewrites updated_at; the migration
+    // A timer replan after the pause rewrites updated_at; the migration
     // must NOT use it to guess the original start day.
     raw.query(
       "UPDATE tasks SET paused_until = ?, updated_at = ?, next_run_at = ? WHERE id = ?",
@@ -425,6 +426,114 @@ describe("db", () => {
     expect(migrated.next_run_at).toBeNull();
     expect(getTask(expired.id)?.paused_until).toBeNull();
     expect(getTask(expired.id)?.paused_from).toBeNull();
+
+    initDb(dbPath);
+  });
+
+  test("prunes old logs and caps the rows kept per task", () => {
+    const task = createTask(sampleTask({ name: "pruned" }));
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    const insert = (executedAt: number, body: string) =>
+      insertLog({
+        task_id: task.id,
+        executed_at: executedAt,
+        request_url: "https://example.com",
+        request_method: "GET",
+        request_headers: null,
+        request_body: null,
+        response_status: 200,
+        response_headers: null,
+        response_body: body,
+        duration_ms: 1,
+        error: null,
+        aborted: 0,
+        kind: "task",
+        parent_log_id: null,
+        matched: 1,
+      });
+
+    insert(now - 40 * day, "old-1");
+    insert(now - 35 * day, "old-2");
+    insert(now - 2 * day, "mid");
+    insert(now - 1 * day, "new");
+
+    // 30 days of retention removes this task's two old rows (the counter is
+    // global, other tasks in the shared test database may go too).
+    const byAge = pruneLogs(now, 30, 0);
+    expect(byAge.by_age).toBeGreaterThanOrEqual(2);
+    expect(listLogs(task.id, 10, null).map((log) => log.response_body)).toEqual(["new", "mid"]);
+
+    // Keeping the newest 1 row per task drops the rest.
+    const byCount = pruneLogs(now, 0, 1);
+    expect(byCount.by_count).toBeGreaterThanOrEqual(1);
+    const remaining = listLogs(task.id, 10, null);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].response_body).toBe("new");
+  });
+
+  test("keeps every log when retention is disabled", () => {
+    const task = createTask(sampleTask({ name: "kept" }));
+    insertLog({
+      task_id: task.id,
+      executed_at: Date.now() - 400 * 24 * 60 * 60 * 1000,
+      request_url: "https://example.com",
+      request_method: "GET",
+      request_headers: null,
+      request_body: null,
+      response_status: 200,
+      response_headers: null,
+      response_body: "ancient",
+      duration_ms: 1,
+      error: null,
+      aborted: 0,
+      kind: "task",
+      parent_log_id: null,
+      matched: 1,
+    });
+
+    const outcome = pruneLogs(Date.now(), 0, 0);
+    expect(outcome.deleted).toBe(0);
+    expect(listLogs(task.id, 10, null)).toHaveLength(1);
+  });
+
+  test("repairs legacy cron rows into daily windows on startup", () => {
+    const legacyPath = join(tempDir, "legacy-cron.db");
+    initDb(legacyPath);
+    const withWindow = createTask(sampleTask({ name: "cron with window" }));
+    const withoutWindow = createTask(sampleTask({ name: "cron without window" }));
+    closeDb();
+
+    const raw = new Database(legacyPath);
+    raw
+      .query("UPDATE tasks SET schedule_kind = 'cron' WHERE id = ?")
+      .run(withWindow.id);
+    raw
+      .query(
+        `UPDATE tasks
+            SET schedule_kind = 'cron', window_start = '', window_end = '', next_run_at = ?
+          WHERE id = ?`,
+      )
+      .run(Date.now() + 86_400_000, withoutWindow.id);
+    raw.close();
+
+    initDb(legacyPath);
+
+    // A cron row that still had a usable window keeps it.
+    const kept = getTask(withWindow.id)!;
+    expect(kept.schedule_kind).toBe("daily");
+    expect(kept.window_start).toBe("10:10");
+    expect(kept.window_end).toBe("10:20");
+
+    // A cron row without a window gets a visible placeholder instead of
+    // becoming an unschedulable task.
+    const repaired = getTask(withoutWindow.id)!;
+    expect(repaired.schedule_kind).toBe("daily");
+    expect(repaired.window_start).toBe("00:00");
+    expect(repaired.window_end).toBe("00:05");
+    // The old plan no longer fits the replaced window: it must be re-planned
+    // instead of firing once outside the window and being logged as missed.
+    expect(repaired.next_run_at).toBeNull();
 
     initDb(dbPath);
   });
@@ -501,7 +610,7 @@ describe("db", () => {
     expect(next.created_at).toBe(planned.created_at);
   });
 
-  test("disabling notifications on edit clears notification config", () => {
+  test("disabling notifications clears the notify config but keeps the conditions", () => {
     const task = createTask(
       sampleTask({
         notify_enabled: true,
@@ -519,8 +628,9 @@ describe("db", () => {
     expect(updated.notify_enabled).toBe(0);
     expect(updated.notify_curl_command).toBeNull();
     expect(updated.notify_url).toBeNull();
-    expect(updated.expect_status).toBeNull();
-    expect(updated.expect_body).toBeNull();
-    expect(updated.expect_expr).toBeNull();
+    // Success conditions are independent of notifications.
+    expect(updated.expect_status).toBe(200);
+    expect(updated.expect_body).toBe("ok");
+    expect(updated.expect_expr).toBe("ok=true");
   });
 });

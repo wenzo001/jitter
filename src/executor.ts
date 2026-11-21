@@ -1,6 +1,7 @@
 import { DEFAULT_CONFIG, getActiveConfig } from "./config";
 import { evaluateCondition } from "./condition";
 import { insertLog } from "./db";
+import { evaluateLocalGuard, localGuardOf } from "./guard";
 import type { RequestOptions, RequestSpec, TaskRow } from "./types";
 
 /** Mirrors the configurable cap from one source; the live limit is the config. */
@@ -22,6 +23,8 @@ export interface RunOutcome {
   status: number | null;
   aborted: boolean;
   matched: boolean;
+  /** The guard request did not pass, so the main request was never sent. */
+  skipped: boolean;
   error: string | null;
   notifyLogId: number | null;
   durationMs: number;
@@ -75,6 +78,60 @@ export function evaluateSuccess(input: SuccessInput): boolean {
     return input.status >= 200 && input.status < 300;
   }
   return true;
+}
+
+/**
+ * Guard-request verdict. Kept separate from `evaluateSuccess` because the
+ * failure has to be explained in the skipped log: users need to know WHY the
+ * main request was not sent.
+ */
+export interface PrecheckInput {
+  status: number | null;
+  body: string | null;
+  truncated: boolean;
+  aborted: boolean;
+  error: string | null;
+  expectStatus: number | null;
+  expectExpr: string | null;
+}
+
+export interface PrecheckVerdict {
+  passed: boolean;
+  reason: string;
+}
+
+export function evaluatePrecheck(input: PrecheckInput): PrecheckVerdict {
+  if (input.aborted) return { passed: false, reason: "前置判断请求被中断" };
+  if (input.error !== null) return { passed: false, reason: `前置判断请求失败：${input.error}` };
+  if (input.status === null) return { passed: false, reason: "前置判断请求没有拿到响应" };
+  if (input.expectStatus !== null && input.status !== input.expectStatus) {
+    return {
+      passed: false,
+      reason: `前置判断返回 HTTP ${input.status}，期望 ${input.expectStatus}`,
+    };
+  }
+  if (input.expectExpr !== null) {
+    if (input.truncated) {
+      return { passed: false, reason: "前置判断的响应体超过上限被截断，条件表达式无法判断" };
+    }
+    let json: unknown = null;
+    try {
+      json = input.body === null ? null : JSON.parse(input.body);
+    } catch {
+      json = null;
+    }
+    if (!evaluateCondition(input.expectExpr, { json, status: input.status, body: input.body })) {
+      return { passed: false, reason: `前置条件不满足：${input.expectExpr}` };
+    }
+    return { passed: true, reason: `前置条件满足：${input.expectExpr}` };
+  }
+  if (input.expectStatus === null && !(input.status >= 200 && input.status < 300)) {
+    return {
+      passed: false,
+      reason: `前置判断返回 HTTP ${input.status}（未配置条件时要求 2xx）`,
+    };
+  }
+  return { passed: true, reason: `前置判断通过（HTTP ${input.status}）` };
 }
 
 export async function readBodyCapped(
@@ -423,7 +480,15 @@ async function performRequest(
 
   if (caught !== null) {
     const message = caught instanceof Error ? caught.message : String(caught);
-    error = message.includes("timed out") || message.includes("timeout")
+    // Bun reports its own socket timeout as "ETIMEDOUT", which the old
+    // case-sensitive check missed: the user saw a raw socket error instead of
+    // "请求超时".
+    const lower = message.toLowerCase();
+    const looksLikeTimeout =
+      lower.includes("timed out") ||
+      lower.includes("timeout") ||
+      lower.includes("etimedout");
+    error = looksLikeTimeout
       ? `请求超时（${lastTimeoutMs} ms）`
       : describeError(caught, aborted);
   }
@@ -491,8 +556,103 @@ export async function executeTestRequest(request: RequestSpec): Promise<TestRequ
   };
 }
 
+interface SkipExchange {
+  requestUrl: string | null;
+  requestMethod: string | null;
+  requestHeaders: string | null;
+  requestBody: string | null;
+  status: number | null;
+  headersJson: string | null;
+  body: string;
+  truncated: boolean;
+  aborted: boolean;
+  durationMs: number;
+}
+
+/**
+ * One row that explains a skipped run. Local-guard skips carry no exchange
+ * (nothing was sent); curl-guard skips carry the guard request and response,
+ * because that is what actually happened.
+ */
+function recordSkip(task: TaskRow, reason: string, exchange: SkipExchange | null): number {
+  const storedBody =
+    exchange && exchange.status !== null
+      ? exchange.truncated
+        ? `${exchange.body}\n[truncated]`
+        : exchange.body
+      : null;
+  return insertLog({
+    task_id: task.id,
+    executed_at: Date.now(),
+    request_url: exchange?.requestUrl ?? null,
+    request_method: exchange?.requestMethod ?? null,
+    request_headers: exchange?.requestHeaders ?? null,
+    request_body: exchange?.requestBody ?? null,
+    response_status: exchange?.status ?? null,
+    response_headers: exchange?.headersJson ?? null,
+    response_body: storedBody,
+    duration_ms: exchange?.durationMs ?? 0,
+    error: `${reason}；已跳过主请求 ${task.request_method} ${task.request_url}`,
+    aborted: exchange?.aborted ? 1 : 0,
+    kind: "skipped",
+    parent_log_id: null,
+    matched: 0,
+  });
+}
+
 export async function executeTaskRun(task: TaskRow, signal: AbortSignal): Promise<RunOutcome> {
   const config = getActiveConfig();
+
+  // Guard first: the main request is only sent when every configured guard
+  // condition passes. Local conditions cost nothing; the guard curl runs only
+  // when one is configured.
+  if (task.precheck_enabled === 1) {
+    const verdict = evaluateLocalGuard(localGuardOf(task), Date.now());
+    if (!verdict.passed) {
+      const mainLogId = recordSkip(task, verdict.reason, null);
+      console.warn(`[jitter] 任务「${task.name}」跳过本次执行：${verdict.reason}`);
+      return {
+        mainLogId,
+        status: null,
+        aborted: false,
+        matched: false,
+        skipped: true,
+        error: verdict.reason,
+        notifyLogId: null,
+        durationMs: 0,
+      };
+    }
+
+    if (task.precheck_url) {
+      const precheck = await runPrecheck(task, signal, config);
+      if (!precheck.verdict.passed) {
+        const mainLogId = recordSkip(task, precheck.verdict.reason, {
+          requestUrl: task.precheck_url,
+          requestMethod: task.precheck_method ?? "GET",
+          requestHeaders: task.precheck_headers,
+          requestBody: task.precheck_body,
+          status: precheck.status,
+          headersJson: precheck.headersJson,
+          body: precheck.body,
+          truncated: precheck.truncated,
+          aborted: precheck.aborted,
+          durationMs: precheck.durationMs,
+        });
+        console.warn(`[jitter] 任务「${task.name}」跳过本次执行：${precheck.verdict.reason}`);
+        return {
+          mainLogId,
+          status: precheck.status,
+          aborted: precheck.aborted,
+          matched: false,
+          skipped: true,
+          error: precheck.verdict.reason,
+          notifyLogId: null,
+          durationMs: precheck.durationMs,
+        };
+      }
+    }
+  }
+
   const mainOptions = parseRequestOptions(task.request_options);
   const mainExecutedAt = Date.now();
   const main = await performRequest(
@@ -590,8 +750,57 @@ export async function executeTaskRun(task: TaskRow, signal: AbortSignal): Promis
     status: main.status,
     aborted: main.aborted,
     matched,
+    skipped: false,
     error: main.error,
     notifyLogId,
     durationMs: main.durationMs,
+  };
+}
+
+interface PrecheckRun {
+  verdict: PrecheckVerdict;
+  status: number | null;
+  headersJson: string | null;
+  body: string;
+  truncated: boolean;
+  error: string | null;
+  aborted: boolean;
+  durationMs: number;
+}
+
+/** Send the guard request with exactly the same transport as a normal run. */
+async function runPrecheck(
+  task: TaskRow,
+  signal: AbortSignal,
+  config: ReturnType<typeof getActiveConfig>,
+): Promise<PrecheckRun> {
+  const result = await performRequest(
+    task.precheck_url ?? "",
+    task.precheck_method ?? "GET",
+    task.precheck_headers,
+    task.precheck_body,
+    signal,
+    parseRequestOptions(task.precheck_options),
+    config.requestTimeoutMs,
+    config.logBodyLimitBytes,
+  );
+  const verdict = evaluatePrecheck({
+    status: result.status,
+    body: result.body,
+    truncated: result.truncated,
+    aborted: result.aborted,
+    error: result.error,
+    expectStatus: task.precheck_expect_status,
+    expectExpr: task.precheck_expr,
+  });
+  return {
+    verdict,
+    status: result.status,
+    headersJson: result.headersJson,
+    body: result.body,
+    truncated: result.truncated,
+    error: result.error,
+    aborted: result.aborted,
+    durationMs: result.durationMs,
   };
 }

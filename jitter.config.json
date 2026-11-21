@@ -7,7 +7,7 @@
   "logBodyLimitBytes": 102400,
   "logsPageSize": 50,
   "logsMaxPageSize": 200,
-  "requestTimeoutMs": 0,
+  "requestTimeoutMs": 30000,
   "shutdownGraceMs": 150,
   "defaultWindowMinutes": 5,
   "pollIntervalMs": 4000

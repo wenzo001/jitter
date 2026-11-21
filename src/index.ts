@@ -1,7 +1,7 @@
 import indexHtml from "./frontend/index.html";
 import { app } from "./api";
 import { getActiveConfig, loadConfig, setActiveConfig, type AppConfig } from "./config";
-import { closeDb, initDb } from "./db";
+import { closeDb, getAutoVacuumMode, initDb } from "./db";
 import { listenWithPortRetry, isLocalBindHost } from "./port";
 import { startScheduler, stopAll } from "./scheduler";
 
@@ -73,6 +73,16 @@ export function startServer(options: ServerOptions = {}): ReturnType<typeof Bun.
     `已恢复 ${summary.recovered}/${summary.active} 个 active 任务` +
       (summary.missed > 0 ? `，记录 ${summary.missed} 次错过窗口（不补跑）` : ""),
   );
+  const retention = config.logRetentionDays;
+  console.log(
+    `日志保留：${retention > 0 ? `超过 ${retention} 天的日志自动清理` : "不自动清理"}` +
+      `（每任务上限 ${config.logMaxRowsPerTask > 0 ? `${config.logMaxRowsPerTask} 条` : "不限"}）`,
+  );
+  if (getAutoVacuumMode() !== 2) {
+    console.log(
+      "提示：当前数据库未启用增量回收；在「清理日志」对话框执行一次清理即可切换，之后自动回收不再阻塞服务。",
+    );
+  }
 
   return server;
 }

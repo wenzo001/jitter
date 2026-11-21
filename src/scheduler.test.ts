@@ -14,7 +14,9 @@ import {
   pauseTask,
   resumeTask,
   runTaskNow,
+  runningTasks,
   runtimeCount,
+  scheduleNewTask,
   startScheduler,
   stopAll,
   stopTask,
@@ -85,6 +87,7 @@ function makeTask(
   name: string,
   url: string,
   window: { window_start: string; window_end: string },
+  extra: Partial<NewTaskInput> = {},
 ): TaskRow {
   const input: NewTaskInput = {
     name,
@@ -97,6 +100,7 @@ function makeTask(
     expect_status: null,
     expect_body: null,
     expect_expr: null,
+    ...extra,
   };
   return createTask(input);
 }
@@ -142,6 +146,24 @@ describe("scheduler runtime", () => {
 
     const latest = await waitForFuturePlan(task.id);
     expect(latest.status).toBe("active");
+  });
+
+  test("reports a task as running while its request is in flight", async () => {
+    const task = makeTask("running state", urlOf("/slow"), currentWindow());
+    updateTaskNextRun(task.id, Date.now() + 100);
+
+    startScheduler();
+    const start = Date.now();
+    let snapshot = runningTasks();
+    while (snapshot[task.id] === undefined && Date.now() - start < 2_000) {
+      await Bun.sleep(10);
+      snapshot = runningTasks();
+    }
+    // The UI shows this badge so a hanging request is visible.
+    expect(snapshot[task.id]).toBeGreaterThan(0);
+
+    await waitForLog(task.id, (entry) => entry.kind === "task");
+    expect(runningTasks()[task.id]).toBeUndefined();
   });
 
   test("stop aborts an in-flight request and leaves no plan", async () => {
@@ -325,6 +347,27 @@ describe("scheduler runtime", () => {
     expect(shorter!.next_run_at).toBeLessThan(farPlan);
 
     // A restart must honour the shortened interval as well.
+    startScheduler();
+    expect(getTask(task.id)?.next_run_at).toBeLessThan(farPlan);
+  });
+
+  test("shortening a pause replaces a far-future interval plan too", () => {
+    const task = makeTask(
+      "interval re-pause",
+      urlOf("/ok"),
+      { window_start: "", window_end: "" },
+      { schedule_kind: "interval", interval_seconds: 3600 },
+    );
+    scheduleNewTask(task);
+
+    const long = pauseTask(task.id, { days: 10, startsToday: true });
+    const farPlan = long!.next_run_at!;
+    expect(farPlan).toBeGreaterThan(Date.now() + 9 * 86_400_000);
+
+    const shorter = pauseTask(task.id, { days: 1, startsToday: true });
+    expect(shorter!.next_run_at).toBeLessThan(farPlan);
+    expect(shorter!.next_run_at).toBeLessThanOrEqual(Date.now() + 25 * 3600_000);
+
     startScheduler();
     expect(getTask(task.id)?.next_run_at).toBeLessThan(farPlan);
   });
@@ -551,6 +594,30 @@ describe("editTask", () => {
       (entry) => entry.request_url === urlOf("/slow") && entry.response_body === "late",
     );
     expect(log.request_url).toBe(urlOf("/slow"));
+  });
+
+  test("editing only the first-run anchor re-plans onto the new grid", () => {
+    const task = makeTask(
+      "anchor edit",
+      urlOf("/ok"),
+      { window_start: "", window_end: "" },
+      { schedule_kind: "interval", interval_seconds: 3600 },
+    );
+    scheduleNewTask(task);
+    expect(getTask(task.id)!.next_run_at).not.toBeNull();
+
+    const anchor = Date.now() + 3 * 3600_000;
+    const edited = editTask(
+      task.id,
+      editInput(task, {
+        schedule_kind: "interval",
+        interval_seconds: 3600,
+        interval_start_at: anchor,
+      }),
+    )!;
+    expect(edited.interval_start_at).toBe(anchor);
+    // The old "one hour from creation" plan must be replaced by the anchor.
+    expect(edited.next_run_at).toBe(anchor);
   });
 
   test("editing never schedules a second run in an already-consumed window", async () => {

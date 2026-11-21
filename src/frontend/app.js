@@ -9,6 +9,28 @@ const els = {
   name: document.getElementById("name"),
   windowStart: document.getElementById("window-start"),
   windowEnd: document.getElementById("window-end"),
+  dailyRangeFields: document.getElementById("daily-range-fields"),
+  dailyExactField: document.getElementById("daily-exact-field"),
+  dailyJitterField: document.getElementById("daily-jitter-field"),
+  dailyHint: document.getElementById("daily-hint"),
+  exactTime: document.getElementById("exact-time"),
+  jitterMinutes: document.getElementById("jitter-minutes"),
+  metricsStrip: document.getElementById("metrics-strip"),
+  openMetrics: document.getElementById("open-metrics"),
+  metricsClose: document.getElementById("metrics-close"),
+  metricsDialog: document.getElementById("metrics-dialog"),
+  metricsOverview: document.getElementById("metrics-overview"),
+  metricsTasks: document.getElementById("metrics-tasks"),
+  metricsEmpty: document.getElementById("metrics-empty"),
+  scheduleDaily: document.getElementById("schedule-daily"),
+  scheduleInterval: document.getElementById("schedule-interval"),
+  intervalValue: document.getElementById("interval-value"),
+  intervalUnit: document.getElementById("interval-unit"),
+  intervalJitter: document.getElementById("interval-jitter"),
+  intervalStart: document.getElementById("interval-start"),
+  schedulePreview: document.getElementById("schedule-preview"),
+  schedulePreviewList: document.getElementById("schedule-preview-list"),
+  schedulePreviewNote: document.getElementById("schedule-preview-note"),
   curl: document.getElementById("curl"),
   curlWrap: document.getElementById("curl-wrap"),
   structuredWrap: document.getElementById("structured-wrap"),
@@ -16,6 +38,14 @@ const els = {
   method: document.getElementById("method"),
   headers: document.getElementById("headers"),
   body: document.getElementById("body"),
+  precheckEnabled: document.getElementById("precheck-enabled"),
+  precheckFields: document.getElementById("precheck-fields"),
+  precheckWeekdays: document.getElementById("precheck-weekdays"),
+  precheckTimeStart: document.getElementById("precheck-time-start"),
+  precheckTimeEnd: document.getElementById("precheck-time-end"),
+  precheckCurl: document.getElementById("precheck-curl"),
+  precheckStatus: document.getElementById("precheck-status"),
+  precheckExpr: document.getElementById("precheck-expr"),
   notifyEnabled: document.getElementById("notify-enabled"),
   notifyFields: document.getElementById("notify-fields"),
   notifyCurl: document.getElementById("notify-curl"),
@@ -29,6 +59,11 @@ const els = {
   logList: document.getElementById("log-list"),
   logsEmpty: document.getElementById("logs-empty"),
   loadMore: document.getElementById("load-more"),
+  logRenderHint: document.getElementById("log-render-hint"),
+  logLimitNote: document.getElementById("log-limit-note"),
+  retentionDays: document.getElementById("retention-days"),
+  retentionSave: document.getElementById("retention-save"),
+  retentionNote: document.getElementById("retention-note"),
   refreshTasks: document.getElementById("refresh-tasks"),
   refreshLogs: document.getElementById("refresh-logs"),
   openCleanup: document.getElementById("open-cleanup"),
@@ -73,21 +108,35 @@ const els = {
   deleteConfirmInput: document.getElementById("delete-confirm-input"),
   deleteError: document.getElementById("delete-error"),
   openTestCurl: document.getElementById("open-test-curl"),
+  openTestGlobal: document.getElementById("open-test-global"),
   testDialog: document.getElementById("test-dialog"),
   testClose: document.getElementById("test-close"),
   testCancel: document.getElementById("test-cancel"),
   testSend: document.getElementById("test-send"),
   testCurl: document.getElementById("test-curl"),
+  testPrecheckEnabled: document.getElementById("test-precheck-enabled"),
+  testPrecheckFields: document.getElementById("test-precheck-fields"),
+  testPrecheckWeekdays: document.getElementById("test-precheck-weekdays"),
+  testPrecheckTimeStart: document.getElementById("test-precheck-time-start"),
+  testPrecheckTimeEnd: document.getElementById("test-precheck-time-end"),
+  testPrecheckCurl: document.getElementById("test-precheck-curl"),
+  testPrecheckStatus: document.getElementById("test-precheck-status"),
+  testPrecheckExpr: document.getElementById("test-precheck-expr"),
+  testExpectStatus: document.getElementById("test-expect-status"),
+  testExpectExpr: document.getElementById("test-expect-expr"),
+  testExpectBody: document.getElementById("test-expect-body"),
+  testNotifyEnabled: document.getElementById("test-notify-enabled"),
+  testNotifyFields: document.getElementById("test-notify-fields"),
+  testNotifyCurl: document.getElementById("test-notify-curl"),
+  testSendNotify: document.getElementById("test-send-notify"),
+  testHistory: document.getElementById("test-history"),
+  testHistoryList: document.getElementById("test-history-list"),
+  testSave: document.getElementById("test-save"),
   testError: document.getElementById("test-error"),
   testResult: document.getElementById("test-result"),
-  testStatus: document.getElementById("test-status"),
-  testDuration: document.getElementById("test-duration"),
-  testBody: document.getElementById("test-body"),
-  testBodyWrap: document.getElementById("test-body-wrap"),
-  testBodyEmpty: document.getElementById("test-body-empty"),
-  testTruncated: document.getElementById("test-truncated"),
-  testHeadersWrap: document.getElementById("test-headers-wrap"),
-  testHeaders: document.getElementById("test-headers"),
+  testSummary: document.getElementById("test-summary"),
+  testTotal: document.getElementById("test-total"),
+  testSteps: document.getElementById("test-steps"),
 };
 
 const MAX_PAUSE_DAYS = 15;
@@ -97,6 +146,7 @@ const CLIENT_CONFIG_DEFAULTS = {
   defaultWindowMinutes: 5,
   pollIntervalMs: 4000,
   logBodyLimitBytes: 100 * 1024,
+  requestTimeoutMs: 30_000,
 };
 
 const state = {
@@ -105,15 +155,21 @@ const state = {
   selectedTaskId: null,
   selectionEpoch: 0,
   logs: new Map(),
+  /** Loaded log details (headers/bodies), fetched on demand. */
+  logDetails: new Map(),
+  detailLoading: new Set(),
+  /** Retention window reported by the server (0 = no limit). */
+  logRetentionDays: 30,
   oldestCursor: null,
   hasMore: false,
   polling: false,
   statusTimer: null,
   clientConfig: { ...CLIENT_CONFIG_DEFAULTS },
+  metrics: null,
   cleanup: { preview: null, selected: null, busy: false, view: "loading" },
   pause: { taskId: null, busy: false, label: "暂停任务" },
   deleting: { taskId: null, busy: false, name: "" },
-  testing: { busy: false },
+  testing: { busy: false, taskId: null },
   editingId: null,
 };
 
@@ -151,6 +207,35 @@ function formatTime(timestamp) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
     date.getHours(),
   )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatShortTime(timestamp) {
+  const date = new Date(timestamp);
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}`;
+}
+
+function formatClockSecond(timestamp) {
+  const date = new Date(timestamp);
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}:${pad(date.getSeconds())}`;
+}
+
+/** epoch ms -> value for `<input type="datetime-local">` in local time. */
+function toDateTimeLocal(timestamp) {
+  const date = new Date(timestamp);
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours(),
+  )}:${pad(date.getMinutes())}`;
+}
+
+/** `datetime-local` value -> epoch ms (local time); null when empty/invalid. */
+function fromDateTimeLocal(value) {
+  if (!value) return null;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function formatDay(timestamp) {
@@ -202,6 +287,41 @@ function formatBytes(bytes) {
 function formatWindow(task) {
   const cross = task.window_end < task.window_start;
   return `${task.window_start}–${task.window_end}${cross ? "（跨午夜）" : ""}`;
+}
+
+function scheduleKindOf(task) {
+  return task.schedule_kind === "interval" ? "interval" : "daily";
+}
+
+function formatInterval(seconds) {
+  const value = Number(seconds) || 0;
+  if (value > 0 && value % 86400 === 0) return `${value / 86400} 天`;
+  if (value > 0 && value % 3600 === 0) return `${value / 3600} 小时`;
+  if (value > 0 && value % 60 === 0) return `${value / 60} 分钟`;
+  return `${value} 秒`;
+}
+
+/** Short human description shown on the task card and in the log header. */
+function formatSchedule(task) {
+  const kind = scheduleKindOf(task);
+  if (kind === "interval") {
+    const base = `每 ${formatInterval(task.interval_seconds)}`;
+    const anchor = task.interval_start_at
+      ? `（从 ${formatShortTime(task.interval_start_at)} 起算）`
+      : "";
+    const jitter =
+      task.interval_jitter_seconds > 0
+        ? `，随机 +0–${task.interval_jitter_seconds}s`
+        : "";
+    return `${base}${anchor}${jitter}`;
+  }
+  if (task.window_start === task.window_end) {
+    const jitter = task.daily_jitter_minutes ?? 0;
+    return jitter > 0
+      ? `每天 ${task.window_start} ±${jitter} 分钟`
+      : `每天 ${task.window_start}`;
+  }
+  return `每天 ${formatWindow(task)}`;
 }
 
 function prettyJson(raw) {
@@ -275,6 +395,178 @@ function syncNotify() {
   els.notifyFields.hidden = !els.notifyEnabled.checked;
 }
 
+function syncPrecheck() {
+  els.precheckFields.hidden = !els.precheckEnabled.checked;
+}
+
+function weekdayBoxes(containerId) {
+  const container = document.getElementById(containerId);
+  return container ? [...container.querySelectorAll('input[type="checkbox"]')] : [];
+}
+
+function checkedWeekdays(containerId) {
+  return weekdayBoxes(containerId)
+    .filter((input) => input.checked)
+    .map((input) => Number(input.value));
+}
+
+function setCheckedWeekdays(containerId, days) {
+  const wanted = new Set((Array.isArray(days) ? days : []).map(Number));
+  for (const input of weekdayBoxes(containerId)) {
+    input.checked = wanted.has(Number(input.value));
+  }
+}
+
+function getScheduleKind() {
+  return document.querySelector('input[name="schedule_kind"]:checked')?.value ?? "daily";
+}
+
+/** range | exact | jitter — the three shapes of 定时执行. */
+function getDailyMode() {
+  return document.querySelector('input[name="daily_mode"]:checked')?.value ?? "range";
+}
+
+function setDailyMode(mode) {
+  const input = document.querySelector(`input[name="daily_mode"][value="${mode}"]`);
+  if (input) input.checked = true;
+  syncDailyMode();
+}
+
+function syncDailyMode() {
+  const mode = getDailyMode();
+  els.dailyRangeFields.hidden = mode !== "range";
+  els.dailyExactField.hidden = mode === "range";
+  els.dailyJitterField.hidden = mode !== "jitter";
+  els.dailyHint.textContent =
+    mode === "range"
+      ? "每天在窗口内随机挑一个时刻执行一次；结束早于开始视为跨午夜窗口（例如 23:50–00:10），按开始日计一次。"
+      : mode === "exact"
+        ? "每天就在这个时刻执行一次，不随机。"
+        : "以该时刻为中心，前后各随机浮动 N 分钟内执行（例如 18:00 + 5 → 17:55 到 18:05 之间随机一个时刻）。";
+  schedulePreview();
+}
+
+function syncSchedule() {
+  const kind = getScheduleKind();
+  els.scheduleDaily.hidden = kind !== "daily";
+  els.scheduleInterval.hidden = kind !== "interval";
+  // Coming back from interval with no window typed yet: offer a sensible
+  // default instead of an empty time input.
+  if (kind === "daily" && !els.windowStart.value && !els.windowEnd.value) {
+    setDefaultWindow();
+  }
+  if (kind === "daily") syncDailyMode();
+  else schedulePreview();
+}
+
+let previewTimer = null;
+let previewEpoch = 0;
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => void refreshPreview(), 250);
+}
+
+/** The schedule the form currently describes, or null when it is incomplete. */
+function previewPayload() {
+  const kind = getScheduleKind();
+  if (kind === "daily") {
+    if (getDailyMode() === "range") {
+      const start = els.windowStart.value;
+      const end = els.windowEnd.value;
+      if (!start || !end || start === end) return null;
+      return {
+        schedule_kind: "daily",
+        window_start: start,
+        window_end: end,
+        count: 7,
+      };
+    }
+    const time = els.exactTime.value;
+    if (!time) return null;
+    const payload = {
+      schedule_kind: "daily",
+      window_start: time,
+      window_end: time,
+      count: 7,
+    };
+    if (getDailyMode() === "jitter") {
+      const jitter = Number(els.jitterMinutes.value || "0");
+      if (Number.isInteger(jitter) && jitter > 0) {
+        payload.daily_jitter_minutes = Math.min(jitter, 60);
+      }
+    }
+    return payload;
+  }
+  const value = Number(els.intervalValue.value);
+  const unit = Number(els.intervalUnit.value);
+  if (!Number.isInteger(value) || value < 1) return null;
+  const seconds = value * unit;
+  if (seconds > 30 * 24 * 3600) return null;
+  const jitter = Number(els.intervalJitter.value || "0");
+  const safeJitter = Number.isInteger(jitter) && jitter >= 0 ? Math.min(jitter, seconds) : 0;
+  const payload = {
+    schedule_kind: "interval",
+    interval_seconds: seconds,
+    interval_jitter_seconds: safeJitter,
+    count: 7,
+  };
+  const startAt = fromDateTimeLocal(els.intervalStart.value);
+  if (startAt !== null) payload.interval_start_at = startAt;
+  return payload;
+}
+
+/** Show the next 7 runs so the pattern is obvious before saving. */
+async function refreshPreview() {
+  const payload = previewPayload();
+  if (!payload) {
+    els.schedulePreview.hidden = true;
+    return;
+  }
+  const epoch = (previewEpoch += 1);
+  try {
+    const data = await api("/api/schedule/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (epoch !== previewEpoch) return; // a newer request won
+    renderPreview(data, payload);
+  } catch {
+    if (epoch === previewEpoch) els.schedulePreview.hidden = true;
+  }
+}
+
+function renderPreview(data, payload) {
+  const times = Array.isArray(data.next) ? data.next : [];
+  if (times.length === 0) {
+    els.schedulePreview.hidden = true;
+    return;
+  }
+  const win = data.window ?? null;
+  const chips = times.map((timestamp) => {
+    if (data.kind !== "daily") {
+      return h("span", { class: "preview-chip" }, formatClockSecond(timestamp));
+    }
+    const label =
+      win && !win.instant ? `${formatShortTime(timestamp)}–${win.end}` : formatShortTime(timestamp);
+    return h("span", { class: "preview-chip" }, label);
+  });
+  els.schedulePreview.hidden = false;
+  els.schedulePreviewList.replaceChildren(...chips);
+  if (data.kind === "daily") {
+    const jitter = payload.daily_jitter_minutes ?? 0;
+    els.schedulePreviewNote.textContent =
+      win && win.instant
+        ? "每天固定这个时刻"
+        : jitter > 0
+          ? `基准 ${payload.window_start}，前后各 ${jitter} 分钟随机`
+          : "窗口内随机，具体时刻执行前才确定";
+  } else {
+    const jitter = payload.interval_jitter_seconds ?? 0;
+    els.schedulePreviewNote.textContent = jitter > 0 ? `每次再加 0–${jitter} 秒抖动` : "";
+  }
+}
+
 function setDefaultWindow() {
   const now = new Date();
   const configured = Number(state.clientConfig.defaultWindowMinutes);
@@ -282,6 +574,9 @@ function setDefaultWindow() {
   const end = new Date(now.getTime() + minutes * 60_000);
   els.windowStart.value = hhmm(now);
   els.windowEnd.value = hhmm(end);
+  // The exact-time input is a single field shared by two modes; give it the
+  // same sensible default so switching modes is not an empty form.
+  if (!els.exactTime.value) els.exactTime.value = hhmm(now);
 }
 
 async function loadClientConfig() {
@@ -299,6 +594,13 @@ async function loadClientConfig() {
     Number.isFinite(bytes) && bytes > 0 ? Math.max(1, Math.round(bytes / 1024)) : 100;
   const hint = document.getElementById("body-limit");
   if (hint) hint.textContent = String(kib);
+  // 0 = no server-side timeout: a request that never returns would keep the
+  // task busy forever, so the user has to know.
+  const warning = document.getElementById("timeout-warning");
+  if (warning) {
+    const timeout = Number(state.clientConfig.requestTimeoutMs);
+    warning.hidden = Number.isFinite(timeout) && timeout > 0;
+  }
 }
 
 function selectedTask() {
@@ -316,11 +618,23 @@ function renderTasks() {
   const current = selectedTask();
   if (current) {
     els.logsTitle.textContent = `执行记录 · ${current.name}`;
-    els.logsTaskMeta.textContent = `${formatWindow(current)} · 下次 ${formatTime(current.next_run_at)}`;
+    renderLogMeta(current);
   } else {
     els.logsTitle.textContent = "执行记录";
     els.logsTaskMeta.textContent = "";
   }
+}
+
+/** The subtitle of the log panel: schedule, next run and the visible window. */
+function renderLogMeta(task = selectedTask()) {
+  if (!task) {
+    els.logsTaskMeta.textContent = "";
+    return;
+  }
+  const window = state.logRetentionDays > 0 ? ` · 仅显示最近 ${state.logRetentionDays} 天` : "";
+  els.logsTaskMeta.textContent = `${formatSchedule(task)} · 下次 ${formatTime(
+    task.next_run_at,
+  )}${task.running ? " · 执行中" : ""}${window}`;
 }
 
 function formatTimeout(ms) {
@@ -330,8 +644,35 @@ function formatTimeout(ms) {
   return Number.isInteger(seconds) ? `${seconds}s` : `${seconds.toFixed(1)}s`;
 }
 
+/** "45 秒" / "3 分 12 秒" — elapsed time of an in-flight request. */
+function formatElapsed(ms) {
+  const value = Math.max(0, Number(ms) || 0);
+  const seconds = Math.floor(value / 1000);
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} 小时 ${minutes % 60} 分`;
+}
+
+/**
+ * Keep the "执行中 · 已 x 秒" badges ticking even when no new data arrives.
+ * A request that hangs must look like it is hanging, not frozen.
+ */
+function tickRunningBadges() {
+  const nodes = els.taskList.querySelectorAll("[data-running-since]");
+  if (nodes.length === 0) return;
+  const now = Date.now();
+  for (const node of nodes) {
+    const since = Number(node.dataset.runningSince);
+    if (!Number.isFinite(since)) continue;
+    node.textContent = `执行中 · ${formatElapsed(now - since)}`;
+  }
+}
+
 function renderTaskCard(task) {
-  const cross = task.window_end < task.window_start;
+  const kind = scheduleKindOf(task);
+  const cross = kind === "daily" && task.window_end < task.window_start;
   const active = task.status === "active";
   const pause = active ? pauseStateOf(task) : null;
   const conditions = [];
@@ -369,6 +710,29 @@ function renderTaskCard(task) {
       : "已停止",
   );
 
+  // A request that is in flight right now. Without this the user cannot tell
+  // "waiting for the next run" from "stuck inside a request that never ends".
+  const runningBadge = task.running
+    ? h(
+        "span",
+        {
+          class: "badge badge-running",
+          dataset: { runningSince: String(task.running_since ?? Date.now()) },
+          title: "请求正在执行中",
+        },
+        `执行中 · ${formatElapsed(Date.now() - (task.running_since ?? Date.now()))}`,
+      )
+    : null;
+
+  // A schedule that cannot be parsed would silently never run again.
+  const brokenBadge = task.schedule_error
+    ? h(
+        "span",
+        { class: "badge badge-broken", title: task.schedule_error },
+        "调度配置无效",
+      )
+    : null;
+
   const card = h(
     "article",
     {
@@ -385,8 +749,21 @@ function renderTaskCard(task) {
       h(
         "div",
         { class: "task-actions" },
+        h("button", { class: "btn", type: "button", dataset: { action: "test" } }, "测试"),
         h("button", { class: "btn", type: "button", dataset: { action: "edit" } }, "编辑"),
-        h("button", { class: "btn", type: "button", dataset: { action: "run" } }, "立即执行"),
+        task.running
+          ? h(
+              "button",
+              {
+                class: "btn",
+                type: "button",
+                dataset: { action: "run" },
+                disabled: true,
+                title: "上一次执行还没结束",
+              },
+              "执行中…",
+            )
+          : h("button", { class: "btn", type: "button", dataset: { action: "run" } }, "立即执行"),
         active
           ? pause
             ? [
@@ -405,7 +782,12 @@ function renderTaskCard(task) {
       "div",
       { class: "task-meta" },
       statusBadge,
+      runningBadge,
+      brokenBadge,
       cross ? h("span", { class: "badge badge-cross" }, "跨午夜") : null,
+      task.precheck_enabled
+        ? h("span", { class: "badge badge-pending" }, "前置判断")
+        : null,
       requestOptions.insecure
         ? h("span", { class: "badge badge-insecure" }, "跳过 TLS 校验")
         : null,
@@ -414,9 +796,9 @@ function renderTaskCard(task) {
         : null,
       h(
         "span",
-        { class: "task-window" },
-        h("span", { class: "meta-key" }, "窗口 "),
-        h("span", { class: "task-window-value" }, `${task.window_start}–${task.window_end}`),
+        { class: "task-schedule" },
+        h("span", { class: "meta-key" }, "调度 "),
+        h("span", { class: "task-window-value" }, formatSchedule(task)),
       ),
     ),
     h("div", { class: "task-request" }, `${task.request_method} ${task.request_url}`),
@@ -436,6 +818,12 @@ function renderTaskCard(task) {
       ),
       h("span", { class: "foot-sep", "aria-hidden": "true" }, "·"),
       h("span", {}, task.notify_enabled ? `通知已开启（${conditions.join(" 且 ")}）` : "通知未开启"),
+      h("span", { class: "foot-sep", "aria-hidden": "true" }, "·"),
+      h(
+        "span",
+        {},
+        task.precheck_enabled ? "执行前会先判断，不满足则跳过" : "无条件执行",
+      ),
     ),
   );
 
@@ -445,11 +833,13 @@ function renderTaskCard(task) {
 function kindLabel(kind) {
   if (kind === "notify") return "通知";
   if (kind === "missed") return "错过";
+  if (kind === "skipped") return "跳过";
   return "任务";
 }
 
 function statusInfo(log) {
   if (log.kind === "missed") return { text: "未执行", cls: "status-warn" };
+  if (log.kind === "skipped") return { text: "已跳过", cls: "status-warn" };
   if (log.error && log.error.startsWith("请求超时")) return { text: "超时", cls: "status-warn" };
   if (log.aborted) return { text: "已中断", cls: "status-err" };
   if (log.error) return { text: "错误", cls: "status-err" };
@@ -506,6 +896,49 @@ function renderLog(log) {
   const details = h("details", { dataset: { logId: log.id } });
   details.append(h("summary", {}, "请求 / 响应详情"));
   const body = h("div", { class: "detail" });
+  // The list only carries the summary; the bodies (up to 100 KiB each) are
+  // fetched the first time the entry is opened.
+  body.append(h("div", { class: "muted" }, "展开后加载详情…"));
+  details.append(body);
+  details.addEventListener("toggle", () => {
+    if (details.open) void loadLogDetail(log.id, body);
+  });
+  card.append(details);
+
+  return card;
+}
+
+/** Fetch (and cache) the heavy part of one log row. */
+async function loadLogDetail(logId, body) {
+  const cached = state.logDetails.get(logId);
+  if (cached) {
+    body.replaceChildren(...detailSections(cached));
+    return;
+  }
+  if (state.detailLoading.has(logId)) return;
+  state.detailLoading.add(logId);
+  try {
+    const data = await api(`/api/logs/${logId}`);
+    const log = data?.log;
+    if (!log) return;
+    state.logDetails.set(logId, log);
+    // The cached details are the heavy part (up to 100 KiB each): keep the
+    // cache small so a long session cannot grow without bound.
+    while (state.logDetails.size > 40) {
+      const oldest = state.logDetails.keys().next().value;
+      state.logDetails.delete(oldest);
+    }
+    body.replaceChildren(...detailSections(log));
+  } catch (error) {
+    body.replaceChildren(h("div", { class: "log-error" }, `详情加载失败：${error.message}`));
+  } finally {
+    state.detailLoading.delete(logId);
+  }
+}
+
+/** The sections inside an expanded log entry. */
+function detailSections(log) {
+  const body = h("div", { class: "detail" });
   addDetail(body, "请求头", prettyJson(log.request_headers));
   if (log.request_body !== null) {
     addDetail(body, "请求体", log.request_body === "" ? "（空）" : prettyJson(log.request_body));
@@ -520,10 +953,7 @@ function renderLog(log) {
   if (!body.childElementCount) {
     body.append(h("div", { class: "muted" }, "没有可显示的详情"));
   }
-  details.append(body);
-  card.append(details);
-
-  return card;
+  return [body];
 }
 
 /** Newest first: execution time desc, id desc as the tiebreaker. */
@@ -532,7 +962,20 @@ function compareLogsDesc(a, b) {
   return b.id - a.id;
 }
 
+/**
+ * How many log rows stay in the DOM at once.
+ *
+ * The list is paged (50 rows per request) but a user can keep pressing
+ * "加载更早"; without a cap the DOM would grow until the browser starts to
+ * stutter. Beyond the cap the list keeps the newest rows and says so.
+ */
+const MAX_LOG_ROWS = 300;
+
+/** A render slower than this shows a hint, so a stutter is never silent. */
+const SLOW_RENDER_MS = 120;
+
 function renderLogs() {
+  const started = performance.now();
   // Polling rebuilds the whole list; keep expanded detail panels expanded.
   const openIds = new Set(
     [...els.logList.querySelectorAll("details[open][data-log-id]")].map(
@@ -540,11 +983,19 @@ function renderLogs() {
     ),
   );
   const rows = [...state.logs.values()].sort(compareLogsDesc);
-  els.logList.replaceChildren(...rows.map(renderLog));
+  const visible = rows.slice(0, MAX_LOG_ROWS);
+  const dropped = rows.length - visible.length;
+  els.logList.replaceChildren(...visible.map(renderLog));
   for (const node of els.logList.querySelectorAll("details[data-log-id]")) {
     if (openIds.has(node.dataset.logId)) node.open = true;
   }
-  els.loadMore.hidden = !state.hasMore;
+  const atCap = dropped > 0 || state.logs.size >= MAX_LOG_ROWS;
+  els.loadMore.hidden = !state.hasMore || atCap;
+  els.logLimitNote.hidden = !atCap;
+  if (atCap) {
+    els.logLimitNote.textContent =
+      `已达渲染上限（${MAX_LOG_ROWS} 条）；更早的记录不会显示，可在「清理日志」里调整保留天数`;
+  }
 
   if (!state.selectedTaskId) {
     els.logsEmpty.hidden = false;
@@ -553,10 +1004,21 @@ function renderLogs() {
   }
   if (rows.length === 0) {
     els.logsEmpty.hidden = false;
-    els.logsEmpty.textContent = "这个任务还没有执行记录。窗口触发后会出现在这里。";
+    els.logsEmpty.textContent = "这个任务还没有执行记录。定时触发后会出现在这里。";
     return;
   }
   els.logsEmpty.hidden = true;
+
+  // Report the real cost of the rebuild (DOM + layout). A slow render is
+  // visible instead of silently freezing the panel.
+  requestAnimationFrame(() => {
+    const total = Math.round(performance.now() - started);
+    if (total < SLOW_RENDER_MS) {
+      els.logRenderHint.textContent = "";
+      return;
+    }
+    els.logRenderHint.textContent = `渲染 ${visible.length} 条耗时 ${total} ms`;
+  });
 }
 
 async function loadTasks({ silent = false } = {}) {
@@ -631,10 +1093,19 @@ async function loadLogs({ reset = false, older = false } = {}) {
       state.logs.set(row.id, row);
     }
 
+    // Keep the in-memory list bounded too: paging back through months of
+    // history must not grow the tab without limit.
+    const sorted = [...state.logs.values()].sort(compareLogsDesc);
+    if (sorted.length > MAX_LOG_ROWS) {
+      for (const stale of sorted.slice(MAX_LOG_ROWS)) {
+        state.logs.delete(stale.id);
+      }
+    }
+
     // The cursor points at the oldest loaded row, in the same order the list
     // is rendered (execution time desc, id desc).
-    const sorted = [...state.logs.values()].sort(compareLogsDesc);
-    const oldest = sorted.length ? sorted[sorted.length - 1] : null;
+    const kept = [...state.logs.values()].sort(compareLogsDesc);
+    const oldest = kept.length ? kept[kept.length - 1] : null;
     state.oldestCursor = oldest ? { executedAt: oldest.executed_at, id: oldest.id } : null;
     // `has_more` on a poll means "rows older than the NEWEST page", not "rows
     // older than our oldest loaded row". Trusting it during polling resurrects
@@ -642,6 +1113,10 @@ async function loadLogs({ reset = false, older = false } = {}) {
     // that advance the cursor (reset / older / first load) own this flag.
     if (reset || older || sizeBefore === 0) {
       state.hasMore = Boolean(data?.has_more);
+    }
+    // The server only ever answers inside the retention window.
+    if (typeof data?.retention_days === "number") {
+      state.logRetentionDays = data.retention_days;
     }
 
     const changed = reset || older || state.logs.size !== sizeBefore;
@@ -678,6 +1153,100 @@ function selectTask(taskId) {
   loadLogs({ reset: true });
 }
 
+/**
+ * Fetch the run statistics and paint both the headline strip and the panel.
+ * Failures are silent on purpose: the metrics are decorative, and a failing
+ * statistics call must never disturb the task list.
+ */
+async function refreshMetrics() {
+  try {
+    const data = await api("/api/metrics");
+    state.metrics = data;
+    renderMetricsStrip(data);
+    renderMetricsPanel(data);
+  } catch {
+    // Keep the last known numbers rather than blanking the strip.
+  }
+}
+
+function formatRate(value) {
+  if (value === null || value === undefined) return "—";
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatDuration(ms) {
+  if (ms === null || ms === undefined) return "—";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
+}
+
+function renderMetricsStrip(data) {
+  const overview = data?.overview;
+  if (!overview) return;
+  const item = (label, value, suffix = "") =>
+    h("span", {}, `${label} `, h("strong", {}, String(value)), suffix);
+  const parts = [
+    item("今日", overview.today_runs, " 次"),
+    item("近 7 天成功率", formatRate(overview.success_rate_7d)),
+    item("均", formatDuration(overview.avg_duration_ms_7d)),
+  ];
+  if (overview.running > 0) parts.push(item("", overview.running, " 个执行中"));
+  const children = [];
+  parts.forEach((part, index) => {
+    if (index > 0) children.push(document.createTextNode(" · "));
+    children.push(part);
+  });
+  els.metricsStrip.replaceChildren(...children);
+  els.metricsStrip.hidden = false;
+}
+
+function renderMetricsPanel(data) {
+  const overview = data?.overview;
+  if (!overview) return;
+  els.metricsOverview.replaceChildren(
+    ...[
+      ["任务", `${overview.active} / ${overview.tasks}`],
+      ["正在执行", String(overview.running)],
+      ["今日执行", `${overview.today_runs} 次（成功 ${overview.today_ok}）`],
+      ["近 7 天执行", `${overview.week_runs} 次`],
+      ["近 7 天成功率", formatRate(overview.success_rate_7d)],
+      ["近 7 天平均耗时", formatDuration(overview.avg_duration_ms_7d)],
+    ].map(([label, value]) => h("div", {}, h("dt", {}, label), h("dd", {}, value))),
+  );
+
+  const nameOf = new Map(state.tasks.map((task) => [task.id, task.name]));
+  const rows = (data.tasks ?? [])
+    .filter((entry) => entry.runs > 0)
+    .sort((a, b) => (b.success_rate ?? -1) - (a.success_rate ?? -1) || b.runs - a.runs);
+  els.metricsEmpty.hidden = rows.length > 0;
+  els.metricsTasks.replaceChildren(
+    ...rows.map((entry) => {
+      const last =
+        entry.last_error !== null
+          ? `失败：${entry.last_error}`
+          : entry.last_status !== null
+            ? `HTTP ${entry.last_status}`
+            : entry.last_kind === "missed"
+              ? "错过窗口"
+              : "—";
+      return h(
+        "tr",
+        {},
+        h("td", { class: "name" }, nameOf.get(entry.task_id) ?? "（已删除）"),
+        h("td", {}, String(entry.runs)),
+        h("td", {}, formatRate(entry.success_rate)),
+        h("td", {}, formatDuration(entry.avg_duration_ms)),
+        h("td", {}, `${entry.last_executed_at ? formatTime(entry.last_executed_at) : "—"} · ${last}`),
+      );
+    }),
+  );
+}
+
+function openMetricsDialog() {
+  if (!els.metricsDialog.open) els.metricsDialog.showModal();
+  void refreshMetrics();
+}
+
 async function refreshAll() {
   await loadTasks({ silent: true });
   if (state.selectedTaskId) {
@@ -707,8 +1276,43 @@ function setEditMode(task) {
   showFormError("");
 
   els.name.value = task.name;
-  els.windowStart.value = task.window_start;
-  els.windowEnd.value = task.window_end;
+  const kind = scheduleKindOf(task);
+  const kindRadio = document.querySelector(`input[name="schedule_kind"][value="${kind}"]`);
+  if (kindRadio) kindRadio.checked = true;
+  els.windowStart.value = task.window_start || "";
+  els.windowEnd.value = task.window_end || "";
+  if (kind === "daily") {
+    const jitter = task.daily_jitter_minutes ?? 0;
+    const exact = task.window_start === task.window_end;
+    setDailyMode(!exact ? "range" : jitter > 0 ? "jitter" : "exact");
+    if (exact) {
+      els.exactTime.value = task.window_start;
+      els.jitterMinutes.value = String(jitter > 0 ? jitter : 5);
+    }
+  }
+  if (kind === "interval") {
+    const seconds = Number(task.interval_seconds) || 60;
+    const unit =
+      seconds % 86400 === 0
+        ? 86400
+        : seconds % 3600 === 0
+          ? 3600
+          : seconds % 60 === 0
+            ? 60
+            : 1;
+    els.intervalUnit.value = String(unit);
+    els.intervalValue.value = String(Math.max(1, Math.round(seconds / unit)));
+    els.intervalJitter.value = String(task.interval_jitter_seconds ?? 0);
+    els.intervalStart.value =
+      task.interval_start_at === null || task.interval_start_at === undefined
+        ? ""
+        : toDateTimeLocal(task.interval_start_at);
+  } else {
+    // A daily task has no anchor; leaving a previous value here would silently
+    // travel into the task if the user switched to 循环执行 later.
+    els.intervalStart.value = "";
+  }
+  syncSchedule();
 
   const useCurl = task.curl_command !== null;
   const modeInput = document.querySelector(`input[name="mode"][value="${useCurl ? "curl" : "structured"}"]`);
@@ -732,6 +1336,24 @@ function setEditMode(task) {
   els.expectStatus.value = task.expect_status === null ? "" : String(task.expect_status);
   els.expectBody.value = task.expect_body ?? "";
   els.expectExpr.value = task.expect_expr ?? "";
+
+  els.precheckEnabled.checked = task.precheck_enabled === 1;
+  syncPrecheck();
+  els.precheckCurl.value = precheckCurlFromTask(task);
+  els.precheckStatus.value =
+    task.precheck_expect_status === null || task.precheck_expect_status === undefined
+      ? ""
+      : String(task.precheck_expect_status);
+  els.precheckExpr.value = task.precheck_expr ?? "";
+  const storedWeekdays = task.precheck_weekdays
+    ? task.precheck_weekdays
+        .split(",")
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value))
+    : [];
+  setCheckedWeekdays("precheck-weekdays", storedWeekdays);
+  els.precheckTimeStart.value = task.precheck_time_start ?? "";
+  els.precheckTimeEnd.value = task.precheck_time_end ?? "";
 }
 
 function clearEditMode() {
@@ -747,7 +1369,9 @@ function cancelEdit() {
   clearEditMode();
   setDefaultWindow();
   syncMode();
+  syncSchedule();
   syncNotify();
+  syncPrecheck();
   showFormError("");
   setStatus("已取消编辑");
 }
@@ -761,25 +1385,118 @@ async function onCreate(event) {
     showFormError("请填写任务名称");
     return;
   }
-  const windowStart = els.windowStart.value;
-  const windowEnd = els.windowEnd.value;
-  if (!windowStart || !windowEnd) {
-    showFormError("请填写执行窗口");
-    return;
-  }
-  if (windowStart === windowEnd) {
-    showFormError("窗口起止时间不能相同");
-    return;
-  }
-
+  const scheduleKind = getScheduleKind();
   const mode = getMode();
   const payload = {
     name,
-    window_start: windowStart,
-    window_end: windowEnd,
+    schedule_kind: scheduleKind,
     mode,
     notify_enabled: els.notifyEnabled.checked,
+    precheck_enabled: els.precheckEnabled.checked,
   };
+
+  if (scheduleKind === "daily") {
+    if (getDailyMode() === "range") {
+      const windowStart = els.windowStart.value;
+      const windowEnd = els.windowEnd.value;
+      if (!windowStart || !windowEnd) {
+        showFormError("请填写执行窗口");
+        return;
+      }
+      if (windowStart === windowEnd) {
+        showFormError("窗口起止时间不能相同；想要固定时刻请选「精确时间」");
+        return;
+      }
+      payload.window_start = windowStart;
+      payload.window_end = windowEnd;
+    } else {
+      const time = els.exactTime.value;
+      if (!time) {
+        showFormError("请选择每天的执行时间");
+        return;
+      }
+      payload.window_start = time;
+      payload.window_end = time;
+      if (getDailyMode() === "jitter") {
+        const jitter = Number(els.jitterMinutes.value);
+        if (!Number.isInteger(jitter) || jitter < 0 || jitter > 60) {
+          showFormError("浮动分钟必须是 0–60 的整数");
+          return;
+        }
+        if (jitter > 0) payload.daily_jitter_minutes = jitter;
+      }
+    }
+  } else if (scheduleKind === "interval") {
+    const value = Number(els.intervalValue.value);
+    const unit = Number(els.intervalUnit.value);
+    if (!Number.isInteger(value) || value < 1) {
+      showFormError("执行间隔必须是大于 0 的整数");
+      return;
+    }
+    const seconds = value * unit;
+    if (seconds > 30 * 24 * 3600) {
+      showFormError("执行间隔不能超过 30 天");
+      return;
+    }
+    const jitter = Number(els.intervalJitter.value || "0");
+    if (!Number.isInteger(jitter) || jitter < 0) {
+      showFormError("随机抖动必须是大于等于 0 的整数秒");
+      return;
+    }
+    if (jitter > seconds) {
+      showFormError("随机抖动不能大于执行间隔");
+      return;
+    }
+    payload.interval_seconds = seconds;
+    payload.interval_jitter_seconds = jitter;
+    const startAt = fromDateTimeLocal(els.intervalStart.value);
+    if (startAt !== null) payload.interval_start_at = startAt;
+  }
+
+  if (payload.precheck_enabled) {
+    const days = checkedWeekdays("precheck-weekdays");
+    if (days.length > 0) payload.precheck_weekdays = days;
+
+    const timeStart = els.precheckTimeStart.value;
+    const timeEnd = els.precheckTimeEnd.value;
+    if ((timeStart && !timeEnd) || (!timeStart && timeEnd)) {
+      showFormError("执行时段需要同时填写开始和结束时间");
+      return;
+    }
+    if (timeStart && timeEnd) {
+      if (timeStart === timeEnd) {
+        showFormError("执行时段的开始和结束时间不能相同");
+        return;
+      }
+      payload.precheck_time_start = timeStart;
+      payload.precheck_time_end = timeEnd;
+    }
+
+    const precheckCurl = els.precheckCurl.value.trim();
+    if (precheckCurl) payload.precheck_curl = precheckCurl;
+
+    const rawPreStatus = els.precheckStatus.value.trim();
+    let preStatus = null;
+    if (rawPreStatus !== "") {
+      preStatus = Number(rawPreStatus);
+      if (!Number.isInteger(preStatus) || preStatus < 100 || preStatus > 599) {
+        showFormError("前置判断的期望状态码必须是 100–599 的整数");
+        return;
+      }
+    }
+    const preExpr = els.precheckExpr.value.trim();
+    if (!precheckCurl && (preStatus !== null || preExpr)) {
+      showFormError("配置了前置状态码或表达式时，必须填写前置判断 curl");
+      return;
+    }
+    if (preStatus !== null) payload.precheck_expect_status = preStatus;
+    if (preExpr) payload.precheck_expr = preExpr;
+
+    if (days.length === 0 && !timeStart && !precheckCurl) {
+      showFormError("启用执行前判断时，至少配置执行星期、执行时段或前置 curl 之一");
+      return;
+    }
+  }
 
   if (mode === "curl") {
     const curl = els.curl.value.trim();
@@ -807,23 +1524,20 @@ async function onCreate(event) {
       return;
     }
     payload.notify_curl = notifyCurl;
-
-    const rawStatus = els.expectStatus.value.trim();
-    if (rawStatus !== "") {
-      const status = Number(rawStatus);
-      if (!Number.isInteger(status) || status < 100 || status > 599) {
-        showFormError("期望状态码必须是 100–599 的整数");
-        return;
-      }
-      payload.expect_status = status;
-    }
-    if (els.expectBody.value !== "") {
-      payload.expect_body = els.expectBody.value;
-    }
-    if (els.expectExpr.value.trim() !== "") {
-      payload.expect_expr = els.expectExpr.value.trim();
-    }
   }
+
+  // Success conditions are saved regardless of notifications.
+  const rawStatus = els.expectStatus.value.trim();
+  if (rawStatus !== "") {
+    const status = Number(rawStatus);
+    if (!Number.isInteger(status) || status < 100 || status > 599) {
+      showFormError("期望状态码必须是 100–599 的整数");
+      return;
+    }
+    payload.expect_status = status;
+  }
+  if (els.expectBody.value !== "") payload.expect_body = els.expectBody.value;
+  if (els.expectExpr.value.trim() !== "") payload.expect_expr = els.expectExpr.value.trim();
 
   const editingId = state.editingId;
   els.submit.disabled = true;
@@ -836,7 +1550,9 @@ async function onCreate(event) {
     clearEditMode();
     setDefaultWindow();
     syncMode();
+    syncSchedule();
     syncNotify();
+    syncPrecheck();
     const savedMessage = !editingId
       ? `已创建任务「${data.task.name}」`
       : data.task.status === "active"
@@ -895,12 +1611,14 @@ async function onRunNow(button) {
       method: "POST",
       signal: controller.signal,
     });
-    const parts = [`任务「${name}」已执行一次`];
-    if (data.status !== null) parts.push(`HTTP ${data.status}`);
+    const parts = [
+      data.skipped ? `任务「${name}」被前置判断跳过` : `任务「${name}」已执行一次`,
+    ];
+    if (!data.skipped && data.status !== null) parts.push(`HTTP ${data.status}`);
     if (data.error) parts.push(data.error);
     else if (data.matched) parts.push(data.notifySent ? "命中并发通知" : "命中条件");
     else parts.push("未命中条件");
-    parts.push(`${data.durationMs} ms`);
+    if (!data.skipped) parts.push(`${data.durationMs} ms`);
     setStatus(parts.join(" · "), Boolean(data.error));
     await loadTasks({ silent: true });
     if (state.selectedTaskId === taskId) {
@@ -908,7 +1626,15 @@ async function onRunNow(button) {
       await loadLogs({ reset: true });
     }
   } catch (error) {
-    setStatus(error.message, true);
+    // The 60s cap is a CLIENT-side abort: the server keeps running the task.
+    // Say so, otherwise the user assumes the run failed and retries.
+    const timedOut = error?.message?.includes("请求超时");
+    setStatus(
+      timedOut
+        ? `任务「${name}」超过 60 秒未返回，已断开等待；后台可能仍在执行，稍后刷新执行记录查看`
+        : error.message,
+      true,
+    );
   } finally {
     clearTimeout(timeout);
     button.disabled = false;
@@ -1074,6 +1800,48 @@ async function openCleanup() {
   if (!els.cleanupDialog.open) els.cleanupDialog.showModal();
   setCleanupView("loading");
   await loadCleanupPreview();
+  await syncRetentionControl();
+}
+
+/** Show the retention window that is actually in force, and allow changing it. */
+async function syncRetentionControl() {
+  try {
+    const config = await api("/api/config");
+    const days = Number(config?.logRetentionDays ?? 0);
+    state.logRetentionDays = days;
+    const option = [...els.retentionDays.options].find(
+      (entry) => Number(entry.value) === days,
+    );
+    if (option) els.retentionDays.value = option.value;
+    els.retentionNote.textContent =
+      days > 0
+        ? `当前生效：只显示最近 ${days} 天的日志；更早的记录不查询、不渲染，并在后台巡检中被删除（每轮最多 5000 条）。`
+        : "当前生效：不限制保留天数，日志会一直保留（记录仍分页加载，不会一次渲染全部）。";
+  } catch {
+    // The dialog still works without the hint.
+  }
+}
+
+async function saveRetention() {
+  const days = Number(els.retentionDays.value);
+  els.retentionSave.disabled = true;
+  try {
+    await api("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({ logRetentionDays: days }),
+    });
+    state.logRetentionDays = days;
+    await syncRetentionControl();
+    setStatus(days > 0 ? `已设置保留最近 ${days} 天的日志` : "已取消日志保留期限");
+    // The visible window changed: reload the list so it matches.
+    if (state.selectedTaskId) await loadLogs({ reset: true });
+    await loadTasks({ silent: true });
+    renderLogMeta();
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    els.retentionSave.disabled = false;
+  }
 }
 
 function closeCleanup() {
@@ -1135,9 +1903,9 @@ async function executeCleanup() {
     const result = await api("/api/logs/cleanup", {
       method: "POST",
       body: JSON.stringify(body),
-      // VACUUM on a large database can take a while; the default 15s poll
+      // VACUUM on a large database can take minutes; the default 15s poll
       // timeout must not cut this request short.
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(600_000),
     });
     state.cleanup.busy = false;
     renderCleanupResult(result);
@@ -1155,7 +1923,12 @@ async function executeCleanup() {
     setStatus(`已删除 ${result.deleted} 条日志，释放 ${formatBytes(result.reclaimed_bytes)}`);
   } catch (error) {
     state.cleanup.busy = false;
-    showCleanupError(`清理失败：${error.message}`);
+    const timedOut = error?.message?.includes("请求超时");
+    showCleanupError(
+      timedOut
+        ? "清理请求超时断开：后台可能仍在压缩数据库，稍后刷新查看占用空间再确认是否需要重试。"
+        : `清理失败：${error.message}`,
+    );
   }
 }
 
@@ -1196,7 +1969,7 @@ function updatePauseSummary() {
     : "明天起算：今天剩余时间照常执行，今天已排好的任务不会被取消。";
   els.pauseSummary.textContent =
     `${lead}暂停 ${days} 个完整自然日（${covered}）；` +
-    `${formatTime(until)} 恢复，恢复当天在窗口 ${task.window_start}–${task.window_end} 内随机执行一次。`;
+    `${formatTime(until)} 恢复，之后按「${formatSchedule(task)}」继续执行。`;
 }
 
 function openPauseDialog(taskId) {
@@ -1340,18 +2113,145 @@ async function executeDelete() {
   }
 }
 
-function openTestDialog() {
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function requestToCurl(method, url, headersJson, body) {
+  const parts = [`curl -X ${method} ${shellQuote(url)}`];
+  if (headersJson) {
+    try {
+      const parsed = JSON.parse(headersJson);
+      for (const [name, value] of Object.entries(parsed)) {
+        parts.push(`-H ${shellQuote(`${name}: ${value}`)}`);
+      }
+    } catch {
+      // Keep the parts we already have.
+    }
+  }
+  if (body) parts.push(`--data-raw ${shellQuote(body)}`);
+  return parts.join(" \\\n  ");
+}
+
+/** Reconstruct curl text for tasks created through the structured form. */
+function curlFromTask(task) {
+  if (task.curl_command) return task.curl_command;
+  return requestToCurl(
+    task.request_method,
+    task.request_url,
+    task.request_headers,
+    task.request_body,
+  );
+}
+
+function precheckCurlFromTask(task) {
+  if (task.precheck_curl_command) return task.precheck_curl_command;
+  if (!task.precheck_url) return "";
+  return requestToCurl(
+    task.precheck_method ?? "GET",
+    task.precheck_url,
+    task.precheck_headers,
+    task.precheck_body,
+  );
+}
+
+/**
+ * The curl a "test now" would run for the CURRENT form. In structured mode the
+ * task will be saved from URL/headers/body, so the test must use the same
+ * fields instead of an empty curl box.
+ */
+function formCurl() {
+  const direct = els.curl.value.trim();
+  if (getMode() === "curl") return direct;
+  const url = els.url.value.trim();
+  if (!url) return direct;
+  const headers = {};
+  for (const line of els.headers.value.split("\n")) {
+    const trimmed = line.trim();
+    const index = trimmed.indexOf(":");
+    if (index > 0) headers[trimmed.slice(0, index).trim()] = trimmed.slice(index + 1).trim();
+  }
+  return requestToCurl(
+    els.method.value,
+    url,
+    Object.keys(headers).length > 0 ? JSON.stringify(headers) : null,
+    els.body.value || null,
+  );
+}
+
+function syncTestPrecheck() {
+  els.testPrecheckFields.hidden = !els.testPrecheckEnabled.checked;
+}
+
+function syncTestNotify() {
+  els.testNotifyFields.hidden = !els.testNotifyEnabled.checked;
+}
+
+/**
+ * Open the test bench. With a task it previews that task's real configuration;
+ * without one it takes whatever the create form currently holds, so "try it
+ * before saving" needs no copy-paste.
+ */
+function openTestDialog(task = null) {
   state.testing.busy = false;
+  state.testing.taskId = task ? task.id : null;
   els.testSend.disabled = false;
-  els.testSend.textContent = "发送测试";
+  els.testSend.textContent = "开始测试";
   els.testError.hidden = true;
   els.testError.textContent = "";
   els.testResult.hidden = true;
-  // Pre-fill from the create form's curl box when available.
-  const draft = els.curl.value.trim();
-  if (draft) els.testCurl.value = draft;
+  els.testSteps.replaceChildren();
+  els.testSendNotify.checked = false;
+
+  if (task) {
+    els.testCurl.value = curlFromTask(task);
+    els.testPrecheckEnabled.checked = task.precheck_enabled === 1;
+    els.testPrecheckCurl.value = precheckCurlFromTask(task);
+    els.testPrecheckStatus.value =
+      task.precheck_expect_status === null || task.precheck_expect_status === undefined
+        ? ""
+        : String(task.precheck_expect_status);
+    els.testPrecheckExpr.value = task.precheck_expr ?? "";
+    setCheckedWeekdays(
+      "test-precheck-weekdays",
+      task.precheck_weekdays
+        ? task.precheck_weekdays
+            .split(",")
+            .map((value) => Number(value))
+            .filter((value) => Number.isInteger(value))
+        : [],
+    );
+    els.testPrecheckTimeStart.value = task.precheck_time_start ?? "";
+    els.testPrecheckTimeEnd.value = task.precheck_time_end ?? "";
+    els.testExpectStatus.value =
+      task.expect_status === null || task.expect_status === undefined
+        ? ""
+        : String(task.expect_status);
+    els.testExpectExpr.value = task.expect_expr ?? "";
+    els.testExpectBody.value = task.expect_body ?? "";
+    els.testNotifyEnabled.checked = task.notify_enabled === 1;
+    els.testNotifyCurl.value = task.notify_curl_command ?? "";
+  } else {
+    els.testCurl.value = formCurl();
+    els.testPrecheckEnabled.checked = els.precheckEnabled.checked;
+    els.testPrecheckCurl.value = els.precheckCurl.value.trim();
+    els.testPrecheckStatus.value = els.precheckStatus.value;
+    els.testPrecheckExpr.value = els.precheckExpr.value.trim();
+    setCheckedWeekdays("test-precheck-weekdays", checkedWeekdays("precheck-weekdays"));
+    els.testPrecheckTimeStart.value = els.precheckTimeStart.value;
+    els.testPrecheckTimeEnd.value = els.precheckTimeEnd.value;
+    els.testExpectStatus.value = els.expectStatus.value;
+    els.testExpectExpr.value = els.expectExpr.value.trim();
+    els.testExpectBody.value = els.expectBody.value;
+    els.testNotifyEnabled.checked = els.notifyEnabled.checked;
+    els.testNotifyCurl.value = els.notifyCurl.value.trim();
+  }
+
+  syncTestPrecheck();
+  syncTestNotify();
   if (!els.testDialog.open) els.testDialog.showModal();
-  els.testCurl.focus();
+  void loadTestHistory(state.testing.taskId);
+  if (!els.testCurl.value.trim()) els.testCurl.focus();
 }
 
 function closeTestDialog() {
@@ -1359,76 +2259,291 @@ function closeTestDialog() {
   if (els.testDialog.open) els.testDialog.close();
 }
 
+const TEST_STATUS_META = {
+  ok: { label: "通过", cls: "status-ok", step: "is-ok" },
+  fail: { label: "失败", cls: "status-err", step: "is-fail" },
+  skip: { label: "跳过", cls: "status-warn", step: "is-skip" },
+  info: { label: "提示", cls: "status-muted", step: "is-info" },
+};
+
+function renderTestStep(step, index) {
+  const meta = TEST_STATUS_META[step.status] ?? TEST_STATUS_META.info;
+  const card = h(
+    "li",
+    { class: `test-step ${meta.step}` },
+    h(
+      "div",
+      { class: "test-step-head" },
+      h("span", { class: "test-step-index" }, String(index + 1)),
+      h("span", { class: "test-step-title" }, step.title),
+      h("span", { class: `badge ${meta.cls}` }, meta.label),
+      step.durationMs !== null && step.durationMs !== undefined
+        ? h("span", { class: "muted" }, `${step.durationMs} ms`)
+        : null,
+    ),
+    h("div", { class: "test-step-detail" }, step.detail ?? ""),
+  );
+
+  if (step.request || step.response) {
+    const details = h("details", {});
+    details.append(h("summary", {}, "请求 / 响应详情"));
+    const body = h("div", { class: "detail" });
+    if (step.request) {
+      addDetail(body, "请求", `${step.request.method} ${step.request.url}`);
+      const requestHeaders = Object.entries(step.request.headers ?? {})
+        .map(([name, value]) => `${name}: ${value}`)
+        .join("\n");
+      addDetail(body, "请求头", requestHeaders);
+      if (step.request.body !== null && step.request.body !== undefined) {
+        addDetail(body, "请求体", step.request.body === "" ? "（空）" : step.request.body);
+      }
+    }
+    if (step.response) {
+      addDetail(
+        body,
+        "响应状态",
+        step.response.status === null ? "无响应" : String(step.response.status),
+      );
+      const responseHeaders = step.response.headers
+        ? Object.entries(step.response.headers)
+            .map(([name, value]) => `${name}: ${value}`)
+            .join("\n")
+        : "";
+      addDetail(body, "响应头", responseHeaders);
+      addDetail(
+        body,
+        "响应体",
+        step.response.body ? prettyJson(step.response.body) : "（空）",
+      );
+      if (step.response.truncated) {
+        body.append(h("div", { class: "muted" }, "响应体超过上限，已截断"));
+      }
+    }
+    if (!body.childElementCount) body.append(h("div", { class: "muted" }, "没有可显示的详情"));
+    details.append(body);
+    card.append(details);
+  }
+
+  return card;
+}
+
 function renderTestResult(result) {
-  const hasResponse = result.status !== null;
-  const badgeClass = hasResponse
-    ? result.status >= 200 && result.status < 300
-      ? "badge-active"
-      : "badge-paused"
-    : "badge-stopped";
-  els.testStatus.className = `badge ${badgeClass}`;
-  els.testStatus.textContent = hasResponse ? `HTTP ${result.status}` : (result.aborted ? "已中断" : "请求失败");
-  els.testDuration.textContent = `耗时 ${result.durationMs} ms`;
-
-  if (hasResponse && result.body) {
-    els.testBody.textContent = result.body;
-    els.testBodyWrap.hidden = false;
-    els.testBodyEmpty.hidden = true;
-  } else {
-    els.testBody.textContent = "";
-    els.testBodyWrap.hidden = false;
-    els.testBodyEmpty.hidden = false;
-  }
-  els.testTruncated.hidden = !result.truncated;
-
-  const headers = result.headers;
-  if (headers && Object.keys(headers).length > 0) {
-    els.testHeaders.textContent = Object.entries(headers)
-      .map(([key, value]) => `${key}: ${value}`)
-      .join("\n");
-    els.testHeadersWrap.hidden = false;
-  } else {
-    els.testHeaders.textContent = "";
-    els.testHeadersWrap.hidden = true;
+  const summary = result.summary ?? {};
+  let label = "未命中成功条件";
+  let cls = "status-warn";
+  if (summary.skipped) {
+    label = "前置判断未通过，本次跳过";
+    cls = "status-warn";
+  } else if (summary.matched) {
+    label = summary.notifySent ? "命中成功条件并发通知" : "命中成功条件";
+    cls = "status-ok";
+  } else if (summary.error) {
+    label = "执行失败";
+    cls = "status-err";
   }
 
-  if (result.error) {
-    els.testError.textContent = result.error;
-    els.testError.hidden = false;
-  } else {
-    els.testError.textContent = "";
-    els.testError.hidden = true;
-  }
+  els.testSummary.className = `badge ${cls}`;
+  els.testSummary.textContent = label;
+  els.testTotal.textContent = `总耗时 ${summary.totalMs ?? 0} ms`;
+  els.testSteps.replaceChildren(
+    ...(result.steps ?? []).map((step, index) => renderTestStep(step, index)),
+  );
   els.testResult.hidden = false;
+  // The dialog body scrolls; make sure the freshly rendered timeline is visible.
+  requestAnimationFrame(() => {
+    els.testResult.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  });
+}
+
+async function loadTestHistory(taskId) {
+  if (!taskId) {
+    els.testHistory.hidden = true;
+    els.testHistoryList.replaceChildren();
+    return;
+  }
+  try {
+    const data = await api(`/api/tasks/${encodeURIComponent(taskId)}/test-runs`);
+    const runs = data.runs ?? [];
+    if (!runs.length) {
+      els.testHistory.hidden = true;
+      els.testHistoryList.replaceChildren();
+      return;
+    }
+    els.testHistory.hidden = false;
+    els.testHistoryList.replaceChildren(
+      ...runs.map((run) =>
+        h(
+          "button",
+          {
+            class: `test-history-item ${run.ok ? "is-ok" : "is-fail"}`,
+            type: "button",
+            title: "点击查看这次的步骤",
+            onclick: () => showTestRun(run.id),
+          },
+          `${formatShortTime(run.created_at)} ${run.ok ? "命中" : "未命中"}`,
+        ),
+      ),
+    );
+  } catch {
+    els.testHistory.hidden = true;
+  }
+}
+
+async function showTestRun(id) {
+  try {
+    const data = await api(`/api/test-runs/${encodeURIComponent(id)}`);
+    const run = data.run;
+    if (!run || !Array.isArray(run.steps)) return;
+    renderTestResult({ steps: run.steps, summary: run.summary ?? {} });
+    setStatus(`查看 ${formatTime(run.created_at)} 的测试记录`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+/** Copy the test dialog's configuration back into the task form. */
+function applyTestToForm() {
+  document.querySelector('input[name="mode"][value="curl"]').click();
+  els.curl.value = els.testCurl.value.trim();
+
+  els.precheckEnabled.checked = els.testPrecheckEnabled.checked;
+  syncPrecheck();
+  els.precheckCurl.value = els.testPrecheckCurl.value.trim();
+  els.precheckStatus.value = els.testPrecheckStatus.value;
+  els.precheckExpr.value = els.testPrecheckExpr.value;
+  setCheckedWeekdays("precheck-weekdays", checkedWeekdays("test-precheck-weekdays"));
+  els.precheckTimeStart.value = els.testPrecheckTimeStart.value;
+  els.precheckTimeEnd.value = els.testPrecheckTimeEnd.value;
+
+  els.expectStatus.value = els.testExpectStatus.value;
+  els.expectExpr.value = els.testExpectExpr.value;
+  els.expectBody.value = els.testExpectBody.value;
+
+  els.notifyEnabled.checked = els.testNotifyEnabled.checked;
+  syncNotify();
+  els.notifyCurl.value = els.testNotifyCurl.value.trim();
+}
+
+/**
+ * "用这份配置建任务": copy the tested configuration into the form, name it when
+ * empty, and submit through the normal create path so validation, messages and
+ * scheduling stay exactly the same as a manual create.
+ */
+async function saveTestAsTask() {
+  if (state.testing.busy) return;
+  if (!els.testCurl.value.trim()) {
+    els.testError.textContent = "请先填写并测试主请求 curl";
+    els.testError.hidden = false;
+    return;
+  }
+  applyTestToForm();
+
+  // Editing an existing task: never create a second one behind the user's back.
+  if (state.editingId) {
+    els.testDialog.close();
+    els.form.scrollIntoView({ behavior: "smooth", block: "start" });
+    setStatus("已把测试配置带入正在编辑的任务，确认后点「保存修改」");
+    return;
+  }
+
+  if (!els.name.value.trim()) {
+    els.name.value = `测试任务 ${formatShortTime(Date.now())}`;
+  }
+  els.testDialog.close();
+  await onCreate(new Event("submit"));
 }
 
 async function sendTest() {
   if (state.testing.busy) return;
   const curl = els.testCurl.value.trim();
   if (!curl) {
-    els.testError.textContent = "请粘贴 curl 命令";
+    els.testError.textContent = "请粘贴主请求 curl";
     els.testError.hidden = false;
     els.testCurl.focus();
     return;
   }
 
+  const payload = {
+    curl,
+    precheck_enabled: els.testPrecheckEnabled.checked,
+    notify_enabled: els.testNotifyEnabled.checked,
+    send_notify: els.testSendNotify.checked,
+  };
+  if (state.testing.taskId) payload.task_id = state.testing.taskId;
+
+  if (payload.precheck_enabled) {
+    const days = checkedWeekdays("test-precheck-weekdays");
+    if (days.length > 0) payload.precheck_weekdays = days;
+
+    const timeStart = els.testPrecheckTimeStart.value;
+    const timeEnd = els.testPrecheckTimeEnd.value;
+    if ((timeStart && !timeEnd) || (!timeStart && timeEnd)) {
+      els.testError.textContent = "执行时段需要同时填写开始和结束时间";
+      els.testError.hidden = false;
+      return;
+    }
+    if (timeStart && timeEnd) {
+      if (timeStart === timeEnd) {
+        els.testError.textContent = "执行时段的开始和结束时间不能相同";
+        els.testError.hidden = false;
+        return;
+      }
+      payload.precheck_time_start = timeStart;
+      payload.precheck_time_end = timeEnd;
+    }
+
+    const precheckCurl = els.testPrecheckCurl.value.trim();
+    if (precheckCurl) payload.precheck_curl = precheckCurl;
+
+    const rawStatus = els.testPrecheckStatus.value.trim();
+    const rawExpr = els.testPrecheckExpr.value.trim();
+    if (!precheckCurl && (rawStatus !== "" || rawExpr !== "")) {
+      els.testError.textContent = "配置了前置状态码或表达式时，必须填写前置判断 curl";
+      els.testError.hidden = false;
+      return;
+    }
+    if (rawStatus !== "") payload.precheck_expect_status = Number(rawStatus);
+    if (rawExpr !== "") payload.precheck_expr = rawExpr;
+
+    if (days.length === 0 && !timeStart && !precheckCurl) {
+      els.testError.textContent = "启用执行前判断时，至少配置执行星期、执行时段或前置 curl 之一";
+      els.testError.hidden = false;
+      return;
+    }
+  }
+  if (els.testExpectStatus.value.trim() !== "") {
+    payload.expect_status = Number(els.testExpectStatus.value);
+  }
+  if (els.testExpectBody.value !== "") payload.expect_body = els.testExpectBody.value;
+  if (els.testExpectExpr.value.trim() !== "") payload.expect_expr = els.testExpectExpr.value.trim();
+  if (payload.notify_enabled) {
+    const notifyCurl = els.testNotifyCurl.value.trim();
+    if (!notifyCurl) {
+      els.testError.textContent = "请填写通知 curl";
+      els.testError.hidden = false;
+      return;
+    }
+    payload.notify_curl = notifyCurl;
+  }
+
   state.testing.busy = true;
   els.testSend.disabled = true;
-  els.testSend.textContent = "发送中…";
+  els.testSend.textContent = "测试中…";
   els.testError.hidden = true;
   els.testError.textContent = "";
   els.testResult.hidden = true;
-  // Dedicated timeout: the test endpoint may wait up to 30s server-side.
+  // The chain can run up to three requests; give it a generous cap.
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 40_000);
+  const timeout = setTimeout(() => controller.abort(), 100_000);
   try {
-    const data = await api("/api/curl/test", {
+    const data = await api("/api/test/run", {
       method: "POST",
-      body: JSON.stringify({ curl }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
-    renderTestResult(data.result);
-    setStatus(`测试完成：${els.testStatus.textContent}`);
+    renderTestResult(data.result ?? { steps: [], summary: {} });
+    if (state.testing.taskId) void loadTestHistory(state.testing.taskId);
+    setStatus(`测试完成：${els.testSummary.textContent}`);
   } catch (error) {
     els.testError.textContent = error.message;
     els.testError.hidden = false;
@@ -1438,7 +2553,7 @@ async function sendTest() {
     clearTimeout(timeout);
     state.testing.busy = false;
     els.testSend.disabled = false;
-    els.testSend.textContent = "发送测试";
+    els.testSend.textContent = "开始测试";
   }
 }
 
@@ -1446,7 +2561,28 @@ function bindEvents() {
   document.querySelectorAll('input[name="mode"]').forEach((radio) => {
     radio.addEventListener("change", syncMode);
   });
+  document.querySelectorAll('input[name="schedule_kind"]').forEach((radio) => {
+    radio.addEventListener("change", syncSchedule);
+  });
+  document.querySelectorAll('input[name="daily_mode"]').forEach((radio) => {
+    radio.addEventListener("change", syncDailyMode);
+  });
+  // Any schedule field change refreshes the "next 7 runs" preview.
+  [
+    els.windowStart,
+    els.windowEnd,
+    els.exactTime,
+    els.jitterMinutes,
+    els.intervalValue,
+    els.intervalUnit,
+    els.intervalJitter,
+    els.intervalStart,
+  ].forEach((input) => {
+    input.addEventListener("input", schedulePreview);
+    input.addEventListener("change", schedulePreview);
+  });
   els.notifyEnabled.addEventListener("change", syncNotify);
+  els.precheckEnabled.addEventListener("change", syncPrecheck);
   els.form.addEventListener("submit", onCreate);
   els.cancelEdit.addEventListener("click", cancelEdit);
 
@@ -1458,6 +2594,7 @@ function bindEvents() {
   els.loadMore.addEventListener("click", () => loadLogs({ older: true }));
 
   els.openCleanup.addEventListener("click", openCleanup);
+  els.retentionSave.addEventListener("click", () => void saveRetention());
   els.cleanupClose.addEventListener("click", closeCleanup);
   els.cleanupCancel.addEventListener("click", closeCleanup);
   els.cleanupExecute.addEventListener("click", executeCleanup);
@@ -1497,15 +2634,21 @@ function bindEvents() {
     els.deleteCancel.disabled = false;
   });
 
-  els.openTestCurl.addEventListener("click", openTestDialog);
+  els.openTestCurl.addEventListener("click", () => openTestDialog());
+  els.openTestGlobal.addEventListener("click", () => openTestDialog());
+  els.openMetrics.addEventListener("click", openMetricsDialog);
+  els.metricsClose.addEventListener("click", () => els.metricsDialog.close());
+  els.testSave.addEventListener("click", saveTestAsTask);
   els.testSend.addEventListener("click", sendTest);
   els.testClose.addEventListener("click", closeTestDialog);
   els.testCancel.addEventListener("click", closeTestDialog);
+  els.testPrecheckEnabled.addEventListener("change", syncTestPrecheck);
+  els.testNotifyEnabled.addEventListener("change", syncTestNotify);
   els.testDialog.addEventListener("cancel", (event) => {
     if (state.testing.busy) event.preventDefault();
   });
 
-  els.taskList.addEventListener("click", (event) => {
+  els.taskList.addEventListener("click", async (event) => {
     const card = event.target.closest(".task-card");
     if (!card) return;
     const button = event.target.closest("button[data-action]");
@@ -1517,15 +2660,40 @@ function bindEvents() {
         openDeleteDialog(card.dataset.id);
       } else if (button.dataset.action === "run") {
         onRunNow(button);
+      } else if (button.dataset.action === "test") {
+        const task = state.tasks.find((entry) => entry.id === card.dataset.id);
+        if (task) {
+          // The test bench needs the full request/precheck config, which the
+          // list view does not carry.
+          button.disabled = true;
+          try {
+            const data = await api(`/api/tasks/${encodeURIComponent(task.id)}`);
+            openTestDialog(data?.task ?? null);
+          } catch (error) {
+            setStatus(error.message, true);
+          } finally {
+            button.disabled = false;
+          }
+        }
       } else if (button.dataset.action === "edit") {
         const task = state.tasks.find((entry) => entry.id === card.dataset.id);
         if (task) {
           if (state.editingId && state.editingId !== task.id && !window.confirm("切换编辑目标会丢弃当前未保存的修改，继续吗？")) {
             return;
           }
-          setEditMode(task);
-          els.form.scrollIntoView({ behavior: "smooth", block: "start" });
-          setStatus(`正在编辑任务「${task.name}」`);
+          // The list only carries the card fields; the form needs the bodies.
+          button.disabled = true;
+          try {
+            const data = await api(`/api/tasks/${encodeURIComponent(task.id)}`);
+            if (!data?.task) return;
+            setEditMode(data.task);
+            els.form.scrollIntoView({ behavior: "smooth", block: "start" });
+            setStatus(`正在编辑任务「${task.name}」`);
+          } catch (error) {
+            setStatus(error.message, true);
+          } finally {
+            button.disabled = false;
+          }
         }
       } else {
         onTaskAction(button);
@@ -1563,17 +2731,27 @@ function startPolling() {
       state.polling = false;
     }
   }, delay);
+  // A one-second ticker for the "执行中" badges: they must keep counting even
+  // when the poll finds nothing new, otherwise a hanging request looks idle.
+  setInterval(tickRunningBadges, 1000);
+  // Statistics change slowly: poll them less often than the task list.
+  setInterval(() => {
+    if (!document.hidden) void refreshMetrics();
+  }, 15000);
 }
 
 async function init() {
   syncMode();
+  syncSchedule();
   syncNotify();
+  syncPrecheck();
   initPauseDays();
   bindEvents();
   setStatus("加载中…");
   await loadClientConfig();
   setDefaultWindow();
   await loadTasks();
+  void refreshMetrics();
   if (state.selectedTaskId) {
     await loadLogs({ reset: true });
   } else {

@@ -40,10 +40,12 @@ describe("parseWindow", () => {
     });
   });
 
-  test("rejects invalid formats and equal endpoints", () => {
+  test("rejects invalid formats but treats equal endpoints as an exact time", () => {
     expect(validateWindow("24:00", "10:00")).toContain("HH:mm");
-    expect(validateWindow("10:00", "10:00")).toContain("不能相同");
     expect(validateWindow("10:20", "10:10")).toBeNull();
+    // start === end is no longer an error: it means "run exactly at 10:00".
+    expect(validateWindow("10:00", "10:00")).toBeNull();
+    expect(parseWindow("10:00", "10:00").instant).toBe(true);
   });
 });
 
@@ -359,5 +361,63 @@ describe("planAfterRunWithPause", () => {
 });
 
 test("WindowError is the error type for bad windows", () => {
-  expect(() => parseWindow("10:00", "10:00")).toThrow(WindowError);
+  expect(() => parseWindow("10:00", "25:00")).toThrow(WindowError);
+});
+
+describe("exact time (instant window)", () => {
+  const spec = parseWindow("10:00", "10:00");
+
+  test("is flagged as instant with zero duration", () => {
+    expect(spec.instant).toBe(true);
+    expect(spec.durationMinutes).toBe(0);
+  });
+
+  test("plans exactly at the chosen moment", () => {
+    expect(planNewTask(at(20, 9, 30), spec, fixed(0.5))).toBe(at(20, 10, 0));
+  });
+
+  test("rolls over to tomorrow once the moment has passed", () => {
+    expect(planNewTask(at(20, 10, 5), spec, fixed(0.5))).toBe(at(21, 10, 0));
+  });
+
+  test("the run after firing is tomorrow at the same time", () => {
+    expect(planNextWindowAfter(at(20, 10, 0), spec, fixed(0.5))).toBe(at(21, 10, 0));
+  });
+
+  test("a timer firing seconds late still runs", () => {
+    expect(classifyTimerFire(at(20, 10, 0) + 2000, at(20, 10, 0), spec)).toBe("run");
+  });
+
+  test("a timer firing minutes late is a miss", () => {
+    expect(classifyTimerFire(at(20, 10, 2), at(20, 10, 0), spec)).toBe("miss");
+  });
+
+  test("creating a task inside the grace period runs immediately", () => {
+    const now = at(20, 10, 0) + 5000;
+    expect(planNewTask(now, spec, fixed(0.5))).toBe(now);
+  });
+
+  test("recovery inside the grace period runs immediately", () => {
+    const now = at(20, 10, 0) + 3000;
+    const plan = planRecovery(now, at(20, 10, 0), spec, fixed(0.5));
+    expect(plan.target).toBe(now);
+    expect(plan.reason).toBe("in-window");
+  });
+
+  test("a paused day skips the exact time and resumes the next day", () => {
+    const pause = {
+      from: startOfLocalDay(at(20, 0, 0)),
+      until: startOfLocalDay(at(21, 0, 0)),
+    };
+    expect(planPaused(at(20, 10, 0), spec, pause)).toBe(true);
+    expect(planWithPause(at(20, 8, 0), spec, pause)).toBe(at(21, 10, 0));
+  });
+
+  test("a ±5 minute window keeps the run inside the jitter band", () => {
+    const jittered = parseWindow("09:55", "10:05");
+    const target = planNewTask(at(20, 9, 0), jittered, fixed(0.5));
+    expect(target).toBeGreaterThanOrEqual(at(20, 9, 55));
+    expect(target).toBeLessThan(at(20, 10, 5));
+    expect(planPaused(target, jittered, null)).toBe(false);
+  });
 });

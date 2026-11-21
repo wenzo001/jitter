@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "在时间窗口里随机醒来，替你执行 curl。",
+  "description": "测试 curl，并定时（每天窗口）或循环（固定间隔）调用它",
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch src/index.ts",

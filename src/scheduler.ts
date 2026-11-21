@@ -1,28 +1,38 @@
 import {
   deleteTask as deleteTaskRecord,
+  getEffectiveRetentionDays,
   getTask,
+  incrementalVacuum,
   insertLog,
   listTasks,
+  pruneLogs,
   setTaskPause,
   updateTaskConfig,
   updateTaskNextRun,
   updateTaskStatus,
 } from "./db";
 import { executeTaskRun } from "./executor";
+import { getActiveConfig } from "./config";
 import {
   MAX_PAUSE_DAYS,
   classifyTimerFire,
-  parseWindow,
   pauseInterval,
-  planAfterRunWithPause,
-  planNewTask,
-  planPaused,
-  planRecovery,
-  planWithPause,
   windowInstanceAt,
   type PauseInterval,
   type WindowSpec,
 } from "./window";
+import {
+  buildSchedule,
+  describeSchedule,
+  isMissedNonDaily,
+  planScheduleAfter,
+  planScheduleNew,
+  planScheduleRecovery,
+  sameSchedule,
+  scheduleOf,
+  schedulePlanPaused,
+  type ScheduleSpec,
+} from "./schedule";
 import type { NewTaskInput, TaskRow } from "./types";
 import type { RunOutcome } from "./executor";
 
@@ -47,17 +57,18 @@ export interface PauseOptions {
 
 export interface SchedulerRuntime {
   generation: number;
-  cron: Bun.CronJob | null;
   timeout: ReturnType<typeof setTimeout> | null;
   timeoutTarget: number | null;
   abortController: AbortController | null;
   running: boolean;
+  /** When the in-flight run started (epoch ms); null while idle. */
+  runningSince: number | null;
   /** Resolves when an in-flight executeTaskRun finishes (including its log write). */
   activeRun: Promise<unknown> | null;
-  /** Window in force when the in-flight run started; changed mid-run by editTask. */
-  runWindowKey: string | null;
-  /** Set when editTask changes the window during that run. */
-  windowChangedInFlight: boolean;
+  /** Schedule in force when the in-flight run started; changed mid-run by editTask. */
+  runScheduleKey: string | null;
+  /** Set when editTask changes the schedule during that run. */
+  scheduleChangedInFlight: boolean;
 }
 
 export interface StartSummary {
@@ -72,26 +83,50 @@ const runtimes = new Map<string, SchedulerRuntime>();
 interface ManualRun {
   controller: AbortController;
   promise: Promise<RunOutcome>;
+  startedAt: number;
 }
 const manualRuns = new Map<string, ManualRun>();
+
+/** setTimeout overflows above ~24.8 days; re-arm in slices for long gaps. */
+const MAX_TIMER_DELAY_MS = 6 * 60 * 60 * 1000;
 
 function ensureRuntime(taskId: string): SchedulerRuntime {
   let runtime = runtimes.get(taskId);
   if (!runtime) {
     runtime = {
       generation: 0,
-      cron: null,
       timeout: null,
       timeoutTarget: null,
       abortController: null,
       running: false,
+      runningSince: null,
       activeRun: null,
-      runWindowKey: null,
-      windowChangedInFlight: false,
+      runScheduleKey: null,
+      scheduleChangedInFlight: false,
     };
     runtimes.set(taskId, runtime);
   }
   return runtime;
+}
+
+/**
+ * Tasks that are executing right now: task id → when the run started.
+ *
+ * The scheduler knows this, but the database does not: a request that hangs
+ * would keep the task "running" forever with no visible sign. The API merges
+ * this into the task list so the UI can show "执行中 · 已 x 分 y 秒".
+ */
+export function runningTasks(): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const [taskId, runtime] of runtimes) {
+    if (runtime.running && runtime.runningSince !== null) {
+      result[taskId] = runtime.runningSince;
+    }
+  }
+  for (const [taskId, manual] of manualRuns) {
+    if (!(taskId in result)) result[taskId] = manual.startedAt;
+  }
+  return result;
 }
 
 /**
@@ -124,19 +159,46 @@ function livePause(task: TaskRow, now: number): PauseInterval | null {
  * preventing a shorter pause from inheriting a far-future plan left over by a
  * previous longer pause (which would silently skip the resume day).
  */
+/**
+ * Is `timestamp` a tick of an anchored interval grid? Jitter is applied on top
+ * of the tick, so anything from the tick up to tick+jitter counts as on-grid.
+ */
+function isOnIntervalGrid(timestamp: number, spec: ScheduleSpec): boolean {
+  if (spec.startAt === null) return true;
+  if (timestamp < spec.startAt) return false;
+  const interval = (spec.intervalSeconds ?? 1) * 1000;
+  const jitter = spec.intervalJitterSeconds * 1000;
+  const remainder = (timestamp - spec.startAt) % interval;
+  return remainder === 0 || (jitter > 0 && remainder <= jitter);
+}
+
 function preferredPlan(
   task: TaskRow,
   now: number,
-  spec: WindowSpec,
+  spec: ScheduleSpec,
   pause: PauseInterval | null,
 ): number {
-  const candidate = planWithPause(now, spec, pause);
+  const candidate = planScheduleNew(now, spec, pause);
   const pending = task.next_run_at;
-  if (pending === null || pending <= now || planPaused(pending, spec, pause)) {
+  if (pending === null || pending <= now || schedulePlanPaused(pending, spec, pause)) {
     return candidate;
   }
-  const pendingWindow = windowInstanceAt(pending, spec);
-  const candidateWindow = windowInstanceAt(candidate, spec);
+  // Interval plans are absolute moments; keep a FUTURE, non-paused plan
+  // only when it is earlier than what a fresh plan would pick. Keeping an
+  // arbitrarily later plan is the non-daily version of the "shortened pause"
+  // bug: a 10-day pause leaves next_run_at 10 days out, and re-pausing for one
+  // day must pull it back instead of silently waiting 9 extra days.
+  if (spec.kind !== "daily" || !spec.window) {
+    // An anchored task owns a grid: a pending moment that is not on it (e.g.
+    // left over from before the anchor was set) must be replaced even when it
+    // is earlier than the next tick, otherwise "start at 09:00" would only
+    // take effect after the old plan fired once.
+    if (!isOnIntervalGrid(pending, spec)) return candidate;
+    return pending < candidate ? pending : candidate;
+  }
+
+  const pendingWindow = windowInstanceAt(pending, spec.window);
+  const candidateWindow = windowInstanceAt(candidate, spec.window);
   if (
     pendingWindow === null ||
     candidateWindow === null ||
@@ -145,11 +207,6 @@ function preferredPlan(
     return candidate;
   }
   return pending;
-}
-
-export function cronExpressionFor(spec: WindowSpec): string {
-  const [hour, minute] = spec.start.split(":").map(Number);
-  return `${minute} ${hour} * * *`;
 }
 
 function formatLocal(timestamp: number): string {
@@ -162,7 +219,18 @@ function formatLocal(timestamp: number): string {
 
 /** `executed_at` is the write time; the missed plan is kept in the message so
  * retention (which filters on executed_at) never deletes a fresh miss. */
-function recordMiss(task: TaskRow, plannedAt: number, now: number = Date.now()): void {
+function recordMiss(
+  task: TaskRow,
+  plannedAt: number,
+  spec?: ScheduleSpec,
+  now: number = Date.now(),
+): void {
+  // Daily keeps the original wording (users and older logs already know it);
+  // Interval schedules say WHICH schedule was missed instead of a window.
+  const detail =
+    !spec || spec.kind === "daily"
+      ? `错过执行窗口（计划 ${formatLocal(plannedAt)}，窗口 ${task.window_start}–${task.window_end}），未补跑`
+      : `错过计划执行（计划 ${formatLocal(plannedAt)}，调度 ${describeSchedule(spec)}），未补跑`;
   insertLog({
     task_id: task.id,
     executed_at: now,
@@ -174,31 +242,90 @@ function recordMiss(task: TaskRow, plannedAt: number, now: number = Date.now()):
     response_headers: null,
     response_body: null,
     duration_ms: null,
-    error: `错过执行窗口（计划 ${formatLocal(plannedAt)}，窗口 ${task.window_start}–${task.window_end}），未补跑`,
+    error: detail,
     aborted: 0,
     kind: "missed",
     parent_log_id: null,
     matched: null,
   });
   console.warn(
-    `[jitter] 任务「${task.name}」错过了 ${formatLocal(plannedAt)} 的执行窗口，已记录且不补跑`,
+    `[jitter] 任务「${task.name}」错过了 ${formatLocal(plannedAt)} 的计划执行，已记录且不补跑`,
   );
 }
 
-function registerCron(task: TaskRow, spec: WindowSpec): void {
-  const runtime = ensureRuntime(task.id);
-  runtime.cron?.stop();
-  try {
-    runtime.cron = Bun.cron(cronExpressionFor(spec), () => {
+/**
+ * Safety net: every task is driven by its own timer, and a timer can be lost
+ * if a replan throws (e.g. a hand-edited row) or a timer callback is dropped.
+ * A cheap sweep re-arms anything whose stored plan is not backed by a live
+ * timer. This replaces the old per-task daily trigger and works for both
+ * scheduling kinds.
+ */
+const SWEEP_INTERVAL_MS = 60_000;
+let sweepTimer: ReturnType<typeof setInterval> | null = null;
+
+function sweepSchedules(): void {
+  const now = Date.now();
+  for (const task of listTasks()) {
+    if (task.status !== "active") continue;
+    const runtime = runtimes.get(task.id);
+    if (!runtime || runtime.running) continue;
+    if (task.next_run_at === null) {
       try {
-        onCron(task.id);
+        replan(task.id, planScheduleNew(now, scheduleOf(task), livePause(task, now)));
       } catch (error) {
-        console.error(`[jitter] 任务 ${task.id} 的每日触发器失败`, error);
+        console.error(`[jitter] 任务 ${task.id} 缺少计划且无法重排`, error);
       }
-    });
+      continue;
+    }
+    if (runtime.timeout === null || runtime.timeoutTarget !== task.next_run_at) {
+      armTimer(task.id, task.next_run_at, runtime.generation);
+    }
+  }
+}
+
+function startSweep(): void {
+  if (sweepTimer !== null) return;
+  sweepTimer = setInterval(() => {
+    try {
+      sweepSchedules();
+      sweepRetention();
+    } catch (error) {
+      console.error("[jitter] 调度巡检失败", error);
+    }
+  }, SWEEP_INTERVAL_MS);
+}
+
+/**
+ * Automatic log retention. Runs with the sweep, but only every few minutes:
+ * deleting rows is cheap, reclaiming their space is not, so the space is given
+ * back in small chunks instead of one long VACUUM that would freeze the UI.
+ */
+let lastRetentionPass = 0;
+const RETENTION_INTERVAL_MS = 5 * 60 * 1000;
+
+function sweepRetention(now: number = Date.now()): void {
+  const retentionDays = getEffectiveRetentionDays();
+  const maxRows = getActiveConfig().logMaxRowsPerTask;
+  if (retentionDays <= 0 && maxRows <= 0) return;
+  if (now - lastRetentionPass < RETENTION_INTERVAL_MS) return;
+  lastRetentionPass = now;
+
+  try {
+    const outcome = pruneLogs(now, retentionDays, maxRows);
+    if (outcome.deleted > 0) {
+      console.log(`[jitter] 日志保留策略：清理了 ${outcome.deleted} 条旧日志`);
+    }
+    // Give the freed pages back in bounded chunks (4 KiB pages).
+    incrementalVacuum(64);
   } catch (error) {
-    runtime.cron = null;
-    throw error;
+    console.error("[jitter] 日志保留策略执行失败", error);
+  }
+}
+
+function stopSweep(): void {
+  if (sweepTimer !== null) {
+    clearInterval(sweepTimer);
+    sweepTimer = null;
   }
 }
 
@@ -209,6 +336,16 @@ function armTimer(taskId: string, target: number, generation: number): void {
   }
   runtime.timeoutTarget = target;
   const delay = Math.max(0, target - Date.now());
+  if (delay > MAX_TIMER_DELAY_MS) {
+    // Long gap (e.g. a daily window tomorrow): wake up later just to re-arm,
+    // keeping the same target and generation.
+    runtime.timeout = setTimeout(() => {
+      const current = runtimes.get(taskId);
+      if (!current || current.generation !== generation) return;
+      armTimer(taskId, target, generation);
+    }, MAX_TIMER_DELAY_MS);
+    return;
+  }
   runtime.timeout = setTimeout(() => {
     void onTimer(taskId, generation, target).catch((error) => {
       console.error(`[jitter] 任务 ${taskId} 的定时执行失败`, error);
@@ -222,38 +359,6 @@ function replan(taskId: string, target: number): void {
   runtime.generation += 1;
   updateTaskNextRun(taskId, target);
   armTimer(taskId, target, runtime.generation);
-}
-
-function onCron(taskId: string): void {
-  const runtime = runtimes.get(taskId);
-  if (!runtime || runtime.running) return;
-  const task = getTask(taskId);
-  if (!task || task.status !== "active") return;
-
-  const spec = parseWindow(task.window_start, task.window_end);
-  const now = Date.now();
-  const pause = livePause(task, now);
-  const current = windowInstanceAt(now, spec);
-  const pending = task.next_run_at;
-
-  // A restart may already have planned a moment inside the window that just
-  // opened. Keep it instead of re-randomizing, but only if that window's day
-  // is not paused.
-  if (
-    pending !== null &&
-    pending > now &&
-    current !== null &&
-    pending >= current.start &&
-    pending < current.end &&
-    !planPaused(pending, spec, pause)
-  ) {
-    if (runtime.timeout === null || runtime.timeoutTarget !== pending) {
-      armTimer(taskId, pending, runtime.generation);
-    }
-    return;
-  }
-
-  replan(taskId, planWithPause(now, spec, pause));
 }
 
 async function onTimer(taskId: string, generation: number, target: number): Promise<void> {
@@ -273,28 +378,33 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
     return;
   }
 
-  let spec: WindowSpec;
+  let spec: ScheduleSpec;
   try {
-    spec = parseWindow(task.window_start, task.window_end);
+    spec = scheduleOf(task);
   } catch (error) {
-    console.error(`[jitter] 任务 ${taskId} 的窗口配置无效，跳过本次执行`, error);
+    console.error(`[jitter] 任务 ${taskId} 的调度配置无效，跳过本次执行`, error);
     return;
   }
 
   const pause = livePause(task, now);
-  if (planPaused(target, spec, pause)) {
+  if (schedulePlanPaused(target, spec, pause)) {
     try {
-      replan(taskId, planWithPause(now, spec, pause));
+      replan(taskId, planScheduleNew(now, spec, pause));
     } catch (error) {
       console.error(`[jitter] 任务 ${taskId} 规划暂停后的执行失败`, error);
     }
     return;
   }
 
-  if (classifyTimerFire(now, target, spec) === "miss") {
-    recordMiss(task, target);
+  const missed =
+    spec.kind === "daily"
+      ? spec.window !== null && classifyTimerFire(now, target, spec.window) === "miss"
+      : isMissedNonDaily(now, target, spec);
+
+  if (missed) {
+    recordMiss(task, target, spec);
     try {
-      replan(taskId, planWithPause(now, spec, pause));
+      replan(taskId, planScheduleNew(now, spec, pause));
     } catch (error) {
       console.error(`[jitter] 任务 ${taskId} 规划下一次执行失败`, error);
     }
@@ -302,8 +412,9 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
   }
 
   runtime.running = true;
-  runtime.runWindowKey = `${task.window_start}\u0000${task.window_end}`;
-  runtime.windowChangedInFlight = false;
+  runtime.runningSince = Date.now();
+  runtime.runScheduleKey = describeSchedule(spec);
+  runtime.scheduleChangedInFlight = false;
   const controller = new AbortController();
   runtime.abortController = controller;
   const activeRun = executeTaskRun(task, controller.signal);
@@ -317,6 +428,7 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
     const current = runtimes.get(taskId);
     if (current !== runtime) return;
     runtime.running = false;
+    runtime.runningSince = null;
     runtime.abortController = null;
     runtime.activeRun = null;
     if (runtime.generation !== generation) return;
@@ -324,18 +436,18 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
     const latest = getTask(taskId);
     if (latest && latest.status === "active") {
       try {
-        const latestSpec = parseWindow(latest.window_start, latest.window_end);
+        const latestSpec = scheduleOf(latest);
         const now = Date.now();
         const pause = livePause(latest, now);
-        // The run consumed the OLD window. If editTask changed the window while
-        // it was in flight, the new window has not run yet today: plan inside
-        // it rather than jumping to tomorrow's instance.
-        const target = runtime.windowChangedInFlight
-          ? planWithPause(now, latestSpec, pause)
-          : planAfterRunWithPause(now, latestSpec, pause);
-        runtime.windowChangedInFlight = false;
-        runtime.runWindowKey = null;
-        replan(taskId, target);
+        // The run consumed the OLD plan. If editTask changed the schedule while
+        // it was in flight, the new one has not run yet: plan freshly inside it
+        // instead of treating the new schedule as already consumed.
+        const nextTarget = runtime.scheduleChangedInFlight
+          ? planScheduleNew(now, latestSpec, pause)
+          : planScheduleAfter(now, latestSpec, target, pause);
+        runtime.scheduleChangedInFlight = false;
+        runtime.runScheduleKey = null;
+        replan(taskId, nextTarget);
       } catch (error) {
         console.error(`[jitter] 任务 ${taskId} 规划下一次执行失败`, error);
       }
@@ -345,12 +457,12 @@ async function onTimer(taskId: string, generation: number, target: number): Prom
 
 export function scheduleNewTask(task: TaskRow): TaskRow {
   if (task.status !== "active") return task;
-  const spec = parseWindow(task.window_start, task.window_end);
+  const spec = scheduleOf(task);
   const runtime = ensureRuntime(task.id);
   runtime.generation += 1;
   const now = Date.now();
   const pause = livePause(task, now);
-  const target = planWithPause(now, spec, pause);
+  const target = planScheduleNew(now, spec, pause);
   if (pause !== null) {
     setTaskPause(task.id, pause, target, now);
   } else if (task.paused_until !== null) {
@@ -358,56 +470,71 @@ export function scheduleNewTask(task: TaskRow): TaskRow {
   } else {
     updateTaskNextRun(task.id, target);
   }
-  registerCron(task, spec);
   armTimer(task.id, target, runtime.generation);
   return getTask(task.id) ?? task;
+}
+
+/** Build the spec a payload describes, using the same rules the API enforces. */
+function specFromInput(input: NewTaskInput): ScheduleSpec {
+  return buildSchedule({
+    schedule_kind: input.schedule_kind ?? "daily",
+    window_start: input.window_start,
+    window_end: input.window_end,
+    daily_jitter_minutes: input.daily_jitter_minutes ?? 0,
+    interval_seconds: input.interval_seconds ?? null,
+    interval_jitter_seconds: input.interval_jitter_seconds ?? 0,
+    interval_start_at: input.interval_start_at ?? null,
+  });
 }
 
 /**
  * Replace an existing task's configuration and keep it scheduled.
  *
- * The new window is validated before anything is written. An existing future
- * plan is kept ONLY when the window did not change: it is a concrete moment
+ * The new schedule is validated before anything is written. An existing future
+ * plan is kept ONLY when the schedule did not change: it is a concrete moment
  * owned by an armed timer, and re-planning could schedule a SECOND run in the
- * already-consumed window. When the window DID change, that plan belongs to the
- * old spec: keeping it would make onTimer judge it "missed" against the new
- * window (no request, spurious missed log), so we replan into the new window.
+ * already-consumed window. When the schedule DID change, that plan belongs to
+ * the old spec: keeping it would make onTimer judge it "missed" against the new
+ * one (no request, spurious missed log), so we replan.
  * A stopped task is only updated — resuming later schedules from the new config.
  *
  * While a request is in flight we deliberately do NOT bump the generation or
  * touch the timer (same rule as pause/resume): that request's `finally` owns
- * the next plan and reads the just-written config. A window change is recorded
- * on the runtime so that `finally` plans a fresh point in the new window
- * instead of treating it as already consumed.
+ * the next plan and reads the just-written config. A schedule change is
+ * recorded on the runtime so that `finally` plans freshly instead of treating
+ * the new schedule as already consumed.
  */
 export function editTask(taskId: string, input: NewTaskInput): TaskRow | null {
   const task = getTask(taskId);
   if (!task) return null;
 
-  const spec = parseWindow(input.window_start, input.window_end);
-  const windowChanged =
-    task.window_start !== input.window_start || task.window_end !== input.window_end;
+  const spec = specFromInput(input);
+  let changed = true;
+  try {
+    changed = !sameSchedule(scheduleOf(task), spec);
+  } catch {
+    // An unreadable old schedule is replaced wholesale.
+    changed = true;
+  }
+
   const updated = updateTaskConfig(taskId, input);
   if (!updated) return null;
   if (updated.status !== "active") return updated;
 
-  registerCron(updated, spec);
-
   const runtime = ensureRuntime(taskId);
   if (runtime.running) {
-    if (windowChanged) runtime.windowChangedInFlight = true;
+    if (changed) runtime.scheduleChangedInFlight = true;
     return updated;
   }
 
   const now = Date.now();
-  // Keep a live plan only when the window is unchanged: its armed timer still
-  // matches the spec. A changed window makes the old plan meaningless (onTimer
-  // would judge it "missed"), so fall through to a fresh plan in the new window.
-  if (!windowChanged && updated.next_run_at !== null && updated.next_run_at > now) {
+  // Keep a live plan only when the schedule is unchanged: its armed timer still
+  // matches the spec. A changed schedule makes the old plan meaningless.
+  if (!changed && updated.next_run_at !== null && updated.next_run_at > now) {
     return updated;
   }
   const pause = livePause(updated, now);
-  const target = planWithPause(now, spec, pause);
+  const target = planScheduleNew(now, spec, pause);
 
   runtime.generation += 1;
   if (runtime.timeout !== null) {
@@ -429,9 +556,8 @@ export function editTask(taskId: string, input: NewTaskInput): TaskRow | null {
 
 /**
  * Pause an active task for 1–15 WHOLE CALENDAR DAYS starting today or tomorrow
- * (tomorrow by default). A plan whose window day is outside the interval is
- * kept, so "start tomorrow" configured at noon still runs this afternoon.
- * The first run after the pause lands in the resume day's own window.
+ * (tomorrow by default). A plan outside the interval is kept, so "start
+ * tomorrow" configured at noon still runs this afternoon.
  * A request already in flight is allowed to finish.
  */
 export function pauseTask(
@@ -448,15 +574,14 @@ export function pauseTask(
     throw new PauseError(`暂停天数必须是 1–${MAX_PAUSE_DAYS} 的整数`);
   }
 
-  const spec = parseWindow(task.window_start, task.window_end);
+  const spec = scheduleOf(task);
   const pause = pauseInterval(now, options.days, options.startsToday === true);
   const runtime = ensureRuntime(taskId);
 
   // A request is in flight: its own onTimer finally owns the next plan and
   // reads the latest pause state from the DB. Bumping the generation here
   // would suppress that finally, and arming a timer in the ALREADY CONSUMED
-  // window would either run the window twice or strand the task with no timer
-  // (if the request outlives the new timer). Persist the interval only.
+  // schedule would either run it twice or strand the task with no timer.
   if (runtime.running) {
     setTaskPause(taskId, pause, task.next_run_at, now);
     return getTask(taskId);
@@ -474,7 +599,6 @@ export function pauseTask(
   runtime.timeoutTarget = null;
 
   setTaskPause(taskId, pause, target, now);
-  registerCron(task, spec);
   armTimer(taskId, target, runtime.generation);
   return getTask(taskId);
 }
@@ -483,10 +607,14 @@ export function startScheduler(): StartSummary {
   const active = listTasks().filter((task) => task.status === "active");
   let recovered = 0;
   let missed = 0;
+  startSweep();
+  // Apply the retention policy once at startup so a restart also reclaims
+  // space from logs that aged out while the service was down.
+  sweepRetention();
 
   for (const task of active) {
     try {
-      const spec = parseWindow(task.window_start, task.window_end);
+      const spec = scheduleOf(task);
       const now = Date.now();
       const runtime = ensureRuntime(task.id);
       runtime.generation += 1;
@@ -498,15 +626,14 @@ export function startScheduler(): StartSummary {
         // shortened pause.
         const target = preferredPlan(task, now, spec, pause);
         updateTaskNextRun(task.id, target);
-        registerCron(task, spec);
         armTimer(task.id, target, runtime.generation);
         recovered += 1;
         continue;
       }
 
-      const plan = planRecovery(now, task.next_run_at, spec);
-      if (plan.missed) {
-        recordMiss(task, plan.missed.plannedAt);
+      const plan = planScheduleRecovery(now, spec, task.next_run_at, pause);
+      if (plan.missedPlannedAt !== null) {
+        recordMiss(task, plan.missedPlannedAt, spec);
         missed += 1;
       }
       if (task.paused_until !== null) {
@@ -515,7 +642,6 @@ export function startScheduler(): StartSummary {
       } else {
         updateTaskNextRun(task.id, plan.target);
       }
-      registerCron(task, spec);
       armTimer(task.id, plan.target, runtime.generation);
       recovered += 1;
     } catch (error) {
@@ -533,8 +659,6 @@ export function stopTask(taskId: string): TaskRow | null {
   const runtime = runtimes.get(taskId);
   if (runtime) {
     runtime.generation += 1;
-    runtime.cron?.stop();
-    runtime.cron = null;
     if (runtime.timeout !== null) {
       clearTimeout(runtime.timeout);
     }
@@ -542,8 +666,8 @@ export function stopTask(taskId: string): TaskRow | null {
     runtime.timeoutTarget = null;
     runtime.abortController?.abort();
     runtime.abortController = null;
-    runtime.runWindowKey = null;
-    runtime.windowChangedInFlight = false;
+    runtime.runScheduleKey = null;
+    runtime.scheduleChangedInFlight = false;
     runtimes.delete(taskId);
   }
 
@@ -560,10 +684,10 @@ export interface RunNowOutcome {
 }
 
 /**
- * Run a task once, immediately, without touching its schedule: next_run_at,
- * cron and timer are left exactly as they are, so the next planned window is
- * unaffected. The full executeTaskRun path is reused, so the run is logged and
- * can fire notifications just like a scheduled run.
+ * Run a task once, immediately, without touching its schedule: next_run_at
+ * and the pending timer are left exactly as they are, so the next planned run
+ * is unaffected. The full executeTaskRun path is reused, so the run is logged,
+ * goes through the pre-run guard and can fire notifications.
  *
  * Concurrency: a task already executing (scheduled or manual) cannot be run
  * again — that would duplicate side effects such as a check-in POST.
@@ -578,8 +702,9 @@ export async function runTaskNow(taskId: string): Promise<RunNowOutcome | null> 
   }
 
   const controller = new AbortController();
+  const startedAt = Date.now();
   const promise = executeTaskRun(task, controller.signal);
-  manualRuns.set(taskId, { controller, promise });
+  manualRuns.set(taskId, { controller, promise, startedAt });
   try {
     const outcome = await promise;
     return { task, outcome };
@@ -591,6 +716,7 @@ export async function runTaskNow(taskId: string): Promise<RunNowOutcome | null> 
 export interface DeleteTaskOutcome {
   task: TaskRow;
   deleted_logs: number;
+  deleted_test_runs: number;
 }
 
 /**
@@ -598,7 +724,7 @@ export interface DeleteTaskOutcome {
  *
  * The runtime is torn down and removed from the map FIRST: an in-flight
  * onTimer finally then sees `current !== runtime` and skips replanning, and a
- * late cron tick finds no runtime and returns. The abort signal is raised so
+ * late sweep tick finds no runtime and returns. The abort signal is raised so
  * executeTaskRun settles quickly, and we await it before touching the DB —
  * its aborted-request log must be written while the task row still exists,
  * otherwise `logs.task_id -> tasks.id` would reject the insert (or leave an
@@ -612,18 +738,16 @@ export async function deleteTask(taskId: string): Promise<DeleteTaskOutcome | nu
   const pending: Promise<unknown>[] = [];
   if (runtime) {
     runtime.generation += 1;
-    runtime.cron?.stop();
-    runtime.cron = null;
     if (runtime.timeout !== null) clearTimeout(runtime.timeout);
     runtime.timeout = null;
     runtime.timeoutTarget = null;
     runtime.abortController?.abort();
     runtime.abortController = null;
-    runtime.runWindowKey = null;
-    runtime.windowChangedInFlight = false;
+    runtime.runScheduleKey = null;
+    runtime.scheduleChangedInFlight = false;
     if (runtime.activeRun) pending.push(runtime.activeRun);
     // Remove before awaiting so onTimer's finally skips replanning and any
-    // cron/timer callback that slips in finds no runtime.
+    // sweep/timer callback that slips in finds no runtime.
     runtimes.delete(taskId);
   }
 
@@ -644,7 +768,11 @@ export async function deleteTask(taskId: string): Promise<DeleteTaskOutcome | nu
   }
 
   const outcome = deleteTaskRecord(taskId);
-  return { task, deleted_logs: outcome.deleted_logs };
+  return {
+    task,
+    deleted_logs: outcome.deleted_logs,
+    deleted_test_runs: outcome.deleted_test_runs,
+  };
 }
 
 export function resumeTask(taskId: string): TaskRow | null {
@@ -657,23 +785,22 @@ export function resumeTask(taskId: string): TaskRow | null {
     if (pause !== null || task.paused_until !== null) {
       const runtime = ensureRuntime(taskId);
       // Same in-flight rule as pauseTask: only clear the pause, let the
-      // running request's finally plan the next window. Planning here would
-      // target the already-consumed window and cause a double run / stall.
+      // running request's finally plan the next run. Planning here would
+      // target the already-consumed schedule and cause a double run / stall.
       if (runtime.running) {
         setTaskPause(taskId, null, task.next_run_at, now);
         return getTask(taskId);
       }
       // Cancelling a pause resumes scheduling immediately, even mid-window.
-      const spec = parseWindow(task.window_start, task.window_end);
+      const spec = scheduleOf(task);
       runtime.generation += 1;
       if (runtime.timeout !== null) {
         clearTimeout(runtime.timeout);
       }
       runtime.timeout = null;
       runtime.timeoutTarget = null;
-      const target = planNewTask(now, spec);
+      const target = planScheduleNew(now, spec, null);
       setTaskPause(taskId, null, target, now);
-      registerCron(task, spec);
       armTimer(taskId, target, runtime.generation);
       return getTask(taskId);
     }
@@ -684,7 +811,6 @@ export function resumeTask(taskId: string): TaskRow | null {
   const runtime = runtimes.get(taskId);
   if (runtime) {
     runtime.generation += 1;
-    runtime.cron?.stop();
     if (runtime.timeout !== null) {
       clearTimeout(runtime.timeout);
     }
@@ -701,9 +827,9 @@ export function resumeTask(taskId: string): TaskRow | null {
 }
 
 export function stopAll(): void {
+  stopSweep();
   for (const runtime of runtimes.values()) {
     runtime.generation += 1;
-    runtime.cron?.stop();
     if (runtime.timeout !== null) {
       clearTimeout(runtime.timeout);
     }
