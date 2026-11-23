@@ -32,32 +32,40 @@ jobs:
             platform: windows
             arch: x64
             bin: jitter.exe
+            target: x86_64-pc-windows-msvc
           - os: macos-latest
             platform: macos
             arch: arm64
             bin: jitter
-          - os: macos-13
+            target: aarch64-apple-darwin
+          # macos-13（Intel）运行器已退役：x64 由 arm64 机器交叉编译。
+          - os: macos-latest
             platform: macos
             arch: x64
             bin: jitter
+            target: x86_64-apple-darwin
           - os: ubuntu-latest
             platform: linux
             arch: x64
             bin: jitter
+            target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
             bin: jitter
+            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
       - name: Build release binary
         working-directory: rust
-        run: cargo build --release -p jitter-app
+        run: cargo build --release -p jitter-app --target ${{ matrix.target }}
 
       # 资产名必须保持 jitter-<platform>-<arch>.zip：
       # 内置升级逻辑按这个名字找当前平台的安装包。
@@ -66,7 +74,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p staging
-          cp "rust/target/release/${{ matrix.bin }}" "staging/${{ matrix.bin }}"
+          cp "rust/target/${{ matrix.target }}/release/${{ matrix.bin }}" "staging/${{ matrix.bin }}"
           chmod +x "staging/${{ matrix.bin }}"
           asset="jitter-${{ matrix.platform }}-${{ matrix.arch }}.zip"
           (cd staging && zip -r "../$asset" .)
@@ -83,7 +91,7 @@ jobs:
         run: |
           $asset = "jitter-${{ matrix.platform }}-${{ matrix.arch }}.zip"
           New-Item -ItemType Directory -Force staging, dist | Out-Null
-          Copy-Item "rust/target/release/${{ matrix.bin }}" "staging/${{ matrix.bin }}"
+          Copy-Item "rust/target/${{ matrix.target }}/release/${{ matrix.bin }}" "staging/${{ matrix.bin }}"
           Compress-Archive -Path "staging/*" -DestinationPath $asset -Force
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset" | Out-File "$asset.sha256" -Encoding ascii
