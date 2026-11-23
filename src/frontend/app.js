@@ -1455,8 +1455,6 @@ function renderTaskCard(task) {
       h(
         "div",
         { class: "task-actions" },
-        h("button", { class: "btn", type: "button", dataset: { action: "test" } }, "测试"),
-        h("button", { class: "btn", type: "button", dataset: { action: "edit" } }, "编辑"),
         task.running
           ? h(
               "button",
@@ -1469,18 +1467,47 @@ function renderTaskCard(task) {
               },
               "执行中…",
             )
-          : h("button", { class: "btn", type: "button", dataset: { action: "run" } }, "立即执行"),
-        active
-          ? pause
-            ? [
-                h("button", { class: "btn", type: "button", dataset: { action: "pause" } }, "调整暂停"),
-                h("button", { class: "btn", type: "button", dataset: { action: "resume" } }, "取消暂停"),
-              ]
-            : h("button", { class: "btn", type: "button", dataset: { action: "pause" } }, "暂停")
-          : null,
-        active
-          ? h("button", { class: "btn btn-danger", type: "button", dataset: { action: "stop" } }, "停止")
-          : h("button", { class: "btn", type: "button", dataset: { action: "resume" } }, "恢复"),
+          : h(
+              "button",
+              {
+                class: "btn btn-primary",
+                type: "button",
+                dataset: { action: "run" },
+                title: "真实执行一次：会发请求，命中条件会发通知，并写入执行记录",
+              },
+              "立即执行",
+            ),
+        h("button", { class: "btn", type: "button", dataset: { action: "edit" } }, "编辑"),
+        h(
+          "details",
+          { class: "task-more" },
+          h("summary", { class: "btn", title: "更多操作" }, "更多"),
+          h(
+            "div",
+            { class: "task-menu" },
+            h(
+              "button",
+              {
+                class: "btn btn-quiet",
+                type: "button",
+                dataset: { action: "test" },
+                title: "只演练一遍完整链路（解析→判断→请求→判定→通知预览），不写执行记录、不真正发通知",
+              },
+              "试跑（不记录）",
+            ),
+            active
+              ? pause
+                ? [
+                    h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "pause" } }, "调整暂停"),
+                    h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "resume" } }, "取消暂停"),
+                  ]
+                : h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "pause" } }, "暂停")
+              : null,
+            active
+              ? h("button", { class: "btn btn-quiet btn-danger-text", type: "button", dataset: { action: "stop" } }, "停止")
+              : h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "resume" } }, "恢复调度"),
+          ),
+        ),
         h("button", { class: "btn btn-danger", type: "button", dataset: { action: "delete" } }, "删除"),
       ),
     ),
@@ -2311,6 +2338,15 @@ async function onRunNow(button) {
   const taskId = card.dataset.id;
   const task = state.tasks.find((entry) => entry.id === taskId);
   const name = task?.name ?? "任务";
+  if (
+    !window.confirm(
+      `立即执行任务「${name}」？
+
+会真实发送请求；命中成功条件时还会发送通知 curl，并写入执行记录。`,
+    )
+  ) {
+    return;
+  }
   const originalLabel = button.textContent;
   button.disabled = true;
   button.textContent = "执行中…";
@@ -3314,6 +3350,12 @@ function bindEvents() {
   els.settingsClose.addEventListener("click", () => els.settingsDialog.close());
   els.swAutostart.addEventListener("change", () => void toggleAutostart(els.swAutostart.checked));
   els.swCheckUpdate.addEventListener("click", () => void checkUpdate());
+  document.addEventListener("click", (event) => {
+    if (event.target.closest(".task-more")) return;
+    document.querySelectorAll("details.task-more[open]").forEach((node) => {
+      node.open = false;
+    });
+  });
   els.swApplyUpdate.addEventListener("click", () => void applyUpdate());
   els.swUpdateRetry.addEventListener("click", () => void applyUpdate());
   els.swQuit.addEventListener("click", () => void quitApp());

@@ -489,7 +489,8 @@ pub fn resolve_db_path(path: Option<&str>, env: Option<&str>) -> PathBuf {
     }
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<(), DbError> {
+/// 追加列；返回 true 表示该列是本次新增的（需要回填的列据此只回填一次）。
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<bool, DbError> {
     let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns: Vec<String> = statement
         .query_map([], |row| row.get::<_, String>(1))?
@@ -497,8 +498,9 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str)
         .collect();
     if !columns.iter().any(|name| name == column) {
         conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// 本地零点，可按整自然日偏移（DST 安全）。
@@ -668,8 +670,11 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     ensure_column(conn, "tasks", "precheck_time_start", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_time_end", "TEXT")?;
     ensure_column(conn, "logs", "run_source", "TEXT")?;
-    ensure_column(conn, "tasks", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
-    backfill_sort_order(conn)?;
+    let sort_order_added = ensure_column(conn, "tasks", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+    // 只在列刚加时按创建时间回填一次；之后必须尊重用户拖动后的顺序。
+    if sort_order_added {
+        backfill_sort_order(conn)?;
+    }
     backfill_schedule_kind(conn)?;
     backfill_pause_from(conn)?;
     Ok(())

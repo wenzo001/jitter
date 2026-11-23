@@ -168,8 +168,38 @@
       .task-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
       .task-title { display: flex; align-items: center; gap: 4px; min-width: 0; }
       .task-name { margin: 0; font-size: 14px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
-      .task-actions { display: flex; gap: 4px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+      .task-actions { display: flex; gap: 4px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; align-items: flex-start; }
       .task-actions .btn { padding: 3px 8px; font-size: 12px; border-radius: 6px; }
+      .task-more { position: relative; }
+      .task-more > summary { list-style: none; user-select: none; cursor: pointer; }
+      .task-more > summary::-webkit-details-marker { display: none; }
+      .task-menu {
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 150px;
+        padding: 4px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(16, 24, 40, 0.14);
+        z-index: 40;
+      }
+      .task-menu .btn { width: 100%; justify-content: flex-start; text-align: left; }
+      .btn-danger-text { color: var(--err); }
+      /* 长标题：单行省略，不挤压按钮；整套操作区在窄屏自动换行 */
+      .task-name {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: min(52ch, 46vw);
+      }
+      @media (max-width: 720px) {
+        .task-name { max-width: 38vw; }
+      }
       .task-meta { margin-top: 6px; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
       .task-window { white-space: nowrap; font-variant-numeric: tabular-nums; }
       .meta-key { color: var(--muted); }
