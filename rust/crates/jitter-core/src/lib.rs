@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod executor;
 pub mod guard;
+pub mod metrics;
 pub mod curl_parser;
 pub mod schedule;
 pub mod types;
