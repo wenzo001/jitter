@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   test:
-    name: Gate: both sides green
+    name: "Gate: both sides green"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

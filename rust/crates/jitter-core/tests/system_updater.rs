@@ -15,10 +15,8 @@ fn windows_autostart_entry_writes_startup_cmd() {
         Some(r"C:\Users\tester\AppData\Roaming"),
         None,
     );
-    assert!(entry
-        .path
-        .to_string_lossy()
-        .contains(r"Microsoft\Windows\Start Menu\Programs\Startup\Jitter.cmd"));
+    assert!(posix(&entry.path)
+        .contains("Microsoft/Windows/Start Menu/Programs/Startup/Jitter.cmd"));
     assert!(entry.content.contains("@echo off"));
     assert!(entry
         .content
@@ -28,10 +26,8 @@ fn windows_autostart_entry_writes_startup_cmd() {
 #[test]
 fn windows_autostart_entry_falls_back_to_home() {
     let entry = system::build_autostart_entry("win32", "/usr/bin/jitter", r"C:\Users\tester", None, None);
-    assert!(entry
-        .path
-        .to_string_lossy()
-        .contains(r"C:\Users\tester\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Jitter.cmd"));
+    assert!(posix(&entry.path)
+        .contains("C:/Users/tester/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/Jitter.cmd"));
 }
 
 #[test]
