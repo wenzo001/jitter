@@ -166,6 +166,8 @@ const state = {
   statusTimer: null,
   clientConfig: { ...CLIENT_CONFIG_DEFAULTS },
   metrics: null,
+  /** True while a task card is being dragged (the list must not repaint). */
+  dragging: false,
   cleanup: { preview: null, selected: null, busy: false, view: "loading" },
   pause: { taskId: null, busy: false, label: "暂停任务" },
   deleting: { taskId: null, busy: false, name: "" },
@@ -670,6 +672,249 @@ function tickRunningBadges() {
   }
 }
 
+/**
+ * Drag & drop reordering of the task list.
+ *
+ * Pointer based (not HTML5 drag & drop) so it also works with a finger, and
+ * so the dragged card can follow the pointer exactly. The list keeps its
+ * place during the drag: the dragged card is taken out of the flow and a
+ * placeholder of the same height takes its place.
+ */
+const DRAG_THRESHOLD = 5;
+
+/** Set after a real drag so the trailing click event is ignored. */
+let suppressClick = false;
+
+const drag = {
+  started: false,
+  card: null,
+  placeholder: null,
+  indicator: null,
+  pointerId: null,
+  startY: 0,
+  offsetY: 0,
+  targetId: null,
+  position: null,
+};
+
+/** The ids of the tasks in their current visual order. */
+function currentOrderIds() {
+  return state.tasks.map((task) => task.id);
+}
+
+/** Put `movedId` before or after `targetId` in `ids`. */
+function insertInto(ids, movedId, targetId, position) {
+  const next = ids.filter((id) => id !== movedId);
+  if (targetId === null) {
+    next.push(movedId);
+    return next;
+  }
+  const index = next.indexOf(targetId);
+  if (index < 0) {
+    next.push(movedId);
+    return next;
+  }
+  next.splice(position === "after" ? index + 1 : index, 0, movedId);
+  return next;
+}
+
+function markDropTarget(targetId, position) {
+  for (const node of els.taskList.querySelectorAll(".drop-before, .drop-after")) {
+    node.classList.remove("drop-before", "drop-after");
+  }
+  if (targetId === null) {
+    if (drag.indicator) drag.indicator.remove();
+    return;
+  }
+  const node = els.taskList.querySelector(`.task-card[data-id="${CSS.escape(targetId)}"]`);
+  if (node) node.classList.add(position === "after" ? "drop-after" : "drop-before");
+}
+
+/**
+ * The insertion line. It lives above the dragged card (higher z-index) so
+ * the landing spot stays visible even when the card hovers over it.
+ */
+function showDropIndicator(targetId, position) {
+  if (!drag.indicator) {
+    drag.indicator = h("div", { class: "drop-indicator" });
+  }
+  if (!drag.indicator.isConnected) els.taskList.append(drag.indicator);
+  if (targetId === null) {
+    drag.indicator.remove();
+    return;
+  }
+  const node = els.taskList.querySelector(`.task-card[data-id="${CSS.escape(targetId)}"]`);
+  if (!node) return;
+  const listRect = els.taskList.getBoundingClientRect();
+  const rect = node.getBoundingClientRect();
+  const y = position === "after" ? rect.bottom : rect.top;
+  drag.indicator.style.top = `${Math.round(y - listRect.top)}px`;
+}
+
+function startDrag(event) {
+  const card = drag.card;
+  if (!card) return;
+  drag.started = true;
+  state.dragging = true;
+  const rect = card.getBoundingClientRect();
+  drag.offsetY = drag.startY - rect.top;
+  drag.width = rect.width;
+
+  // A placeholder keeps the list from jumping when the card leaves the flow.
+  drag.placeholder = h("div", {
+    class: "task-placeholder",
+    style: `height:${Math.round(rect.height)}px`,
+  });
+  card.after(drag.placeholder);
+
+  card.classList.add("dragging");
+  card.style.width = `${rect.width}px`;
+  card.style.position = "fixed";
+  card.style.left = `${rect.left}px`;
+  card.style.top = `${rect.top}px`;
+  card.style.zIndex = "30";
+  card.style.pointerEvents = "none";
+  document.body.classList.add("dragging-task");
+}
+
+function moveDrag(event) {
+  const card = drag.card;
+  if (!card) return;
+  card.style.top = `${event.clientY - drag.offsetY}px`;
+
+  // The drop position: the first card whose middle the pointer passed.
+  const others = [...els.taskList.querySelectorAll(".task-card:not(.dragging)")];
+  let target = null;
+  let position = null;
+  for (const other of others) {
+    const rect = other.getBoundingClientRect();
+    if (event.clientY < rect.top + rect.height / 2) {
+      target = other;
+      position = "before";
+      break;
+    }
+    target = other;
+    position = "after";
+  }
+  drag.targetId = target ? target.dataset.id : null;
+  drag.position = position;
+  markDropTarget(drag.targetId, position);
+  showDropIndicator(drag.targetId, position);
+}
+
+function endDrag() {
+  window.removeEventListener("pointermove", onPointerMove);
+  window.removeEventListener("pointerup", onPointerUp);
+  window.removeEventListener("pointercancel", onPointerUp);
+  window.removeEventListener("keydown", onDragKeyDown, true);
+
+  const card = drag.card;
+  if (card) {
+    card.classList.remove("dragging");
+    card.style.width = "";
+    card.style.position = "";
+    card.style.left = "";
+    card.style.top = "";
+    card.style.zIndex = "";
+    card.style.pointerEvents = "";
+  }
+  if (drag.placeholder) drag.placeholder.remove();
+  if (drag.indicator) {
+    drag.indicator.remove();
+    drag.indicator = null;
+  }
+  markDropTarget(null, null);
+  document.body.classList.remove("dragging-task");
+  state.dragging = false;
+
+  const started = drag.started;
+  const movedId = card ? card.dataset.id : null;
+  const targetId = drag.targetId;
+  const position = drag.position;
+  drag.card = null;
+  drag.placeholder = null;
+  drag.started = false;
+  drag.targetId = null;
+  drag.position = null;
+
+  if (!started || !movedId) return;
+  suppressClick = true;
+  const ids = insertInto(currentOrderIds(), movedId, targetId, position);
+  if (ids.join(",") === currentOrderIds().join(",")) return;
+  void applyOrder(ids);
+}
+
+function onPointerDown(event) {
+  const handle = event.target.closest("[data-drag-handle]");
+  if (!handle) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  const card = handle.closest(".task-card");
+  if (!card) return;
+  event.preventDefault();
+  drag.card = card;
+  drag.startY = event.clientY;
+  drag.pointerId = event.pointerId ?? null;
+  drag.started = false;
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerUp);
+  window.addEventListener("keydown", onDragKeyDown, true);
+}
+
+function onPointerMove(event) {
+  if (drag.pointerId !== null && event.pointerId !== undefined && event.pointerId !== drag.pointerId) {
+    return;
+  }
+  if (!drag.started) {
+    if (Math.abs(event.clientY - drag.startY) < DRAG_THRESHOLD) return;
+    startDrag(event);
+  }
+  moveDrag(event);
+}
+
+function onPointerUp() {
+  endDrag();
+}
+
+/** Escape cancels the drag, the card goes back to where it was. */
+function onDragKeyDown(event) {
+  if (event.key === "Escape" && drag.started) {
+    event.preventDefault();
+    drag.targetId = null;
+    endDrag();
+  }
+}
+
+/** Send a new order to the server and repaint with what it returns. */
+async function applyOrder(ids) {
+  try {
+    const data = await api("/api/tasks/reorder", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+    if (Array.isArray(data?.tasks)) state.tasks = data.tasks;
+    state.tasksSignature = "";
+    renderTasks();
+    setStatus("任务顺序已保存");
+  } catch (error) {
+    setStatus(error.message, true);
+    await loadTasks({ silent: true });
+  }
+}
+
+/** Move a task one place up or down (keyboard alternative to dragging). */
+async function moveTaskByKeyboard(taskId, delta) {
+  const ids = currentOrderIds();
+  const index = ids.indexOf(taskId);
+  if (index < 0) return;
+  const target = index + delta;
+  if (target < 0 || target >= ids.length) return;
+  const next = [...ids];
+  next.splice(index, 1);
+  next.splice(target, 0, taskId);
+  await applyOrder(next);
+}
+
 function renderTaskCard(task) {
   const kind = scheduleKindOf(task);
   const cross = kind === "daily" && task.window_end < task.window_start;
@@ -745,7 +990,22 @@ function renderTaskCard(task) {
     h(
       "div",
       { class: "task-head" },
-      h("h3", { class: "task-name" }, task.name),
+      h(
+        "div",
+        { class: "task-title" },
+        h(
+          "button",
+          {
+            class: "drag-handle",
+            type: "button",
+            dataset: { dragHandle: "1" },
+            title: "拖动排序；也可以聚焦后按 ↑ / ↓",
+            "aria-label": `拖动调整任务「${task.name}」的位置`,
+          },
+          "⠿",
+        ),
+        h("h3", { class: "task-name" }, task.name),
+      ),
       h(
         "div",
         { class: "task-actions" },
@@ -1022,6 +1282,9 @@ function renderLogs() {
 }
 
 async function loadTasks({ silent = false } = {}) {
+  // A drag owns the DOM: repainting the list mid-drag would throw the
+  // dragged card away.
+  if (state.dragging) return;
   try {
     const data = await api("/api/tasks");
     const tasks = data?.tasks ?? [];
@@ -2651,6 +2914,12 @@ function bindEvents() {
   els.taskList.addEventListener("click", async (event) => {
     const card = event.target.closest(".task-card");
     if (!card) return;
+    // A drag ends with a click event on the handle: it must not select the
+    // task or open anything.
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
     const button = event.target.closest("button[data-action]");
     if (button) {
       event.stopPropagation();
@@ -2704,6 +2973,16 @@ function bindEvents() {
   });
 
   els.taskList.addEventListener("keydown", (event) => {
+    // The drag handle also moves a task with the arrow keys, so the list can
+    // be reordered without a pointer.
+    const handle = event.target.closest("[data-drag-handle]");
+    if (handle && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+      const card = handle.closest(".task-card");
+      if (!card) return;
+      event.preventDefault();
+      void moveTaskByKeyboard(card.dataset.id, event.key === "ArrowUp" ? -1 : 1);
+      return;
+    }
     if (event.key !== "Enter" && event.key !== " ") return;
     if (event.target.closest("button")) return;
     const card = event.target.closest(".task-card");
@@ -2712,6 +2991,8 @@ function bindEvents() {
       selectTask(card.dataset.id);
     }
   });
+
+  els.taskList.addEventListener("pointerdown", onPointerDown);
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) refreshAll();

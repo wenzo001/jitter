@@ -10,6 +10,7 @@ Jitter 的主线是「测试 curl」和「定时调用 curl」：
 - **命中条件**：状态码 / 响应体 / 表达式，决定每次执行是否记为「命中」，与是否发通知无关。
 - **历史**：所有请求与响应长期写入 SQLite，页面按任务查看聊天式记录，可停止、暂停、编辑、删除。
 - **运行统计**：顶栏常驻一行概览（今日执行次数、近 7 天成功率与平均耗时），点「统计」看到每个任务最近 20 次的成功率、平均耗时和最近一次结果。
+- **任务列表可拖动排序**：每张卡片左侧有拖拽柄，拖动即可调整顺序（也可用手指拖）；聚焦拖拽柄后按 ↑ / ↓ 也能移动。顺序会存进数据库，重启后保持。
 
 旧版本创建的任务（只有窗口）会自动按「每天窗口」继续运行，数据库采用增量迁移，不需要手工改表。
 
@@ -45,7 +46,7 @@ bun run src/index.ts
 其他命令：
 
 ```bash
-bun test            # 342 项：核心逻辑 / curl / 配置 / 调度 / 定时（范围/精确/抖动）与循环 / 本地条件 / 前置判断 / 测试台 / 测试留档 / 编辑 / 删除 / API / 数据库 / 执行器 / 条件表达式
+bun test            # 343 项：核心逻辑 / curl / 配置 / 调度 / 定时（范围/精确/抖动）与循环 / 本地条件 / 前置判断 / 测试台 / 测试留档 / 编辑 / 删除 / API / 数据库 / 执行器 / 条件表达式
 bun run typecheck   # tsc --noEmit
 ```
 
@@ -110,6 +111,7 @@ bun run typecheck   # tsc --noEmit
 - 每分钟一次的兜底巡检会检查每个 active 任务的计划是否仍有 timer 支撑，丢了就补上（代替旧版本按窗口注册的每日触发器）。
 - 表单里会实时列出**接下来 7 次执行时间**：时间范围显示「日期 + 窗口」，精确时间显示具体时刻，精确 + 抖动显示浮动后的时段，循环执行显示具体时刻——存之前就能看清后续规律。
 - 任务卡片上会直接显示「下次执行时间」和「从何时起算」，不需要自己换算。
+- 任务列表可以拖动排序：卡片左侧的「⠿」是拖拽柄，按住拖动即可换位置，落点会有一条蓝色插入线；拖动时原位留一个虚线占位框，列表不会跳动；按 Esc 取消。也可以聚焦拖拽柄后用 ↑ / ↓ 逐格移动（无鼠标/触屏时的等价操作）。顺序通过 `POST /api/tasks/reorder` 存进 `tasks.sort_order`，刷新和重启后都保持；新任务默认排在最前面。
 
 ### 窗口归属
 
@@ -376,6 +378,7 @@ data.result.description!='19:35在高新人才大厦签退成功'   # 负向示�
 | GET | `/api/tasks` | 任务列表（**只含卡片需要的字段**，不含 curl/请求体等大字段）；每条额外带 `running` / `running_since`（此刻是否正在执行）与 `schedule_error`（调度配置是否无法解析） |
 | GET | `/api/tasks/:id` | 单个任务的完整配置（编辑表单与测试台按需拉取）；不存在返回 404 |
 | POST | `/api/tasks` | 新建任务（curl 或结构化字段） |
+| POST | `/api/tasks/reorder` | 保存任务列表的新顺序，body `{ ids: [...] }`（必须是现有任务的完整排列，缺项或含未知 id 返回 409） |
 | PUT | `/api/tasks/:id` | 编辑已有任务（字段与创建接口相同；不存在返回 404） |
 | DELETE | `/api/tasks/:id` | 删除任务及其全部日志；成功返回 `{ ok, id, deleted_logs }`，不存在返回 404 |
 | POST | `/api/tasks/:id/stop` | 停止（幂等） |
@@ -462,7 +465,7 @@ data.result.description!='19:35在高新人才大厦签退成功'   # 负向示�
 
 在需求给定结构上增加了通知、调度方式、执行前判断（本地条件 + 前置 curl）、命中条件、测试留档与日志分类字段：
 
-- `tasks`：`schedule_kind`（`daily` / `interval`，默认 `daily`）、`daily_jitter_minutes`（精确时间的 ± 分钟，默认 0）、`interval_seconds`、`interval_jitter_seconds`、`interval_start_at`（首次执行时间，可空）；`precheck_enabled`、`precheck_curl_command`、`precheck_url/method/headers/body/options`、`precheck_expect_status`、`precheck_expr`、`precheck_weekdays`（`0`–`6` 逗号串）、`precheck_time_start` / `precheck_time_end`；`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`、`expect_expr`、`request_options` / `notify_options`（JSON：`insecure`、`redirect`、`timeoutMs`、`proxy`、`proxyAuthorization`），以及暂停区间 `paused_from` / `paused_until`（本地日 00:00 的毫秒时间戳，半开区间 `[from, until)`）
+- `tasks`：`schedule_kind`（`daily` / `interval`，默认 `daily`）、`daily_jitter_minutes`（精确时间的 ± 分钟，默认 0）、`interval_seconds`、`interval_jitter_seconds`、`interval_start_at`（首次执行时间，可空）；`sort_order`（任务列表的手动顺序，越小越靠前；旧库升级时按"最新在前"回填，新任务默认插到最前）；`precheck_enabled`、`precheck_curl_command`、`precheck_url/method/headers/body/options`、`precheck_expect_status`、`precheck_expr`、`precheck_weekdays`（`0`–`6` 逗号串）、`precheck_time_start` / `precheck_time_end`；`notify_enabled`、`notify_curl_command`、`notify_url/method/headers/body`、`expect_status`、`expect_body`、`expect_expr`、`request_options` / `notify_options`（JSON：`insecure`、`redirect`、`timeoutMs`、`proxy`、`proxyAuthorization`），以及暂停区间 `paused_from` / `paused_until`（本地日 00:00 的毫秒时间戳，半开区间 `[from, until)`）
 - `logs`：`kind`（`task` / `notify` / `missed` / `skipped`）、`parent_log_id`、`matched`。`skipped` 记录的 `request_*` / `response_*` 属于前置判断请求（本地条件跳过时为空），`error` 说明跳过原因；`missed` 的原计划时刻写在 `error` 里
 - `test_runs`：测试台留档，`task_id`、`created_at`、`ok`、`summary`（JSON）、`steps`（JSON 时间线）；每个任务只保留最近 10 条，插入时自动清理更早的，删除任务时一并删除
 - `settings`：键值对，存运行时可改的设置（当前只有 `logRetentionDays`）。它在配置文件之上生效：清空该项即回到配置文件的默认值。

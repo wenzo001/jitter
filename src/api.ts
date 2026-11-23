@@ -14,6 +14,7 @@ import {
   listLogSummaries,
   listTasks,
   listTestRuns,
+  reorderTasks,
   setSetting,
   type LogCursor,
 } from "./db";
@@ -598,6 +599,38 @@ export const app = new Elysia()
       return { error: "任务不存在" };
     }
     return { task: taskView(task, runningTasks()) };
+  })
+  /**
+   * Store a new order for the task list (drag & drop in the UI).
+   *
+   * The ids must be a permutation of the existing tasks: a partial list would
+   * silently drop tasks from the order, and a stale list would fight with the
+   * server's view.
+   */
+  .post("/api/tasks/reorder", ({ body, set }) => {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      set.status = 400;
+      return { error: "请求体必须是 JSON 对象" };
+    }
+    const ids = (body as Record<string, unknown>).ids;
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {
+      set.status = 400;
+      return { error: "ids 必须是任务 id 组成的数组" };
+    }
+    const existing = listTasks().map((task) => task.id);
+    const known = new Set(existing);
+    const unique = new Set(ids as string[]);
+    if (
+      ids.length !== existing.length ||
+      unique.size !== ids.length ||
+      (ids as string[]).some((id) => !known.has(id))
+    ) {
+      set.status = 409;
+      return { error: "任务列表已变化，请刷新后重试" };
+    }
+    reorderTasks(ids as string[]);
+    const running = runningTasks();
+    return { ok: true, tasks: listTasks().map((task) => taskSummary(task, running)) };
   })
   .post("/api/tasks", ({ body, set }) => {
     const input = parseTaskInput(body);

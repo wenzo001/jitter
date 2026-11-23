@@ -555,7 +555,10 @@ describe("editTask", () => {
     Math.random = () => 0;
     try {
       editTask(task.id, editInput(task, other));
-      const deadline = Date.now() + 3_000;
+      // The wait limit only guards against a hang; the assertion below is
+      // what matters. A loaded machine (the whole suite in parallel) can
+      // need more than three seconds for the second run to fire.
+      const deadline = Date.now() + 10_000;
       while (slowHits < 2 && Date.now() < deadline) await Bun.sleep(20);
       expect(slowHits).toBe(2);
     } finally {

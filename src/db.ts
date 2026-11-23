@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   paused_until     INTEGER,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,
+  sort_order       INTEGER NOT NULL DEFAULT 0,
   notify_enabled   INTEGER NOT NULL DEFAULT 0,
   notify_curl_command TEXT,
   notify_url       TEXT,
@@ -298,8 +299,28 @@ function migrate(db: Database): void {
   ensureColumn(db, "tasks", "precheck_weekdays", "TEXT");
   ensureColumn(db, "tasks", "precheck_time_start", "TEXT");
   ensureColumn(db, "tasks", "precheck_time_end", "TEXT");
+  // Manual ordering of the task list. The column default keeps the old
+  // "newest first" order until the user drags something.
+  ensureColumn(db, "tasks", "sort_order", "INTEGER NOT NULL DEFAULT 0");
+  backfillSortOrder(db);
   backfillScheduleKind(db);
   backfillPauseFrom(db);
+}
+
+/**
+ * Give every task an explicit position, keeping the order the user sees
+ * today (newest first). Without this the column would be all zeros and the
+ * first drag would look like a reshuffle.
+ */
+function backfillSortOrder(db: Database): void {
+  const rows = db
+    .query("SELECT id FROM tasks ORDER BY created_at DESC, rowid DESC")
+    .all() as Array<{ id: string }>;
+  if (rows.length === 0) return;
+  const stmt = db.query("UPDATE tasks SET sort_order = ? WHERE id = ?");
+  db.transaction(() => {
+    rows.forEach((row, index) => stmt.run(index, row.id));
+  })();
 }
 
 export function resolveDbPath(path?: string): string {
@@ -340,16 +361,16 @@ export function initDb(path?: string): Database {
         id, name, curl_command, request_url, request_method, request_headers, request_body, request_options,
         window_start, window_end, daily_jitter_minutes, schedule_kind, interval_seconds, interval_jitter_seconds,
         interval_start_at,
-        status, next_run_at, paused_from, paused_until, created_at, updated_at,
+        status, next_run_at, paused_from, paused_until, created_at, updated_at, sort_order,
         notify_enabled, notify_curl_command, notify_url, notify_method, notify_headers, notify_body, notify_options,
         precheck_enabled, precheck_curl_command, precheck_url, precheck_method, precheck_headers,
         precheck_body, precheck_options, precheck_expect_status, precheck_expr,
         precheck_weekdays, precheck_time_start, precheck_time_end,
         expect_status, expect_body, expect_expr
-      ) VALUES (${Array.from({ length: 43 }, () => "?").join(", ")})`,
+      ) VALUES (${Array.from({ length: 44 }, () => "?").join(", ")})`,
     ),
     getTask: db.query("SELECT * FROM tasks WHERE id = ?"),
-    listTasks: db.query("SELECT * FROM tasks ORDER BY created_at DESC"),
+    listTasks: db.query("SELECT * FROM tasks ORDER BY sort_order ASC, created_at DESC"),
     updateNextRun: db.query("UPDATE tasks SET next_run_at = ?, updated_at = ? WHERE id = ?"),
     updatePause: db.query(
       "UPDATE tasks SET paused_from = ?, paused_until = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
@@ -456,6 +477,30 @@ export function initDb(path?: string): Database {
 }
 
 /**
+ * The position a new task takes: one before the current first one, so a new
+ * task shows up on top (the historical "newest first" behaviour).
+ */
+export function nextSortOrder(): number {
+  const row = getDatabase().query("SELECT MIN(sort_order) AS min FROM tasks").get() as
+    | { min: number | null }
+    | null;
+  const min = row?.min;
+  return min === null || min === undefined ? 0 : min - 1;
+}
+
+/**
+ * Store a new order for the task list. The ids must be a permutation of the
+ * existing tasks; the caller checks that.
+ */
+export function reorderTasks(ids: string[]): void {
+  const db = getDatabase();
+  const stmt = db.query("UPDATE tasks SET sort_order = ? WHERE id = ?");
+  db.transaction(() => {
+    ids.forEach((id, index) => stmt.run(index, id));
+  })();
+}
+
+/**
  * The live database handle. Exported for tests and maintenance tooling that
  * needs to inspect or repair a row the normal API refuses to touch.
  */
@@ -519,6 +564,8 @@ export function createTask(
     null, // paused_until
     now,
     now,
+    // A new task goes to the top of the list, like the old "newest first".
+    nextSortOrder(),
     notifyEnabled,
     notifyEnabled ? input.notify_curl_command : null,
     notify?.url ?? null,

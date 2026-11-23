@@ -120,9 +120,19 @@
       .btn-sm { padding: 4px 10px; font-size: 12px; }
       .field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .field-label-row > label { font-size: 12.5px; font-weight: 650; color: #38445a; }
-      .task-list { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
-      .task-card {
-        border: 1px solid var(--border);
+      .task-list { display: flex; flex-direction: column; gap: 8px; padding: 12px; position: relative; }
+      .drop-indicator {
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        height: 3px;
+        border-radius: 2px;
+        background: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+        z-index: 40;
+        pointer-events: none;
+      }
+      .task-card {        border: 1px solid var(--border);
         border-radius: 10px;
         padding: 9px 12px;
         background: #fff;
@@ -131,7 +141,34 @@
       }
       .task-card:hover { border-color: #c9d2df; }
       .task-card.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+      /* Dragging a task to reorder the list. */
+      .drag-handle {
+        border: 0;
+        background: transparent;
+        color: #aab3c0;
+        cursor: grab;
+        font-size: 15px;
+        line-height: 1;
+        padding: 2px 4px;
+        border-radius: 6px;
+        touch-action: none;
+        user-select: none;
+      }
+      .drag-handle:hover { color: var(--text); background: #f0f2f6; }
+      .drag-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .task-card.dragging {
+        box-shadow: 0 16px 40px rgba(16, 24, 40, 0.22);
+        border-color: var(--accent);
+        opacity: 0.96;
+        cursor: grabbing;
+      }
+      .task-placeholder { border: 1px dashed var(--accent); border-radius: 10px; background: var(--accent-soft); }
+      .task-card.drop-before { box-shadow: inset 0 3px 0 var(--accent); }
+      .task-card.drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
+      body.dragging-task { cursor: grabbing; user-select: none; }
+      body.dragging-task .task-card { cursor: grabbing; }
       .task-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+      .task-title { display: flex; align-items: center; gap: 4px; min-width: 0; }
       .task-name { margin: 0; font-size: 14px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
       .task-actions { display: flex; gap: 4px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
       .task-actions .btn { padding: 3px 8px; font-size: 12px; border-radius: 6px; }

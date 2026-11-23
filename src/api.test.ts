@@ -249,6 +249,35 @@ describe("api", () => {
     expect(missing.status).toBe(404);
   });
 
+  test("stores a new task order and keeps it after a reload", async () => {
+    const first = await post("/api/tasks", payload({ name: "order-a" }));
+    const second = await post("/api/tasks", payload({ name: "order-b" }));
+    const third = await post("/api/tasks", payload({ name: "order-c" }));
+    const ids = [first.body.task.id, second.body.task.id, third.body.task.id];
+
+    const before = await call("/api/tasks");
+    const beforeIds = before.body.tasks.map((task: any) => task.id);
+    // New tasks go to the top.
+    expect(beforeIds[0]).toBe(third.body.task.id);
+
+    const reordered = await post("/api/tasks/reorder", { ids: [ids[0], ids[1], ids[2]] });
+    expect(reordered.status).toBe(200);
+    expect(reordered.body.tasks.map((task: any) => task.id)).toEqual(ids);
+
+    const after = await call("/api/tasks");
+    expect(after.body.tasks.map((task: any) => task.id)).toEqual(ids);
+
+    // A partial list would drop tasks from the order: it must be refused.
+    const partial = await post("/api/tasks/reorder", { ids: [ids[0]] });
+    expect(partial.status).toBe(409);
+
+    const unknown = await post("/api/tasks/reorder", { ids: [...ids, "nope"] });
+    expect(unknown.status).toBe(409);
+
+    const invalid = await post("/api/tasks/reorder", { ids: "not-an-array" });
+    expect(invalid.status).toBe(400);
+  });
+
   test("serves the run statistics", async () => {
     const original = globalThis.fetch;
     globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
