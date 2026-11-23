@@ -84,6 +84,7 @@ const els = {
   swUpdateNotes: document.getElementById("sw-update-notes"),
   swUpdateProgress: document.getElementById("sw-update-progress"),
   swApplyUpdate: document.getElementById("sw-apply-update"),
+  appVersion: document.getElementById("app-version"),
   swUpdateRetry: document.getElementById("sw-update-retry"),
   backupCreate: document.getElementById("backup-create"),
   backupImport: document.getElementById("backup-import"),
@@ -957,6 +958,7 @@ async function loadSystemInfo() {
   try {
     const info = await api("/api/system");
     state.system = info;
+    if (els.appVersion) els.appVersion.textContent = info.version ? `v${info.version}` : "";
     els.swVersion.textContent = info.version ?? "—";
     els.swMode.textContent = info.compiled
       ? "已安装的单文件程序"
@@ -974,6 +976,7 @@ async function loadSystemInfo() {
     return info;
   } catch (error) {
     els.swVersion.textContent = `读取失败：${error.message}`;
+    if (els.appVersion && !els.appVersion.textContent) els.appVersion.textContent = "v—";
     return null;
   }
 }
@@ -3491,6 +3494,7 @@ async function init() {
   await loadClientConfig();
   setDefaultWindow();
   await loadTasks();
+  void loadSystemInfo();
   void refreshMetrics();
   if (state.selectedTaskId) {
     await loadLogs({ reset: true });
