@@ -1,6 +1,8 @@
 //! Jitter 可执行程序：HTTP 服务 + 调度器 + 托盘。
 //!
 //! 前端静态文件直接嵌入二进制，产物是单文件应用。
+//! 发布版隐藏控制台窗口：托盘是唯一入口（开发版保留控制台看日志）。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod api;
 mod scheduler;

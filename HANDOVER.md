@@ -171,7 +171,7 @@ cargo build ... --jobs 1                # 串行编译
 
 原来的五项：
 
-1. **托盘** ✅：`jitter-app/src/tray.rs`，`tray-icon` + `muda`（仅 Windows 目标依赖），程序生成 32×32 RGBA 时钟占位图标，菜单「打开界面 / 退出」；独立线程跑 Win32 消息循环。**macOS/Linux 上托盘暂缺**（无原生事件循环可用，以纯服务形态发布），依赖只在 `cfg(windows)` 下引入，不影响三平台 CI。
+1. **托盘** ✅：`jitter-app/src/tray.rs`，`tray-icon` + `muda`（仅 Windows 目标依赖），程序生成 32×32 RGBA 时钟占位图标。**发布版为 GUI 子系统（`windows_subsystem = "windows"`，无控制台窗口，debug 版保留控制台）**，双击即静默运行。菜单：打开界面 / 重启 / 开机自启（勾选项，点击即时切换）/ 退出；左键点托盘直接打开界面。菜单统一在托盘线程的 PeekMessage 循环里处理（muda 的菜单项是 Rc，不可跨线程）。**macOS/Linux 上托盘暂缺**（无原生事件循环可用，以纯服务形态发布），依赖只在 `cfg(windows)` 下引入，不影响三平台 CI。
 2. **开机自启 / 退出 / 自动升级** ✅：`jitter-core/src/system.rs`（三平台纯文件写，与 TS `system.ts` 完全对齐）与 `jitter-core/src/updater.rs`（GitHub Releases 检查 / 下载 / zip 解压 / 自替换，Windows 走「等进程退出的辅助 cmd」）。退出经 `main.rs` 的 `quit_token()` 统一走优雅关停，托盘菜单与设置页共用。
 3. **备份 / 导出 / 导入 / 恢复** ✅：`jitter-core/src/backup.rs` + `api.rs` 全部 `/api/backup/*` 路由（`VACUUM INTO`、路径穿越白名单、SQLite 头校验、恢复前安全快照、恢复后自动重启调度器）。注意 `axum` 的 body 上限已放宽到 256MB 以支持大库导入。
 4. **GitHub Actions** ✅：`.github/workflows/ci.yml`（Rust core 双平台 + TS 参考测试）与 `.github/workflows/release.yml`（打 `v*` tag 触发；先跑两侧测试，再出 `jitter-windows-x64.zip` / `jitter-macos-arm64.zip` / `jitter-macos-x64.zip` / `jitter-linux-x64.zip` / `jitter-linux-arm64.zip` 五个资产并附 `.sha256`，资产名是升级逻辑的契约，不能改）。
