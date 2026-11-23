@@ -61,20 +61,33 @@ jobs:
 
       # 资产名必须保持 jitter-<platform>-<arch>.zip：
       # 内置升级逻辑按这个名字找当前平台的安装包。
-      - name: Package zip
+      - name: Package zip (unix)
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
           mkdir -p staging
           cp "rust/target/release/${{ matrix.bin }}" "staging/${{ matrix.bin }}"
-          chmod +x "staging/${{ matrix.bin }}" || true
+          chmod +x "staging/${{ matrix.bin }}"
           asset="jitter-${{ matrix.platform }}-${{ matrix.arch }}.zip"
-          (cd staging && zip "../$asset" .)
+          (cd staging && zip -r "../$asset" .)
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$asset" | tee "$asset.sha256"
           else
             shasum -a 256 "$asset" | tee "$asset.sha256"
           fi
           mkdir -p dist && mv "$asset" "$asset.sha256" dist/
+
+      - name: Package zip (windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $asset = "jitter-${{ matrix.platform }}-${{ matrix.arch }}.zip"
+          New-Item -ItemType Directory -Force staging, dist | Out-Null
+          Copy-Item "rust/target/release/${{ matrix.bin }}" "staging/${{ matrix.bin }}"
+          Compress-Archive -Path "staging/*" -DestinationPath $asset -Force
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset" | Out-File "$asset.sha256" -Encoding ascii
+          Move-Item $asset, "$asset.sha256" -Destination dist/
 
       - uses: actions/upload-artifact@v4
         with:
