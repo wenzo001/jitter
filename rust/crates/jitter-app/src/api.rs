@@ -473,7 +473,7 @@ async fn run_task(Path(id): Path<String>) -> Response {
     // 与 TS 版一致：同步执行，返回完整结果（页面显示判定与耗时）。
     let cancel = tokio_util::sync::CancellationToken::new();
     scheduler::register_running(&id, cancel.clone());
-    let outcome = executor::execute_task_run(&task, &cancel).await;
+    let outcome = executor::execute_task_run(&task, &cancel, jitter_core::types::RunSource::Manual).await;
     scheduler::finish_run(&id);
     AxumJson(json!({
         "ok": true,

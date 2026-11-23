@@ -215,6 +215,7 @@ fn rand() -> impl FnMut() -> f64 {
 /// 挂一个到点执行的定时器；到点后判定是否还落在窗口里（迟到 → 记 missed）。
 fn arm_timer(task_id: String, target: i64) {
     let delay = (target - executor::now_ms()).max(0) as u64;
+    tracing::info!("[scheduler] arm {task_id}: target={target} delay={delay}ms");
     let fire_id = task_id.clone();
     let handle = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -228,6 +229,7 @@ fn arm_timer(task_id: String, target: i64) {
 }
 
 async fn fire(task_id: String, target: i64) {
+    tracing::info!("[scheduler] fire {task_id}: target={target}");
     let Ok(Some(task)) = jitter_core::db::get_task(&task_id) else {
         return;
     };
@@ -256,6 +258,7 @@ async fn fire(task_id: String, target: i64) {
             executed_at: now,
             error: Some(format!("错过计划时刻 {}（进程可能挂起或重启）", target)),
             kind: Some(jitter_core::types::LogKind::Missed),
+            run_source: Some("scheduled".to_string()),
             ..Default::default()
         });
         schedule_next_after(&task, &spec, target);
@@ -265,12 +268,13 @@ async fn fire(task_id: String, target: i64) {
     if !try_begin_run(&task_id) {
         return;
     }
+    tracing::info!("[scheduler] execute {task_id} (定时触发)");
     let cancel = CancellationToken::new();
     RUNNING_NOW.fetch_add(1, Ordering::SeqCst);
     let run_task_id = task_id.clone();
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
-        let _ = executor::execute_task_run(&task, &run_cancel).await;
+        let _ = executor::execute_task_run(&task, &run_cancel, jitter_core::types::RunSource::Scheduled).await;
         finish_run(&run_task_id);
     });
     {
@@ -333,6 +337,7 @@ async fn sweep_once() {
                         executed_at: now,
                         error: Some(format!("错过计划时刻 {missed}（启动恢复）")),
                         kind: Some(jitter_core::types::LogKind::Missed),
+                        run_source: Some("scheduled".to_string()),
                         ..Default::default()
                     });
                 }

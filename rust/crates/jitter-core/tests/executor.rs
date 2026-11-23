@@ -285,7 +285,7 @@ async fn writes_a_full_task_log() {
     let url = spawn_server(vec![http_response("200 OK", "hello")]).await;
     let input = task_input(&url);
     let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
-    let outcome = execute_task_run(&task, &CancellationToken::new()).await;
+    let outcome = execute_task_run(&task, &CancellationToken::new(), jitter_core::types::RunSource::Scheduled).await;
     assert!(!outcome.skipped);
     assert_eq!(outcome.status, Some(200));
     assert!(outcome.matched);
@@ -313,7 +313,7 @@ async fn caps_a_large_body() {
     let url = spawn_server(vec![http_response("200 OK", "x".repeat(1000).as_str())]).await;
     let input = task_input(&url);
     let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
-    let outcome = execute_task_run(&task, &CancellationToken::new()).await;
+    let outcome = execute_task_run(&task, &CancellationToken::new(), jitter_core::types::RunSource::Scheduled).await;
     // 未配置成功条件时 2xx 仍然命中；但存下来的正文被截断并标注。
     assert!(outcome.matched);
     let log = jitter_core::db::get_log(outcome.main_log_id)
@@ -343,7 +343,7 @@ async fn notifies_when_matched() {
         options: Some("{}".to_string()),
     });
     let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
-    let outcome = execute_task_run(&task, &CancellationToken::new()).await;
+    let outcome = execute_task_run(&task, &CancellationToken::new(), jitter_core::types::RunSource::Scheduled).await;
     assert!(outcome.matched);
     assert!(outcome.notify_log_id.is_some());
     let notify = jitter_core::db::get_log(outcome.notify_log_id.expect("id"))
@@ -361,7 +361,7 @@ async fn local_guard_skips_the_main_request() {
     input.precheck_enabled = true;
     input.precheck_weekdays = Some(vec![2]); // 周三（今天大概率不是）
     let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
-    let outcome = execute_task_run(&task, &CancellationToken::new()).await;
+    let outcome = execute_task_run(&task, &CancellationToken::new(), jitter_core::types::RunSource::Scheduled).await;
     if outcome.skipped {
         assert_eq!(outcome.status, None);
         assert!(!outcome.matched);
@@ -391,7 +391,7 @@ async fn curl_guard_failure_records_the_exchange() {
         options: Some("{}".to_string()),
     });
     let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
-    let outcome = execute_task_run(&task, &CancellationToken::new()).await;
+    let outcome = execute_task_run(&task, &CancellationToken::new(), jitter_core::types::RunSource::Scheduled).await;
     assert!(outcome.skipped);
     assert_eq!(outcome.status, Some(500));
     let log = jitter_core::db::get_log(outcome.main_log_id)
@@ -421,7 +421,7 @@ async fn timeout_is_reported_as_a_timeout() {
     });
     let input = task_input(&format!("http://{addr}"));
     let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
-    let outcome = execute_task_run(&task, &CancellationToken::new()).await;
+    let outcome = execute_task_run(&task, &CancellationToken::new(), jitter_core::types::RunSource::Scheduled).await;
     assert_eq!(outcome.status, None);
     assert!(outcome.error.as_deref().unwrap_or("").contains("请求超时"));
 }

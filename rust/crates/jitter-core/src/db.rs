@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS logs (
   aborted          INTEGER DEFAULT 0,
   kind             TEXT NOT NULL DEFAULT 'task',
   parent_log_id    INTEGER,
-  matched          INTEGER
+  matched          INTEGER,
+  run_source       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS test_runs (
@@ -246,9 +247,11 @@ pub struct LogRow {
     pub kind: String,
     pub parent_log_id: Option<i64>,
     pub matched: Option<i64>,
+    /// 触发来源：scheduled（定时）/ manual（立即执行）；历史数据为 NULL。
+    pub run_source: Option<String>,
 }
 
-const LOG_FULL_COLUMNS: &str = "id, task_id, executed_at, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body, duration_ms, error, aborted, kind, parent_log_id, matched";
+const LOG_FULL_COLUMNS: &str = "id, task_id, executed_at, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body, duration_ms, error, aborted, kind, parent_log_id, matched, run_source";
 
 fn map_log(row: &Row<'_>) -> rusqlite::Result<LogRow> {
     Ok(LogRow {
@@ -268,6 +271,7 @@ fn map_log(row: &Row<'_>) -> rusqlite::Result<LogRow> {
         kind: row.get(13)?,
         parent_log_id: row.get(14)?,
         matched: row.get(15)?,
+        run_source: row.get(16)?,
     })
 }
 
@@ -286,9 +290,11 @@ pub struct LogSummary {
     pub kind: String,
     pub parent_log_id: Option<i64>,
     pub matched: Option<i64>,
+    /// 触发来源：scheduled（定时）/ manual（立即执行）；历史数据为 NULL。
+    pub run_source: Option<String>,
 }
 
-const LOG_SUMMARY_COLUMNS: &str = "id, task_id, executed_at, request_url, request_method, response_status, duration_ms, error, aborted, kind, parent_log_id, matched";
+const LOG_SUMMARY_COLUMNS: &str = "id, task_id, executed_at, request_url, request_method, response_status, duration_ms, error, aborted, kind, parent_log_id, matched, run_source";
 
 fn map_log_summary(row: &Row<'_>) -> rusqlite::Result<LogSummary> {
     Ok(LogSummary {
@@ -304,6 +310,7 @@ fn map_log_summary(row: &Row<'_>) -> rusqlite::Result<LogSummary> {
         kind: row.get(9)?,
         parent_log_id: row.get(10)?,
         matched: row.get(11)?,
+        run_source: row.get(12)?,
     })
 }
 
@@ -660,6 +667,7 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     ensure_column(conn, "tasks", "precheck_weekdays", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_time_start", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_time_end", "TEXT")?;
+    ensure_column(conn, "logs", "run_source", "TEXT")?;
     ensure_column(conn, "tasks", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
     backfill_sort_order(conn)?;
     backfill_schedule_kind(conn)?;
@@ -962,6 +970,8 @@ pub struct NewLogInput {
     pub kind: Option<LogKind>,
     pub parent_log_id: Option<i64>,
     pub matched: Option<i64>,
+    /// 触发来源：scheduled（定时）/ manual（立即执行）。
+    pub run_source: Option<String>,
 }
 
 pub fn insert_log(input: &NewLogInput) -> Result<i64, DbError> {
@@ -970,8 +980,8 @@ pub fn insert_log(input: &NewLogInput) -> Result<i64, DbError> {
             "INSERT INTO logs (
               task_id, executed_at, request_url, request_method, request_headers, request_body,
               response_status, response_headers, response_body, duration_ms, error, aborted,
-              kind, parent_log_id, matched
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+              kind, parent_log_id, matched, run_source
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
                 input.task_id,
                 input.executed_at,
@@ -988,6 +998,7 @@ pub fn insert_log(input: &NewLogInput) -> Result<i64, DbError> {
                 input.kind.map(|kind| kind.as_str()).unwrap_or("task"),
                 input.parent_log_id,
                 input.matched,
+                input.run_source,
             ],
         )?;
         Ok(conn.last_insert_rowid())

@@ -167,6 +167,8 @@ cargo build ... --jobs 1                # 串行编译
 - **修复的死锁（两处）**：`scheduler::finish_run` 持锁调 `schedule_new_task`（第一次执行后调度器永久冻结）；`db::get_log_cleanup_preview` 持锁调 `get_log_storage_usage`。
 - **修复的前端致命 bug**：`app.js` 顶层 `formatBytes` 重复声明——ES module 里是 SyntaxError，**整个前端不执行**（TS 版页面同样受害，PM2 里跑的旧进程没 reload 所以没发现）。
 - 任务生命周期对齐：resume 恢复 stopped 任务（状态回 active + 清暂停）、stop 清暂停、暂停对 stopped 任务返回 400。
+- v1.0.5：执行记录区分触发来源——`logs.run_source`（`scheduled` 定时 / `manual` 页面立即执行），页面手动执行的那条显示「手动」徽标；调度器新增 `[scheduler] arm/fire/execute` 追踪日志。
+- **资源占用实测**（v1.0.5，2 个任务、页面关闭）：工作集约 13 MB、物理提交约 2 MB、CPU 全天接近 0；tokio 固定 2 个工作线程（原按 CPU 核数开会到 17 线程）。Bun 版服务通常在几十 MB 量级。
 - 浏览器实测通过：页面加载/轮询、表单建任务（含通知）、立即执行（同步结果 + 命中 + 真实发通知）、执行记录、设置页（版本/自启/备份/对真实 Release 的升级检查）、测试台五步链、统计条、调度预览。
 
 原来的五项：

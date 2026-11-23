@@ -69,3 +69,21 @@ impl LogKind {
         }
     }
 }
+
+/// 一次执行的触发来源（写入 logs.run_source，页面据此区分手动/定时）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunSource {
+    /// 定时器触发。
+    Scheduled,
+    /// 页面「立即执行」。
+    Manual,
+}
+
+impl RunSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RunSource::Scheduled => "scheduled",
+            RunSource::Manual => "manual",
+        }
+    }
+}

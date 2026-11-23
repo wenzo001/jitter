@@ -555,7 +555,12 @@ struct SkipExchange {
 }
 
 /// 一条解释「为什么跳过」的日志。
-fn record_skip(task: &TaskRow, reason: &str, exchange: Option<&SkipExchange>) -> i64 {
+fn record_skip(
+    task: &TaskRow,
+    reason: &str,
+    exchange: Option<&SkipExchange>,
+    source: crate::types::RunSource,
+) -> i64 {
     let stored_body = exchange.and_then(|exchange| {
         exchange
             .status
@@ -586,6 +591,7 @@ fn record_skip(task: &TaskRow, reason: &str, exchange: Option<&SkipExchange>) ->
         kind: Some(crate::types::LogKind::Skipped),
         parent_log_id: None,
         matched: Some(0),
+        run_source: Some(source.as_str().to_string()),
     })
     .expect("write skip log")
 }
@@ -609,7 +615,7 @@ pub struct RunOutcome {
 }
 
 /// 执行一个任务：前置判断 → 主请求 → 判定 → 命中则通知。
-pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken) -> RunOutcome {
+pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source: crate::types::RunSource) -> RunOutcome {
     let config: AppConfig = get_active_config();
 
     // 前置判断先行：本地条件零成本，guard curl 只在配置了的情况下才发。
@@ -621,7 +627,7 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken) -> Run
         );
         let verdict = evaluate_local_guard(&guard_config, now_ms());
         if !verdict.passed {
-            let main_log_id = record_skip(task, &verdict.reason, None);
+            let main_log_id = record_skip(task, &verdict.reason, None, source);
             tracing::warn!("[jitter] 任务「{}」跳过本次执行：{}", task.name, verdict.reason);
             return RunOutcome {
                 main_log_id,
@@ -655,6 +661,7 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken) -> Run
                         aborted: precheck.aborted,
                         duration_ms: precheck.duration_ms,
                     }),
+                    source,
                 );
                 tracing::warn!("[jitter] 任务「{}」跳过本次执行：{}", task.name, precheck.verdict.reason);
                 return RunOutcome {
@@ -718,6 +725,7 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken) -> Run
         kind: Some(crate::types::LogKind::Task),
         parent_log_id: None,
         matched: Some(if matched { 1 } else { 0 }),
+        run_source: Some(source.as_str().to_string()),
     })
     .expect("write main log");
 
@@ -757,6 +765,7 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken) -> Run
             kind: Some(crate::types::LogKind::Notify),
             parent_log_id: Some(main_log_id),
             matched: None,
+            run_source: Some(source.as_str().to_string()),
         })
         .expect("write notify log"));
     }

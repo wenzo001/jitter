@@ -136,7 +136,10 @@ fn main() {
     tracing_subscriber::fmt()        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
+    // 本地小工具：2 个工作线程足够（HTTP 轮询 + 定时器），
+    // 又能保证 DB 操作阻塞时健康检查仍可响应。默认按 CPU 核数开线程太浪费。
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
         .expect("tokio runtime");
@@ -173,8 +176,11 @@ async fn run() -> anyhow::Result<()> {
     }
 
     // 单实例：已有一个在跑时，只打开它的页面然后退出（避免两个调度器
-    // 同时跑同一套任务）。
-    if !acquire_single_instance() {
+    // 同时跑同一套任务）。测试等特殊场景可用 JITTER_ALLOW_MULTI_INSTANCE=1 跳过。
+    let allow_multi = std::env::var("JITTER_ALLOW_MULTI_INSTANCE")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+    if !allow_multi && !acquire_single_instance() {
         tracing::info!("检测到已有 Jitter 实例，打开它的界面后退出");
         open_existing_instance();
         std::process::exit(0);

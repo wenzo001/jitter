@@ -1473,6 +1473,9 @@ function renderLog(log) {
     log.kind === "notify" && log.parent_log_id !== null
       ? h("span", { class: "muted" }, `来自日志 #${log.parent_log_id}`)
       : null,
+    log.run_source === "manual"
+      ? h("span", { class: "badge status-muted", title: "页面「立即执行」触发，不是定时触发" }, "手动")
+      : null,
   );
 
   const card = h(
