@@ -16,6 +16,10 @@ rusqlite.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+base64.workspace = true
+http.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }

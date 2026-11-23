@@ -3,6 +3,10 @@
 //! 这一层不依赖 HTTP 框架，可以单独测试。
 
 pub mod condition;
+pub mod guard;
+pub mod curl_parser;
+pub mod schedule;
+pub mod types;
 pub mod window;
 
 pub use condition::{evaluate_condition, validate_condition, ConditionContext, ConditionError};
