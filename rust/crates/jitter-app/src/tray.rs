@@ -24,7 +24,7 @@ mod imp {
     }
 
     fn run(port: u16, quit: CancellationToken) -> Result<(), Box<dyn std::error::Error>> {
-        let icon = Icon::from_rgba(icon_rgba(32), 32, 32)?;
+        let icon = Icon::from_rgba(icon_rgba(64), 64, 64)?;
         let menu = Menu::new();
 
         let open = MenuItem::new("打开界面", true, None);
@@ -117,31 +117,88 @@ del \"%~f0\" >nul 2>&1\r\n",
         quit.cancel();
     }
 
-    /// 程序生成的占位图标：靛蓝圆面 + 时钟指针（RGBA）。
+    /// 程序生成的图标：靛蓝→紫罗兰渐变圆角方块 + 白色表盘（4× 超采样抗锯齿）。
     fn icon_rgba(size: u32) -> Vec<u8> {
-        let s = size as i32;
-        let center = s / 2;
-        let radius = (s * 2 / 5) as f64;
-        let mut data = Vec::with_capacity((size as usize) * (size as usize) * 4);
-        for y in 0..s {
-            for x in 0..s {
-                let dx = x as f64 - center as f64;
-                let dy = y as f64 - center as f64;
-                let inside = (dx * dx + dy * dy) <= radius * radius;
-                // 指针：向上的竖针 + 向右的横针。
-                let hand_up = (x - center).abs() <= 1 && y <= center;
-                let hand_right = (y - center).abs() <= 1 && x >= center;
-                let (r, g, b, a) = if !inside {
-                    (0, 0, 0, 0)
-                } else if hand_up || hand_right {
-                    (255, 255, 255, 255)
-                } else {
-                    (63, 81, 181, 255)
-                };
-                data.extend_from_slice(&[r, g, b, a]);
+        const SS: u32 = 4; // 每像素 4×4 子采样
+        let b = (size * SS) as f64;
+        let margin = b * 0.052;
+        let corner = b * 0.26;
+        let cx = b / 2.0;
+        let cy = b / 2.0;
+        let half = b / 2.0 - margin;
+        let ring_r = b * 0.295;
+        let ring_w = b * 0.078;
+        let hand_w = b * 0.062;
+        // 12 点方向的时针 + 约 2 点方向的分针。
+        let hand_up = (cx, cy - ring_r * 0.60);
+        let hand_right = (cx + ring_r * 0.46, cy - ring_r * 0.14);
+        let mut out = vec![0u8; (size * size * 4) as usize];
+        for py in 0..size {
+            for px in 0..size {
+                let (mut r, mut g, mut bl, mut al) = (0f64, 0f64, 0f64, 0f64);
+                for sy in 0..SS {
+                    for sx in 0..SS {
+                        let x = (px * SS + sx) as f64 + 0.5;
+                        let y = (py * SS + sy) as f64 + 0.5;
+                        if sd_round_rect(x, y, cx, cy, half, corner) > 0.0 {
+                            continue;
+                        }
+                        // 顶部靛蓝 → 底部紫罗兰的竖向渐变。
+                        let t = (y / b).clamp(0.0, 1.0);
+                        let mut color = (
+                            108.0 + (150.0 - 108.0) * t,
+                            120.0 + (86.0 - 120.0) * t,
+                            255.0,
+                        );
+                        let d_center = dist(x, y, cx, cy);
+                        let d_ring = (d_center - ring_r).abs() - ring_w / 2.0;
+                        let d_hand = seg_dist(x, y, cx, cy, hand_up.0, hand_up.1)
+                            .min(seg_dist(x, y, cx, cy, hand_right.0, hand_right.1))
+                            - hand_w / 2.0;
+                        let d_dot = d_center - hand_w * 0.62;
+                        if d_ring <= 0.0 || d_hand <= 0.0 || d_dot <= 0.0 {
+                            color = (255.0, 255.0, 255.0);
+                        }
+                        r += color.0;
+                        g += color.1;
+                        bl += color.2;
+                        al += 255.0;
+                    }
+                }
+                let n = (SS * SS) as f64;
+                let idx = ((py * size + px) * 4) as usize;
+                out[idx] = (r / n) as u8;
+                out[idx + 1] = (g / n) as u8;
+                out[idx + 2] = (bl / n) as u8;
+                out[idx + 3] = (al / n) as u8;
             }
         }
-        data
+        out
+    }
+
+    fn dist(x: f64, y: f64, cx: f64, cy: f64) -> f64 {
+        ((x - cx).powi(2) + (y - cy).powi(2)).sqrt()
+    }
+
+    /// 圆角矩形的有符号距离（<= 0 在内部）。
+    fn sd_round_rect(x: f64, y: f64, cx: f64, cy: f64, half: f64, corner: f64) -> f64 {
+        let dx = (x - cx).abs() - (half - corner);
+        let dy = (y - cy).abs() - (half - corner);
+        let outside = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt();
+        outside + dx.max(dy).min(0.0) - corner
+    }
+
+    /// 点到线段的距离（圆头笔画）。
+    fn seg_dist(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+        let vx = bx - ax;
+        let vy = by - ay;
+        let len2 = vx * vx + vy * vy;
+        let t = if len2 <= f64::EPSILON {
+            0.0
+        } else {
+            (((px - ax) * vx + (py - ay) * vy) / len2).clamp(0.0, 1.0)
+        };
+        dist(px, py, ax + vx * t, ay + vy * t)
     }
 
     fn open_browser(port: u16) {

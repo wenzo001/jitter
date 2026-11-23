@@ -100,6 +100,14 @@ pub fn build_autostart_entry(
 ) -> AutostartEntry {
     let home_path = Path::new(home);
 
+    let binary_path_buf = Path::new(binary_path);
+    // 自启条目必须固定工作目录：否则从 Startup 目录启动时，相对的
+    // data/app.db 会落到别处，和手动启动的数据分叉。
+    let work_dir = binary_path_buf
+        .parent()
+        .map(|dir| dir.to_string_lossy().to_string())
+        .unwrap_or_default();
+
     if platform == "win32" {
         let app_data = app_data
             .map(str::trim)
@@ -113,8 +121,11 @@ pub fn build_autostart_entry(
             .join("Programs")
             .join("Startup")
             .join(format!("{APP_NAME}.cmd"));
-        // Startup 目录会执行 .cmd；`start` 让进程脱离控制台窗口。
-        let content = format!("@echo off\r\nstart \"\" \"{binary_path}\" --background\r\n");
+        // Startup 目录会执行 .cmd；`start` 让进程脱离控制台窗口，
+        // `/D` 把工作目录钉在程序所在目录。
+        let content = format!(
+            "@echo off\r\nstart \"\" /D \"{work_dir}\" \"{binary_path}\" --background\r\n"
+        );
         return AutostartEntry { path, content };
     }
 
@@ -132,6 +143,8 @@ pub fn build_autostart_entry(
     <string>{binary_path}</string>\n\
     <string>--background</string>\n\
   </array>\n\
+  <key>WorkingDirectory</key>\n\
+  <string>{work_dir}</string>\n\
   <key>RunAtLoad</key>\n\
   <true/>\n\
   <key>KeepAlive</key>\n\
@@ -153,6 +166,7 @@ pub fn build_autostart_entry(
 Type=Application\n\
 Name={APP_NAME}\n\
 Exec=\"{binary_path}\" --background\n\
+Path={work_dir}\n\
 Terminal=false\n\
 X-GNOME-Autostart-enabled=true\n"
     );

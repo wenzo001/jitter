@@ -49,6 +49,89 @@ fn apply_env_overrides(config: &mut jitter_core::config::AppConfig) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 单实例：重复启动只会打开已有实例的页面，绝不再起第二个调度器。
+// ---------------------------------------------------------------------------
+
+/// 实际监听端口写在配置目录，供重复启动/工具发现。
+fn runtime_file_path() -> std::path::PathBuf {
+    jitter_core::system::get_config_dir().join("jitter.runtime.json")
+}
+
+fn write_runtime_file(port: u16) {
+    let path = runtime_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let payload = serde_json::json!({
+        "port": port,
+        "pid": std::process::id(),
+    })
+    .to_string();
+    if let Err(error) = std::fs::write(&path, payload) {
+        tracing::warn!("写运行时端口文件失败: {error}");
+    }
+}
+
+fn remove_runtime_file() {
+    let _ = std::fs::remove_file(runtime_file_path());
+}
+
+fn read_runtime_port() -> u16 {
+    std::fs::read_to_string(runtime_file_path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.get("port").and_then(|port| port.as_u64()))
+        .map(|port| port as u16)
+        .unwrap_or(3000)
+}
+
+/// 打开已运行实例的页面（用它的实际端口）。
+fn open_existing_instance() {
+    let port = read_runtime_port();
+    let url = format!("http://127.0.0.1:{port}");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        let _ = std::process::Command::new(opener).arg(&url).spawn();
+    }
+}
+
+/// 抢一个命名互斥体；返回 false 表示已有实例在运行。
+#[cfg(windows)]
+fn acquire_single_instance() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(attributes: *const std::ffi::c_void, initial_owner: i32, name: *const u16) -> isize;
+        fn GetLastError() -> u32;
+    }
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    let mut name: Vec<u16> = "Local\\JitterSingleInstance".encode_utf16().collect();
+    name.push(0);
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    let last_error = unsafe { GetLastError() };
+    if handle == 0 {
+        // 创建失败就不拦，宁可多开也不让程序起不来。
+        return true;
+    }
+    // 句柄故意泄漏：要让互斥体活到进程结束。
+    std::mem::forget(handle);
+    last_error != ERROR_ALREADY_EXISTS
+}
+
+#[cfg(not(windows))]
+fn acquire_single_instance() -> bool {
+    true
+}
+
 fn main() {
     tracing_subscriber::fmt()        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -74,6 +157,14 @@ async fn run() -> anyhow::Result<()> {
     }
     apply_env_overrides(&mut config);
     jitter_core::config::set_active_config(config.clone());
+
+    // 单实例：已有一个在跑时，只打开它的页面然后退出（避免两个调度器
+    // 同时跑同一套任务）。
+    if !acquire_single_instance() {
+        tracing::info!("检测到已有 Jitter 实例，打开它的界面后退出");
+        open_existing_instance();
+        std::process::exit(0);
+    }
 
     // 数据库。
     let db_path = config.db_path.clone();
@@ -102,6 +193,7 @@ async fn run() -> anyhow::Result<()> {
         }
     };
     ACTUAL_PORT.store(port, Ordering::SeqCst);
+    write_runtime_file(port);
     tracing::info!("Jitter 已启动: http://{host}:{port}");
 
     // 托盘（Windows；其它平台为空操作）。
@@ -119,5 +211,6 @@ async fn run() -> anyhow::Result<()> {
 
     // 给在途的中断执行留一点写日志的时间。
     tokio::time::sleep(Duration::from_millis(config.shutdown_grace_ms.max(0) as u64)).await;
+    remove_runtime_file();
     std::process::exit(0);
 }

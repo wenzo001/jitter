@@ -20,7 +20,7 @@ fn windows_autostart_entry_writes_startup_cmd() {
     assert!(entry.content.contains("@echo off"));
     assert!(entry
         .content
-        .contains(r#"start "" "C:\Apps\Jitter\jitter.exe" --background"#));
+        .contains(r#"start "" /D "C:\Apps\Jitter" "C:\Apps\Jitter\jitter.exe" --background"#));
 }
 
 #[test]
@@ -39,6 +39,8 @@ fn macos_autostart_entry_writes_launchagent_plist() {
         .content
         .contains("<string>/Applications/Jitter.app/jitter</string>"));
     assert!(entry.content.contains("<string>--background</string>"));
+    assert!(entry.content.contains("<key>WorkingDirectory</key>"));
+    assert!(entry.content.contains("<string>/Applications/Jitter.app</string>"));
     assert!(entry.content.contains("<key>RunAtLoad</key>"));
 }
 
@@ -50,6 +52,7 @@ fn linux_autostart_entry_writes_desktop_file() {
     assert!(entry
         .content
         .contains("Exec=\"/opt/jitter/jitter\" --background"));
+    assert!(entry.content.contains("Path=/opt/jitter"));
     assert!(entry.content.contains("Terminal=false"));
 }
 
