@@ -1,0 +1,21 @@
+[package]
+name = "jitter-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Jitter 的核心逻辑：调度、执行、日志与条件判断"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }

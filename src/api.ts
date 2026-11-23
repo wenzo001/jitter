@@ -23,6 +23,14 @@ import { validateCondition } from "./condition";
 import { executeTestRequest } from "./executor";
 import { GuardError, parseTimeRange, parseWeekdays } from "./guard";
 import { getMetricsReport } from "./metrics";
+import {
+  getRuntimePort,
+  getSystemInfo,
+  isAutostartEnabled,
+  requestShutdown,
+  setAutostart,
+} from "./system";
+import { applyUpdate, checkForUpdate, getUpdateProgress } from "./updater";
 import { buildSchedule, previewSchedule, scheduleOf, ScheduleError } from "./schedule";
 import { runTestBench, type TestBenchInput } from "./testbench";
 import {
@@ -426,6 +434,56 @@ export const app = new Elysia()
     return { error: "服务器内部错误" };
   })
   .get("/api/health", () => ({ ok: true, now: Date.now() }))
+  /**
+   * What the "软件" settings page shows: version, paths, auto start.
+   */
+  .get("/api/system", () =>
+    getSystemInfo({ port: getRuntimePort(), dbPath: getActiveConfig().dbPath }),
+  )
+  /**
+   * Start with the system (or stop doing so). The registration is a plain
+   * file per platform, so it works the same for a source checkout and for an
+   * installed app.
+   */
+  .post("/api/system/autostart", ({ body, set }) => {
+    const enabled = Boolean(body && typeof body === "object" && (body as Record<string, unknown>).enabled);
+    try {
+      setAutostart(enabled);
+    } catch (error) {
+      set.status = 400;
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+    return { ok: true, autostart: isAutostartEnabled() };
+  })
+  /** Stop the server (used by the tray icon and the settings page). */
+  .post("/api/quit", () => {
+    const stopped = requestShutdown();
+    return stopped ? { ok: true } : { ok: false, error: "当前环境不支持退出" };
+  })
+  /**
+   * Is there a newer release? The page shows its notes and lets the user
+   * start the download.
+   */
+  .get("/api/update/check", async () => checkForUpdate())
+  /** Progress of a running update, so the page can show a live state. */
+  .get("/api/update/progress", () => getUpdateProgress())
+  /**
+   * Download the new release and swap the binary. The request can take a
+   * while, so the page uses a long timeout for it.
+   */
+  .post("/api/update/apply", async ({ body }) => {
+    const requested = Boolean(body && typeof body === "object" && (body as Record<string, unknown>).confirm === true);
+    if (!requested) {
+      return { ok: false, message: "需要确认后才能升级" };
+    }
+    const info = await checkForUpdate();
+    const result = await applyUpdate(info);
+    if (result.ok) {
+      // The new binary has been started; this process has to step aside.
+      setTimeout(() => process.exit(0), 300);
+    }
+    return result;
+  })
   .get("/api/config", () => {
     const config = getActiveConfig();
     return {

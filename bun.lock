@@ -6,6 +6,7 @@
       "name": "jitter",
       "dependencies": {
         "elysia": "^1.4.31",
+        "fflate": "^0.8.3",
       },
       "devDependencies": {
         "@types/bun": "^1.4.4",
@@ -77,6 +78,8 @@
     "exact-mirror": ["exact-mirror@0.2.9", "https://registry.npmmirror.com/exact-mirror/-/exact-mirror-0.2.9.tgz", { "peerDependencies": { "@sinclair/typebox": "^0.34.15" }, "optionalPeers": ["@sinclair/typebox"] }, "sha512-7+ecLdWdlY0Br1E1Fax2Pss5VU3b1WQwJ8bdyt5azPNdhKHuivjQlV8baXF9NkQwlvnyOwaM6ITBiuK43PQ4wg=="],
 
     "fast-decode-uri-component": ["fast-decode-uri-component@1.0.1", "https://registry.npmmirror.com/fast-decode-uri-component/-/fast-decode-uri-component-1.0.1.tgz", {}, "sha512-WKgKWg5eUxvRZGwW8FvfbaH7AXSh2cL+3j5fMGzUMCxWBJ3dV3a7Wz8y2f/uQ0e3B6WmodD3oS54jTQ9HVTIIg=="],
+
+    "fflate": ["fflate@0.8.3", "https://registry.npmmirror.com/fflate/-/fflate-0.8.3.tgz", {}, "sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA=="],
 
     "file-type": ["file-type@22.3.0", "https://registry.npmmirror.com/file-type/-/file-type-22.3.0.tgz", { "dependencies": { "@tokenizer/inflate": "^0.6.0", "strtok3": "^10.6.3", "token-types": "^6.1.2", "uint8array-extras": "^1.6.0" } }, "sha512-PrPedgnnWl5bWz3JHgar0QSzRvzeyFh7dZ9JpYOgcPZu4KALS9zw4MMa6qXRYyjeBsAlpaWB2boLuG991+0HIQ=="],
 

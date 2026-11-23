@@ -4,6 +4,7 @@ import { getActiveConfig, loadConfig, setActiveConfig, type AppConfig } from "./
 import { closeDb, getAutoVacuumMode, initDb } from "./db";
 import { listenWithPortRetry, isLocalBindHost } from "./port";
 import { startScheduler, stopAll } from "./scheduler";
+import { setRuntimePort, setShutdownHandler } from "./system";
 
 export interface ServerOptions {
   port?: number;
@@ -62,6 +63,7 @@ export function startServer(options: ServerOptions = {}): ReturnType<typeof Bun.
   })();
 
   const server = result.handle;
+  setRuntimePort(server.port ?? config.port);
   console.log(`Jitter 已启动: ${server.url}`);
   console.log(`监听: ${config.host}:${server.port}`);
   console.log(`数据库: ${config.dbPath}`);
@@ -84,25 +86,31 @@ export function startServer(options: ServerOptions = {}): ReturnType<typeof Bun.
     );
   }
 
+  // One shutdown path for every trigger: Ctrl+C, the tray icon and the
+  // "退出应用" button in the settings page.
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    console.log("\n正在停止 Jitter...");
+    stopAll();
+    server.stop(true);
+    // Give an in-flight abort a moment to write its log before exiting.
+    await Bun.sleep(getActiveConfig().shutdownGraceMs);
+    process.exit(0);
+  };
+  setShutdownHandler(() => {
+    void shutdown();
+  });
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+
   return server;
 }
 
 if (import.meta.main) {
   try {
-    const server = startServer();
-    let stopping = false;
-    const shutdown = async () => {
-      if (stopping) return;
-      stopping = true;
-      console.log("\n正在停止 Jitter...");
-      stopAll();
-      server.stop(true);
-      // Give an in-flight abort a moment to write its log before exiting.
-      await Bun.sleep(getActiveConfig().shutdownGraceMs);
-      process.exit(0);
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+    startServer();
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

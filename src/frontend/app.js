@@ -64,6 +64,26 @@ const els = {
   retentionDays: document.getElementById("retention-days"),
   retentionSave: document.getElementById("retention-save"),
   retentionNote: document.getElementById("retention-note"),
+  retentionDays2: document.getElementById("retention-days-2"),
+  retentionSave2: document.getElementById("retention-save-2"),
+  retentionNote2: document.getElementById("retention-note-2"),
+  openSettings: document.getElementById("open-settings"),
+  settingsDialog: document.getElementById("settings-dialog"),
+  settingsClose: document.getElementById("settings-close"),
+  swVersion: document.getElementById("sw-version"),
+  swMode: document.getElementById("sw-mode"),
+  swUrl: document.getElementById("sw-url"),
+  swInstall: document.getElementById("sw-install"),
+  swData: document.getElementById("sw-data"),
+  swAutostart: document.getElementById("sw-autostart"),
+  swAutostartHint: document.getElementById("sw-autostart-hint"),
+  swCheckUpdate: document.getElementById("sw-check-update"),
+  swQuit: document.getElementById("sw-quit"),
+  swUpdate: document.getElementById("sw-update"),
+  swUpdateSummary: document.getElementById("sw-update-summary"),
+  swUpdateNotes: document.getElementById("sw-update-notes"),
+  swUpdateProgress: document.getElementById("sw-update-progress"),
+  swApplyUpdate: document.getElementById("sw-apply-update"),
   refreshTasks: document.getElementById("refresh-tasks"),
   refreshLogs: document.getElementById("refresh-logs"),
   openCleanup: document.getElementById("open-cleanup"),
@@ -166,6 +186,10 @@ const state = {
   statusTimer: null,
   clientConfig: { ...CLIENT_CONFIG_DEFAULTS },
   metrics: null,
+  /** What the server knows about this installation. */
+  system: null,
+  /** The result of the last update check. */
+  update: null,
   /** True while a task card is being dragged (the list must not repaint). */
   dragging: false,
   cleanup: { preview: null, selected: null, busy: false, view: "loading" },
@@ -913,6 +937,158 @@ async function moveTaskByKeyboard(taskId, delta) {
   next.splice(index, 1);
   next.splice(target, 0, taskId);
   await applyOrder(next);
+}
+
+// ---------------------------------------------------------------------------
+// Settings (software)
+// ---------------------------------------------------------------------------
+
+/**
+ * Load what the server knows about this installation and paint the panel.
+ * Every action reports its own result - nothing here fails silently.
+ */
+async function loadSystemInfo() {
+  try {
+    const info = await api("/api/system");
+    state.system = info;
+    els.swVersion.textContent = info.version ?? "—";
+    els.swMode.textContent = info.compiled
+      ? "已安装的单文件程序"
+      : "开发模式（从源码运行）";
+    els.swUrl.textContent = info.url ?? "—";
+    els.swInstall.textContent = info.install_dir ?? info.binary_path ?? "源码目录";
+    els.swData.textContent = info.db_path ?? "—";
+    els.swAutostart.checked = Boolean(info.autostart);
+    els.swAutostartHint.textContent = info.compiled
+      ? info.autostart
+        ? `已注册：${info.autostart_path}`
+        : `未注册（注册文件：${info.autostart_path}）`
+      : "开机自启只对安装后的程序有效，当前从源码运行。";
+    els.swAutostart.disabled = !info.compiled;
+    return info;
+  } catch (error) {
+    els.swVersion.textContent = `读取失败：${error.message}`;
+    return null;
+  }
+}
+
+async function toggleAutostart(enabled) {
+  els.swAutostart.disabled = true;
+  try {
+    const result = await api("/api/system/autostart", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+    els.swAutostart.checked = Boolean(result.autostart);
+    await loadSystemInfo();
+    setStatus(result.autostart ? "已设置开机自启" : "已取消开机自启");
+  } catch (error) {
+    els.swAutostart.checked = !enabled;
+    setStatus(error.message, true);
+  } finally {
+    els.swAutostart.disabled = false;
+  }
+}
+
+async function checkUpdate() {
+  els.swCheckUpdate.disabled = true;
+  els.swUpdate.hidden = false;
+  els.swUpdateSummary.textContent = "正在检查更新…";
+  els.swUpdateNotes.textContent = "";
+  els.swApplyUpdate.disabled = true;
+  try {
+    const info = await api("/api/update/check");
+    state.update = info;
+    if (info.error && !info.latest) {
+      els.swUpdateSummary.textContent = `检查失败：${info.error}`;
+      return;
+    }
+    if (!info.latest) {
+      els.swUpdateSummary.textContent = "还没有发布任何版本（仓库里暂无 Release）。";
+      return;
+    }
+    if (!info.available) {
+      els.swUpdateSummary.textContent = `当前版本 ${info.current} 已是最新${
+        info.latest ? `（最新发布 ${info.latest}）` : ""
+      }。`;
+      return;
+    }
+    els.swUpdateSummary.textContent = `发现新版本 ${info.latest}（当前 ${info.current}）${
+      info.asset ? `，安装包 ${formatBytes(info.asset.size)}` : ""
+    }`;
+    els.swUpdateNotes.textContent = info.notes ?? "（这个发布没有说明）";
+    els.swApplyUpdate.disabled = false;
+  } catch (error) {
+    els.swUpdateSummary.textContent = `检查失败：${error.message}`;
+  } finally {
+    els.swCheckUpdate.disabled = false;
+  }
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "未知大小";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** Download and install the new release, showing the progress live. */
+async function applyUpdate() {
+  els.swApplyUpdate.disabled = true;
+  els.swUpdateProgress.textContent = "正在准备…";
+  const poller = setInterval(async () => {
+    try {
+      const progress = await api("/api/update/progress");
+      if (progress?.message) els.swUpdateProgress.textContent = progress.message;
+      if (progress?.error) {
+        els.swUpdateProgress.textContent = `失败：${progress.error}`;
+        clearInterval(poller);
+      }
+    } catch {
+      // The server may be restarting; the poll simply stops.
+    }
+  }, 500);
+
+  try {
+    const result = await api("/api/update/apply", {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+      signal: AbortSignal.timeout(600_000),
+    });
+    els.swUpdateProgress.textContent = result.message ?? (result.ok ? "升级完成" : "升级未完成");
+    if (!result.ok) {
+      els.swApplyUpdate.disabled = false;
+      setStatus(result.message ?? "升级失败", true);
+    } else {
+      setStatus("升级完成，正在重启…");
+    }
+  } catch (error) {
+    els.swUpdateProgress.textContent = `升级失败：${error.message}`;
+    els.swApplyUpdate.disabled = false;
+    setStatus(error.message, true);
+  } finally {
+    clearInterval(poller);
+  }
+}
+
+async function quitApp() {
+  if (!window.confirm("退出后 Jitter 会停止运行，页面也会断开。确定退出吗？")) return;
+  els.swQuit.disabled = true;
+  try {
+    await api("/api/quit", { method: "POST" });
+    els.swQuit.disabled = false;
+    setStatus("正在退出…");
+  } catch (error) {
+    els.swQuit.disabled = false;
+    setStatus(error.message, true);
+  }
+}
+
+async function openSettings() {
+  if (!els.settingsDialog.open) els.settingsDialog.showModal();
+  els.swUpdate.hidden = true;
+  els.swUpdateProgress.textContent = "";
+  await loadSystemInfo();
+  await syncRetentionControl();
 }
 
 function renderTaskCard(task) {
@@ -2072,22 +2248,23 @@ async function syncRetentionControl() {
     const config = await api("/api/config");
     const days = Number(config?.logRetentionDays ?? 0);
     state.logRetentionDays = days;
-    const option = [...els.retentionDays.options].find(
-      (entry) => Number(entry.value) === days,
-    );
-    if (option) els.retentionDays.value = option.value;
-    els.retentionNote.textContent =
-      days > 0
-        ? `当前生效：只显示最近 ${days} 天的日志；更早的记录不查询、不渲染，并在后台巡检中被删除（每轮最多 5000 条）。`
-        : "当前生效：不限制保留天数，日志会一直保留（记录仍分页加载，不会一次渲染全部）。";
+    for (const select of [els.retentionDays, els.retentionDays2]) {
+      if (!select) continue;
+      const option = [...select.options].find((entry) => Number(entry.value) === days);
+      if (option) select.value = option.value;
+    }
+    const note = `当前生效：只显示最近 ${days} 天的日志；更早的记录不查询、不渲染，并在后台巡检中被删除（每轮最多 5000 条）。`;
+    const unlimited = "当前生效：不限制保留天数，日志会一直保留（记录仍分页加载，不会一次渲染全部）。";
+    els.retentionNote.textContent = days > 0 ? note : unlimited;
+    els.retentionNote2.textContent = days > 0 ? note : unlimited;
   } catch {
     // The dialog still works without the hint.
   }
 }
 
-async function saveRetention() {
-  const days = Number(els.retentionDays.value);
+async function saveRetention(days) {
   els.retentionSave.disabled = true;
+  els.retentionSave2.disabled = true;
   try {
     await api("/api/settings", {
       method: "POST",
@@ -2104,6 +2281,7 @@ async function saveRetention() {
     setStatus(error.message, true);
   } finally {
     els.retentionSave.disabled = false;
+    els.retentionSave2.disabled = false;
   }
 }
 
@@ -2857,7 +3035,14 @@ function bindEvents() {
   els.loadMore.addEventListener("click", () => loadLogs({ older: true }));
 
   els.openCleanup.addEventListener("click", openCleanup);
-  els.retentionSave.addEventListener("click", () => void saveRetention());
+  els.retentionSave.addEventListener("click", () => void saveRetention(Number(els.retentionDays.value)));
+  els.retentionSave2.addEventListener("click", () => void saveRetention(Number(els.retentionDays2.value)));
+  els.openSettings.addEventListener("click", () => void openSettings());
+  els.settingsClose.addEventListener("click", () => els.settingsDialog.close());
+  els.swAutostart.addEventListener("change", () => void toggleAutostart(els.swAutostart.checked));
+  els.swCheckUpdate.addEventListener("click", () => void checkUpdate());
+  els.swApplyUpdate.addEventListener("click", () => void applyUpdate());
+  els.swQuit.addEventListener("click", () => void quitApp());
   els.cleanupClose.addEventListener("click", closeCleanup);
   els.cleanupCancel.addEventListener("click", closeCleanup);
   els.cleanupExecute.addEventListener("click", executeCleanup);

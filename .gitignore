@@ -8,3 +8,4 @@ dist/
 .playwright-mcp/
 .workbuddy/
 .screenshots/
+rust/target/
