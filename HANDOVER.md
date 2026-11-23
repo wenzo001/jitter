@@ -1,10 +1,10 @@
 # Jitter 交接说明
 
-> 最后更新：2026-11-23 · 对应提交 `c874838`
+> 最后更新：2026-11-23（第二次） · 交接清单五项已全部完成
 
 ## 一、一句话现状
 
-**TypeScript 版是当前可用、功能完整的线上版本；Rust 版已移植完核心（能启动、能服务同一套网页、能执行任务），还差托盘 / 自启 / 升级 / 备份 / CI 五块就能转正发布。**
+**TypeScript 版是参考实现（360 项测试为行为基准）；Rust 版已完成全部桌面集成（托盘 / 自启 / 退出 / 备份恢复 / 自动升级）并接管发布：打 tag 后 GitHub Actions 出三平台 Release 资产，升级逻辑按资产名自替换。**
 
 ---
 
@@ -160,11 +160,13 @@ cargo build ... --jobs 1                # 串行编译
 
 ### 还缺什么（按顺序）
 
-1. **托盘**（`tray-icon` + `muda`，同进程；需要一个图标资源，可先用程序生成的 RGBA 占位）
-2. **Rust 版开机自启 / 退出 / 自动升级**（自启是三平台纯文件写；升级走 GitHub Releases 自替换，Windows 需要「等 PID 的辅助脚本」）
-3. **Rust 版备份 / 导出 / 导入 / 恢复**（与 `src/backup.ts` 行为对齐，用 `VACUUM INTO`）
-4. **GitHub Actions 三平台构建 + Release**：资产名必须是 `jitter-windows-x64.zip`、`jitter-macos-arm64.zip`…（升级逻辑按名字找）
-5. **转正**：README 标注 TS 版为参考实现，发布物切到 Rust
+~~原五项已全部完成~~，现状如下：
+
+1. **托盘** ✅：`jitter-app/src/tray.rs`，`tray-icon` + `muda`（仅 Windows 目标依赖），程序生成 32×32 RGBA 时钟占位图标，菜单「打开界面 / 退出」；独立线程跑 Win32 消息循环。**macOS/Linux 上托盘暂缺**（无原生事件循环可用，以纯服务形态发布），依赖只在 `cfg(windows)` 下引入，不影响三平台 CI。
+2. **开机自启 / 退出 / 自动升级** ✅：`jitter-core/src/system.rs`（三平台纯文件写，与 TS `system.ts` 完全对齐）与 `jitter-core/src/updater.rs`（GitHub Releases 检查 / 下载 / zip 解压 / 自替换，Windows 走「等进程退出的辅助 cmd」）。退出经 `main.rs` 的 `quit_token()` 统一走优雅关停，托盘菜单与设置页共用。
+3. **备份 / 导出 / 导入 / 恢复** ✅：`jitter-core/src/backup.rs` + `api.rs` 全部 `/api/backup/*` 路由（`VACUUM INTO`、路径穿越白名单、SQLite 头校验、恢复前安全快照、恢复后自动重启调度器）。注意 `axum` 的 body 上限已放宽到 256MB 以支持大库导入。
+4. **GitHub Actions** ✅：`.github/workflows/ci.yml`（Rust core 双平台 + TS 参考测试）与 `.github/workflows/release.yml`（打 `v*` tag 触发；先跑两侧测试，再出 `jitter-windows-x64.zip` / `jitter-macos-arm64.zip` / `jitter-macos-x64.zip` / `jitter-linux-x64.zip` / `jitter-linux-arm64.zip` 五个资产并附 `.sha256`，资产名是升级逻辑的契约，不能改）。
+5. **转正** ✅：README 已把 Rust 版标为发布物、TS 版标为参考实现。
 
 ---
 
@@ -191,10 +193,12 @@ Rust 的 `db` 与 `config` 都是全局单例。**涉及它们的测试必须整
 
 - `include_str!` 路径按**文件所在目录**相对：`jitter-app/src/main.rs` 到 `src/frontend` 是 `../../../../src/frontend/`
 - Bun 在本机非交互 shell 下 `node`/`npm` 可能找不到，跑 bun 前 `export PATH=...:<bun 目录>`
+- 本机 bash 的 `cd` 钩子会打印一条 fnm 报错并返回非零码：**`cd X && cmd` 会被短路成失败**，必须写 `cd X; cmd`；cargo 全路径 `/c/Users/lhcz-fu/.cargo/bin/cargo.exe`
 - `(... &)` 起的后台进程会随 shell 退出而死，跨调用要用工具的后台任务
 - Elysia 收 octet-stream 时 body 可能是 `ArrayBuffer` 或 `Uint8Array`，两者都要接；客户端必须显式带 `Content-Type: application/octet-stream`
 - `logs` 的 `*_options` 列是 `NOT NULL`，写 `"{}"` 而不是 `NULL`
 - 后端单线程设计（TS 版）：任何可能长时间阻塞的操作都要分批（保留清理按 5000 行一批）
+- Rust 升级检查的代理回退链：环境变量代理 → Windows 注册表系统代理（Clash 一类写的 `ProxyServer`）→ 直连；本机 curl/reqwest 不带 `-x` 直连不了 GitHub，`git` 走的是 `http.proxy=127.0.0.1:7897`
 
 ---
 
@@ -208,14 +212,16 @@ Rust 的 `db` 与 `config` 都是全局单例。**涉及它们的测试必须整
 
 ---
 
-## 十一、下一步怎么接手
+## 十一、发布怎么打
 
 ```bash
-git clone https://github.com/wenzo001/jitter
-cd jitter
-bun install
-bun test                 # 应 360 项全绿
-cd rust && cargo test -p jitter-core --jobs 1   # 应 198 项全绿
+# 提交 + 推送（CI 会跑两侧测试）
+git push
+
+# 打 tag 触发 Release 工作流（等 Actions 出完资产即可下载）
+git tag v1.0.1 && git push origin v1.0.1
 ```
 
-然后从第八节「还缺什么」的第 1 项开始。托盘是唯一需要新增依赖的部分（`tray-icon`、`muda`、`image`），其余都是照着 TS 版逐个搬。
+升级逻辑按资产名找当前平台的 zip（`jitter-<platform>-<arch>.zip`），所以资产名是契约。**新版本的 tag 必须大于二进制里的 `CARGO_PKG_VERSION`（workspace version）才会被判定为可升级**：发布前把 `rust/Cargo.toml` 的 `workspace.package.version` 与 `package.json` 一起 bump，再打对应 tag。
+
+老用户迁移（例如从 PM2 管理的 TS 版）：停掉旧进程 → 下载 zip 解压运行新版 → 网页「设置 → 备份与恢复」上传旧库备份（或直接用旧 `data/app.db` 的备份）→ 点「恢复」→ 勾选「开机自启」。

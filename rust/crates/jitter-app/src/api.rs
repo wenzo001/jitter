@@ -4,6 +4,7 @@
 
 use crate::scheduler;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -12,12 +13,17 @@ use axum::{Json as AxumJson, Router};
 use serde::Deserialize;
 use serde_json::{json, Map as JsonMap, Value as Json};
 
+use jitter_core::backup;
 use jitter_core::config::get_active_config;
 use jitter_core::curl_parser::{parse_curl_command, CurlParseError};
 use jitter_core::db::{self, NewLogInput, NewTaskInput, RequestParts};
 use jitter_core::executor;
 use jitter_core::metrics::get_metrics_report;
 use jitter_core::schedule::{build_schedule, schedule_of, StoredSchedule};
+use jitter_core::system;
+use jitter_core::updater;
+
+use std::sync::atomic::Ordering;
 
 use crate::ACTUAL_PORT;
 
@@ -585,6 +591,187 @@ async fn app_js() -> Response {
         .into_response()
 }
 
+// ---------------------------------------------------------------------------
+// 系统 / 自启 / 退出
+// ---------------------------------------------------------------------------
+
+fn current_db_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(get_active_config().db_path)
+}
+
+/// 设置页展示的安装信息（版本 / 路径 / 自启状态）。
+async fn system_info() -> Response {
+    let port = ACTUAL_PORT.load(Ordering::Relaxed);
+    let info = system::get_system_info(port, &get_active_config().db_path);
+    AxumJson(info).into_response()
+}
+
+#[derive(Deserialize)]
+struct AutostartBody {
+    enabled: Option<bool>,
+}
+
+async fn set_autostart_handler(AxumJson(body): AxumJson<AutostartBody>) -> Response {
+    let enabled = body.enabled.unwrap_or(false);
+    match system::set_autostart(enabled) {
+        Ok(()) => AxumJson(json!({ "ok": true, "autostart": system::is_autostart_enabled() })).into_response(),
+        Err(message) => bad_request(message),
+    }
+}
+
+/// 退出：托盘菜单与设置页共用。
+async fn quit() -> Response {
+    crate::quit_token().cancel();
+    AxumJson(json!({ "ok": true })).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// 备份 / 导出 / 导入 / 恢复
+// ---------------------------------------------------------------------------
+
+async fn backup_list() -> Response {
+    let db_path = current_db_path();
+    AxumJson(json!({
+        "backups": backup::list_backups(&db_path),
+        "backup_dir": backup::get_backup_dir(&db_path).to_string_lossy(),
+    }))
+    .into_response()
+}
+
+async fn backup_create() -> Response {
+    let db_path = current_db_path();
+    match backup::create_backup(&db_path, backup::now_ms()) {
+        Ok(entry) => AxumJson(json!({ "ok": true, "backup": entry })).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
+    }
+}
+
+async fn backup_download(Query(params): Query<std::collections::HashMap<String, String>>) -> Response {
+    let db_path = current_db_path();
+    let name = params.get("name").cloned().unwrap_or_default();
+    let target = match backup::resolve_backup_path(&db_path, &name) {
+        Ok(target) => target,
+        Err(error) => return bad_request(error.0),
+    };
+    if !target.exists() {
+        return error_response(StatusCode::NOT_FOUND, format!("备份不存在: {name}"));
+    }
+    match tokio::fs::read(&target).await {
+        Ok(bytes) => Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
+            .body(axum::body::Body::from(bytes))
+            .expect("download response"),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn backup_upload(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    let name = params.get("name").cloned().unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return bad_request("缺少文件名（?name=）");
+    }
+    let db_path = current_db_path();
+    match backup::save_uploaded_backup(&db_path, &name, &body) {
+        Ok(entry) => AxumJson(json!({ "ok": true, "backup": entry })).into_response(),
+        Err(error) => bad_request(error.0),
+    }
+}
+
+#[derive(Deserialize)]
+struct BackupNameBody {
+    name: Option<String>,
+}
+
+async fn backup_delete(AxumJson(body): AxumJson<BackupNameBody>) -> Response {
+    let Some(name) = body.name.filter(|value| !value.is_empty()) else {
+        return bad_request("缺少 name");
+    };
+    match backup::delete_backup(&current_db_path(), &name) {
+        Ok(()) => AxumJson(json!({ "ok": true })).into_response(),
+        // TS 版把「不存在」与非法名都映射到 404。
+        Err(error) => error_response(StatusCode::NOT_FOUND, error.0),
+    }
+}
+
+/// 恢复备份：停调度 → 关库 → 换文件 → 重新初始化 → 重启调度。
+/// api 层已经先做好当前状态的安全快照（prepare_restore）。
+async fn backup_restore(AxumJson(body): AxumJson<BackupNameBody>) -> Response {
+    let Some(name) = body.name.filter(|value| !value.is_empty()) else {
+        return bad_request("缺少 name");
+    };
+    let db_path = current_db_path();
+    let db_path_string = get_active_config().db_path.clone();
+    let plan = match backup::prepare_restore(&db_path, &name, backup::now_ms()) {
+        Ok(plan) => plan,
+        Err(error) => return bad_request(error.0),
+    };
+
+    let restored: anyhow::Result<()> = async {
+        scheduler::stop().await;
+        db::close_db();
+        backup::swap_database(&db_path, &plan.backup_path)?;
+        db::init_db(Some(&db_path_string))?;
+        scheduler::start().await?;
+        anyhow::Ok(())
+    }
+    .await;
+
+    match restored {
+        Ok(()) => AxumJson(json!({
+            "ok": true,
+            "message": format!("已恢复 {name}；恢复前的数据保存在 {}", plan.safety_name),
+            "safety_backup": plan.safety_name,
+        }))
+        .into_response(),
+        Err(error) => {
+            tracing::error!("恢复备份失败: {error:#}");
+            // 至少让服务回到可用状态。
+            if db::init_db(Some(&db_path_string)).is_ok() {
+                let _ = scheduler::start().await;
+            }
+            error_response(StatusCode::CONFLICT, error.to_string())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 自动升级
+// ---------------------------------------------------------------------------
+
+async fn update_check() -> Response {
+    let info = updater::check_for_update().await;
+    AxumJson(info).into_response()
+}
+
+async fn update_progress() -> Response {
+    AxumJson(updater::get_update_progress()).into_response()
+}
+
+#[derive(Deserialize)]
+struct UpdateApplyBody {
+    confirm: Option<bool>,
+}
+
+async fn update_apply(AxumJson(body): AxumJson<UpdateApplyBody>) -> Response {
+    if body.confirm != Some(true) {
+        return AxumJson(json!({ "ok": false, "message": "需要确认后才能升级" })).into_response();
+    }
+    let info = updater::check_for_update().await;
+    let (ok, message) = updater::apply_update(&info).await;
+    if ok {
+        // 新二进制已经被启动；本进程让位退出。
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            std::process::exit(0);
+        });
+    }
+    AxumJson(json!({ "ok": ok, "message": message })).into_response()
+}
+
 fn uuid() -> String {
     // 无需外部 uuid crate：时间 + 计数器的伪 UUID 足够（与 TS 的 randomUUID 同为字符串 id）。
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -645,4 +832,18 @@ pub fn build_router() -> Router {
         .route("/api/settings", get(get_settings).post(update_settings))
         .route("/api/logs/cleanup", post(cleanup_logs).get(cleanup_preview))
         .route("/api/test", post(test_request))
+        .route("/api/system", get(system_info))
+        .route("/api/system/autostart", post(set_autostart_handler))
+        .route("/api/quit", post(quit))
+        .route("/api/backup/list", get(backup_list))
+        .route("/api/backup", post(backup_create))
+        .route("/api/backup/download", get(backup_download))
+        .route("/api/backup/upload", post(backup_upload))
+        .route("/api/backup/delete", post(backup_delete))
+        .route("/api/backup/restore", post(backup_restore))
+        .route("/api/update/check", get(update_check))
+        .route("/api/update/progress", get(update_progress))
+        .route("/api/update/apply", post(update_apply))
+        // 备份导入可能携带大文件（数据库快照）。
+        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024))
 }

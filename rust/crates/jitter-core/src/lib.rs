@@ -2,6 +2,7 @@
 //!
 //! 这一层不依赖 HTTP 框架，可以单独测试。
 
+pub mod backup;
 pub mod condition;
 pub mod config;
 pub mod db;
@@ -10,7 +11,9 @@ pub mod guard;
 pub mod metrics;
 pub mod curl_parser;
 pub mod schedule;
+pub mod system;
 pub mod types;
+pub mod updater;
 pub mod window;
 
 pub use condition::{evaluate_condition, validate_condition, ConditionContext, ConditionError};

@@ -22,6 +22,11 @@ url.workspace = true
 percent-encoding.workspace = true
 base64.workspace = true
 http.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# 升级检查在环境代理不可用时回退到 Windows 系统代理（注册表）。
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }

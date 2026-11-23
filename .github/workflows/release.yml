@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Gate: both sides green
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust core tests
+        working-directory: rust
+        run: cargo test -p jitter-core
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun test
+
+  build:
+    name: Build ${{ matrix.platform }}-${{ matrix.arch }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            bin: jitter.exe
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            bin: jitter
+          - os: macos-13
+            platform: macos
+            arch: x64
+            bin: jitter
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            bin: jitter
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            bin: jitter
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Build release binary
+        working-directory: rust
+        run: cargo build --release -p jitter-app
+
+      # 资产名必须保持 jitter-<platform>-<arch>.zip：
+      # 内置升级逻辑按这个名字找当前平台的安装包。
+      - name: Package zip
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp "rust/target/release/${{ matrix.bin }}" "staging/${{ matrix.bin }}"
+          chmod +x "staging/${{ matrix.bin }}" || true
+          asset="jitter-${{ matrix.platform }}-${{ matrix.arch }}.zip"
+          (cd staging && zip "../$asset" .)
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" | tee "$asset.sha256"
+          else
+            shasum -a 256 "$asset" | tee "$asset.sha256"
+          fi
+          mkdir -p dist && mv "$asset" "$asset.sha256" dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

@@ -2,6 +2,25 @@
 
 先测通，再定时：一个本地 curl 测试台 + 调度器。
 
+## 两种实现：Rust（发布物）与 TypeScript（参考实现）
+
+本项目有两条代码线，共用同一套前端（`src/frontend/`）与同一套 API 契约：
+
+- **Rust 版（`rust/`）是发布物**：axum + tokio + rusqlite，单文件原生二进制（debug 13MB / release 约 8–10MB），Windows 版带托盘图标，支持开机自启、网页端数据库备份 / 导入 / 恢复、以及从 GitHub Releases 自动升级。**从 [Releases](https://github.com/wenzo001/jitter/releases) 下载 `jitter-windows-x64.zip`（或对应平台资产）解压运行即可。**
+- **TypeScript 版（`src/`）是参考实现**：Bun + Elysia，功能完整并保持 360 项测试作为行为基准，Rust 版按它逐模块对齐（当前 198+ 项测试）。日常开发两边的测试都要跑：`bun test` 与 `cargo test -p jitter-core`。
+
+```bash
+# Rust 版（发布物）
+cd rust
+cargo run -p jitter-app
+cargo test -p jitter-core
+
+# TypeScript 版（参考实现）
+bun install
+bun run start
+bun test
+```
+
 Jitter 的主线是「测试 curl」和「定时调用 curl」：
 
 - **测试台**：顶栏、curl 输入框旁、每张任务卡上都能打开。把一次正式执行按顺序跑一遍——解析 curl → 本地条件 → 前置判断 → 主请求 → 成功条件 → 通知。每一步都能看到请求、响应、耗时和判定结果；默认不写执行记录、不真发通知。测试过的配置可以一键存成任务，每个任务保留最近 10 次测试记录可回看。
