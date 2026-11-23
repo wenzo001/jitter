@@ -1030,12 +1030,6 @@ async function checkUpdate() {
   }
 }
 
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "未知大小";
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
 /** Download and install the new release, showing the progress live. */
 async function applyUpdate() {
   els.swApplyUpdate.disabled = true;

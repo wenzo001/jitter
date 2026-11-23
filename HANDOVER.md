@@ -1,10 +1,10 @@
 # Jitter 交接说明
 
-> 最后更新：2026-11-23（第二次） · 交接清单五项已全部完成
+> 最后更新：2026-11-23（第三次） · 全面功能对齐审查完成
 
 ## 一、一句话现状
 
-**TypeScript 版是参考实现（360 项测试为行为基准）；Rust 版已完成全部桌面集成（托盘 / 自启 / 退出 / 备份恢复 / 自动升级）并接管发布：打 tag 后 GitHub Actions 出三平台 Release 资产，升级逻辑按资产名自替换。**
+**Rust 版已通过与 TS 版逐接口对齐的完整审查：五步测试台、调度预览、测试留档、日志游标分页、同步立即执行、任务生命周期（停/恢复/暂停）、清理确认链全部补齐；两处自死锁与前端一个致命语法错误已修复。v1.0.1 起可直接替代 Bun 版使用。**
 
 ---
 
@@ -160,7 +160,16 @@ cargo build ... --jobs 1                # 串行编译
 
 ### 还缺什么（按顺序）
 
-~~原五项已全部完成~~，现状如下：
+~~原五项已全部完成~~；v1.0.1 完成了「Rust 与 TS 功能完全对齐」的全面审查，修复内容：
+
+- **补齐的接口**：`POST /api/schedule/preview`（接下来 7 次预览）、`POST /api/test/run`（测试台五步链，移植为 `jitter-core/src/testbench.rs`）、`GET /api/tasks/:id/test-runs` 与 `GET /api/test-runs/:id`（测试留档）、`GET /api/logs/cleanup/preview`。
+- **修复的契约错位**：任务载荷按前端真实形状解析（**扁平的 `notify_enabled`/`notify_curl`/`precheck_*` 字段与文本型 headers**——v1.0.0 误按对象解析，通知与前置判断会被静默丢弃）；`/api/tasks/:id/run` 改为同步返回完整执行结果；任务视图补 `running`/`running_since`/`schedule_error`；日志分页改 `before` 游标 + `has_more` + 保留窗口过滤；`/api/metrics`、`/api/logs/cleanup*` 改为直接返回对象（与 TS 版一致）；`/api/config` 补生效保留天数；全部校验规则对齐（状态码 100–599、名称 200 字、表达式校验、通知必填 curl、前置判断组合规则）。
+- **修复的死锁（两处）**：`scheduler::finish_run` 持锁调 `schedule_new_task`（第一次执行后调度器永久冻结）；`db::get_log_cleanup_preview` 持锁调 `get_log_storage_usage`。
+- **修复的前端致命 bug**：`app.js` 顶层 `formatBytes` 重复声明——ES module 里是 SyntaxError，**整个前端不执行**（TS 版页面同样受害，PM2 里跑的旧进程没 reload 所以没发现）。
+- 任务生命周期对齐：resume 恢复 stopped 任务（状态回 active + 清暂停）、stop 清暂停、暂停对 stopped 任务返回 400。
+- 浏览器实测通过：页面加载/轮询、表单建任务（含通知）、立即执行（同步结果 + 命中 + 真实发通知）、执行记录、设置页（版本/自启/备份/对真实 Release 的升级检查）、测试台五步链、统计条、调度预览。
+
+原来的五项：
 
 1. **托盘** ✅：`jitter-app/src/tray.rs`，`tray-icon` + `muda`（仅 Windows 目标依赖），程序生成 32×32 RGBA 时钟占位图标，菜单「打开界面 / 退出」；独立线程跑 Win32 消息循环。**macOS/Linux 上托盘暂缺**（无原生事件循环可用，以纯服务形态发布），依赖只在 `cfg(windows)` 下引入，不影响三平台 CI。
 2. **开机自启 / 退出 / 自动升级** ✅：`jitter-core/src/system.rs`（三平台纯文件写，与 TS `system.ts` 完全对齐）与 `jitter-core/src/updater.rs`（GitHub Releases 检查 / 下载 / zip 解压 / 自替换，Windows 走「等进程退出的辅助 cmd」）。退出经 `main.rs` 的 `quit_token()` 统一走优雅关停，托盘菜单与设置页共用。
@@ -209,6 +218,7 @@ Rust 的 `db` 与 `config` 都是全局单例。**涉及它们的测试必须整
 3. **改调度语义必须同时跑两边测试**：`bun test` 与 `cargo test -p jitter-core`
 4. **改上传/恢复/清理这类破坏性接口**，先手动跑一遍"备份 → 改数据 → 恢复"回路
 5. 提交前：`bun run typecheck && bun test`，Rust 侧 `cargo test -p jitter-core --jobs 1`
+6. **持锁不要再锁**：`scheduler::state()` 与 `db` 的全局 Mutex 都不可重入——任何"锁内调用另一个会拿锁的函数"都会自死锁（v1.0.0 之前 `finish_run` 和 `get_log_cleanup_preview` 各有一处，症状是接口无响应挂起）。前端是 ES module：**同名顶层函数重复声明是 SyntaxError，整个 app.js 不会执行**（症状是页面纯静态、无任何 /api 请求），改前端后务必在浏览器里真实打开一次页面。
 
 ---
 

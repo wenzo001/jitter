@@ -1225,6 +1225,8 @@ pub struct LogCleanupPreview {
 
 /// 只读预览：cutoff 基于 logs.executed_at（epoch ms）。
 pub fn get_log_cleanup_preview(now: i64) -> Result<LogCleanupPreview, DbError> {
+    // 先在锁外取文件大小：db_path() 也要拿同一把锁，持锁调用会自死锁。
+    let storage = get_log_storage_usage();
     with_db(|conn, _| {
         let totals = count_logs(conn, "", None)?;
         let mut options = Vec::new();
@@ -1245,7 +1247,7 @@ pub fn get_log_cleanup_preview(now: i64) -> Result<LogCleanupPreview, DbError> {
             total_bytes: totals.bytes,
             oldest_executed_at: totals.oldest,
             newest_executed_at: totals.newest,
-            storage: get_log_storage_usage(),
+            storage,
             options,
             all: LogCountRow {
                 count: totals.count,

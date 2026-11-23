@@ -18,6 +18,8 @@ use jitter_core::window::PauseInterval;
 struct Running {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
+    /// 本次执行开始的时刻（ms），任务卡上的「执行中」徽标用它显示时长。
+    started_at: i64,
 }
 
 struct SchedulerState {
@@ -161,16 +163,26 @@ pub fn register_running(task_id: &str, cancel: CancellationToken) {
             // 占位：真正的 JoinHandle 在 spawn 后由 finish 前补齐并不重要，
             // 取消令牌已注册，JoinHandle 的 abort 只影响极端场景。
             handle: tokio::spawn(async {}),
+            started_at: executor::now_ms(),
         },
     );
 }
 
 pub fn finish_run(task_id: &str) {
     RUNNING_NOW.fetch_sub(1, Ordering::SeqCst);
-    let mut guard = state().lock().expect("state");
-    guard.running.remove(task_id);
-    // 执行完成后排下一次。
+    {
+        // 先释放锁再排下一次：schedule_new_task 内部也要拿同一把锁，
+        // 持锁调用会自死锁（std::sync::Mutex 不可重入）。
+        let mut guard = state().lock().expect("state");
+        guard.running.remove(task_id);
+    }
     schedule_new_task(task_id);
+}
+
+/// 正在执行的任务 → 开始时刻（ms）。
+pub fn running_tasks() -> std::collections::HashMap<String, i64> {
+    let guard = state().lock().expect("state");
+    guard.running.iter().map(|(id, running)| (id.clone(), running.started_at)).collect()
 }
 
 pub fn running_count() -> i64 {
@@ -268,6 +280,7 @@ async fn fire(task_id: String, target: i64) {
             Running {
                 cancel,
                 handle,
+                started_at: executor::now_ms(),
             },
         );
     }

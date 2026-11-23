@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod curl_parser;
 pub mod schedule;
 pub mod system;
+pub mod testbench;
 pub mod types;
 pub mod updater;
 pub mod window;

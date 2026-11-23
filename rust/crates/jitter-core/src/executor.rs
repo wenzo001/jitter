@@ -495,6 +495,7 @@ async fn perform_request(
 
 /// 一次性探测请求：与正式执行同一条传输链路，但不写库。
 #[derive(Debug, Clone, serde::Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct TestRequestOutcome {
     pub status: Option<i64>,
     pub headers: Option<JsonMap<String, Json>>,
