@@ -84,6 +84,7 @@ const els = {
   swUpdateNotes: document.getElementById("sw-update-notes"),
   swUpdateProgress: document.getElementById("sw-update-progress"),
   swApplyUpdate: document.getElementById("sw-apply-update"),
+  swUpdateRetry: document.getElementById("sw-update-retry"),
   backupCreate: document.getElementById("backup-create"),
   backupImport: document.getElementById("backup-import"),
   backupFile: document.getElementById("backup-file"),
@@ -998,6 +999,7 @@ async function toggleAutostart(enabled) {
 async function checkUpdate() {
   els.swCheckUpdate.disabled = true;
   els.swUpdate.hidden = false;
+  els.swUpdateRetry.hidden = true;
   els.swUpdateSummary.textContent = "正在检查更新…";
   els.swUpdateNotes.textContent = "";
   els.swApplyUpdate.disabled = true;
@@ -1031,42 +1033,148 @@ async function checkUpdate() {
 }
 
 /** Download and install the new release, showing the progress live. */
+/**
+ * 升级状态机：busy（进行中）/ success（已升级，数据已刷新）/
+ * error（失败，给出原因且「重试」可点）/ idle（未开始）。
+ * 所有非正常状态都必须留下可操作的下一步。
+ */
+function setUpgradeState(view, message) {
+  els.swUpdateProgress.textContent = message ?? "";
+  if (view === "busy") {
+    els.swApplyUpdate.disabled = true;
+    els.swUpdateRetry.hidden = true;
+  } else if (view === "error") {
+    els.swApplyUpdate.disabled = false;
+    els.swUpdateRetry.hidden = false;
+  } else if (view === "success") {
+    els.swApplyUpdate.disabled = true;
+    els.swUpdateRetry.hidden = true;
+  } else {
+    els.swApplyUpdate.disabled = false;
+    els.swUpdateRetry.hidden = true;
+  }
+}
+
+/** 等新版本把服务拉起来（旧版本退出到新版本可访问之间页面是断的）。 */
+async function waitForServerBack(previousVersion) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, attempt < 10 ? 1000 : 2000));
+    setUpgradeState("busy", `等待新版本启动…（已等 ${attempt + 1} 秒）`);
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      const response = await fetch("/api/system", { signal: controller.signal, cache: "no-store" });
+      clearTimeout(timer);
+      if (!response.ok) continue;
+      const info = await response.json();
+      if (info?.version && info.version !== previousVersion) return info;
+      // 版本没变：旧进程可能还没退出，也可能升级没生效——多等几轮再下结论。
+      if (attempt >= 9) return info;
+    } catch {
+      // 服务正在重启：连接失败是预期状态，继续等。
+    }
+  }
+  return null;
+}
+
+/** 升级成功：刷新页面数据，让用户立刻回到正常业务。 */
+async function finishUpgradeSuccess(newVersion, previousVersion) {
+  setUpgradeState("success", `升级成功：v${previousVersion} → v${newVersion}，页面数据已刷新。`);
+  setStatus(`已升级到 v${newVersion}`);
+  await loadSystemInfo();
+  await loadTasks({ silent: true });
+  if (state.selectedTaskId) await loadLogs({ reset: true });
+  void refreshMetrics();
+}
+
 async function applyUpdate() {
-  els.swApplyUpdate.disabled = true;
-  els.swUpdateProgress.textContent = "正在准备…";
+  const previousVersion = state.system?.version ?? "?";
+  const expected = state.update?.latest ?? null;
+  setUpgradeState("busy", "正在准备…");
+
+  // 先确认服务可达，避免"点了没反应"。
+  try {
+    await api("/api/health", { signal: AbortSignal.timeout(3000) });
+  } catch {
+    setUpgradeState("error", "无法连接 Jitter 服务。请确认程序仍在运行（看托盘图标），然后点「重试」。");
+    return;
+  }
+
+  // 已经是目标版本：上次其实升级成功了（比如页面没感知到），直接收尾。
+  try {
+    const info = await api("/api/system", { signal: AbortSignal.timeout(3000) });
+    if (expected && info?.version === expected) {
+      finishUpgradeSuccess(info.version, previousVersion);
+      return;
+    }
+  } catch {
+    // 继续按当前版本降级处理。
+  }
+
   const poller = setInterval(async () => {
     try {
-      const progress = await api("/api/update/progress");
-      if (progress?.message) els.swUpdateProgress.textContent = progress.message;
+      const progress = await api("/api/update/progress", { signal: AbortSignal.timeout(2000) });
       if (progress?.error) {
-        els.swUpdateProgress.textContent = `失败：${progress.error}`;
-        clearInterval(poller);
+        setUpgradeState("busy", `出错：${progress.error}（正在收尾…）`);
+      } else if (progress?.message) {
+        setUpgradeState("busy", progress.message);
       }
     } catch {
-      // The server may be restarting; the poll simply stops.
+      // 正在重启时请求失败是预期行为。
     }
   }, 500);
 
+  let result = null;
+  let requestError = null;
   try {
-    const result = await api("/api/update/apply", {
+    result = await api("/api/update/apply", {
       method: "POST",
       body: JSON.stringify({ confirm: true }),
       signal: AbortSignal.timeout(600_000),
     });
-    els.swUpdateProgress.textContent = result.message ?? (result.ok ? "升级完成" : "升级未完成");
-    if (!result.ok) {
-      els.swApplyUpdate.disabled = false;
-      setStatus(result.message ?? "升级失败", true);
-    } else {
-      setStatus("升级完成，正在重启…");
-    }
   } catch (error) {
-    els.swUpdateProgress.textContent = `升级失败：${error.message}`;
-    els.swApplyUpdate.disabled = false;
-    setStatus(error.message, true);
+    requestError = error;
   } finally {
     clearInterval(poller);
   }
+
+  if (requestError) {
+    // 请求中断：多半是旧进程在替换后退出了。等新版本起来再判断。
+    setUpgradeState("busy", "升级请求中断，正在等待服务恢复…");
+    const back = await waitForServerBack(previousVersion);
+    if (back && (!expected || back.version === expected)) {
+      await finishUpgradeSuccess(back.version, previousVersion);
+    } else if (back) {
+      setUpgradeState("error", `服务已恢复，但版本仍是 ${back.version}（期望 ${expected ?? "新版本"}）。可能替换未生效，点「重试」重新下载安装。`);
+    } else {
+      setUpgradeState("error", `升级失败：${requestError.message}。若托盘图标仍在，可点「重试」；否则请手动重新打开程序。`);
+    }
+    return;
+  }
+
+  if (!result?.ok) {
+    const message = result?.message ?? "未知原因";
+    if (message.includes("最新版本")) {
+      setUpgradeState("idle", message);
+      els.swApplyUpdate.disabled = true;
+    } else {
+      setUpgradeState("error", `升级失败：${message}。当前版本仍可正常使用，可点「重试」。`);
+    }
+    return;
+  }
+
+  // 升级包已就位、正在重启：等新版本起来并核对版本号。
+  setUpgradeState("busy", result.message ?? "升级完成，正在重启…");
+  const back = await waitForServerBack(previousVersion);
+  if (!back) {
+    setUpgradeState("error", "等待 60 秒仍未恢复。请检查托盘图标是否在运行、端口是否被占用；可点「重试」再次检测，或手动重新打开程序。");
+    return;
+  }
+  if (expected && back.version !== expected) {
+    setUpgradeState("error", `服务已恢复，但版本仍是 ${back.version}（期望 ${expected}）。可能替换未生效，点「重试」或手动重新下载安装包。`);
+    return;
+  }
+  await finishUpgradeSuccess(back.version, previousVersion);
 }
 
 async function quitApp() {
@@ -3204,6 +3312,7 @@ function bindEvents() {
   els.swAutostart.addEventListener("change", () => void toggleAutostart(els.swAutostart.checked));
   els.swCheckUpdate.addEventListener("click", () => void checkUpdate());
   els.swApplyUpdate.addEventListener("click", () => void applyUpdate());
+  els.swUpdateRetry.addEventListener("click", () => void applyUpdate());
   els.swQuit.addEventListener("click", () => void quitApp());
   els.backupCreate.addEventListener("click", () => void createBackupSnapshot());
   els.backupImport.addEventListener("click", pickBackupFile);
