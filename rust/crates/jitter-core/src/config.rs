@@ -1,0 +1,176 @@
+//! 运行配置：默认值、配置文件合并、运行时单例。
+//!
+//! 与 TypeScript 版（`src/config.ts`）字段一致（camelCase 的 JSON 键）。
+
+use std::path::{Path, PathBuf};
+use serde_json::Value as Json;
+use std::sync::{Mutex, OnceLock, RwLock};
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AppConfig {
+    pub port: u16,
+    pub host: String,
+    pub auto_increment_port: bool,
+    pub port_max_attempts: u32,
+    pub db_path: String,
+    pub log_body_limit_bytes: usize,
+    pub logs_page_size: i64,
+    pub logs_max_page_size: i64,
+    /// 0 表示不设超时（界面会提示）。
+    pub request_timeout_ms: i64,
+    pub log_retention_days: i64,
+    pub log_max_rows_per_task: i64,
+    pub shutdown_grace_ms: i64,
+    pub default_window_minutes: i64,
+    pub poll_interval_ms: i64,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        AppConfig {
+            port: 3000,
+            host: "127.0.0.1".to_string(),
+            auto_increment_port: true,
+            port_max_attempts: 100,
+            db_path: "data/app.db".to_string(),
+            log_body_limit_bytes: 100 * 1024,
+            logs_page_size: 50,
+            logs_max_page_size: 200,
+            request_timeout_ms: 30_000,
+            log_retention_days: 30,
+            log_max_rows_per_task: 0,
+            shutdown_grace_ms: 150,
+            default_window_minutes: 5,
+            poll_interval_ms: 4000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigError(pub String);
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// 运行中的配置（宿主进程启动时设置）。
+static ACTIVE_CONFIG: OnceLock<RwLock<AppConfig>> = OnceLock::new();
+
+fn slot() -> &'static RwLock<AppConfig> {
+    ACTIVE_CONFIG.get_or_init(|| RwLock::new(AppConfig::default()))
+}
+
+pub fn get_active_config() -> AppConfig {
+    slot().read().expect("config lock").clone()
+}
+
+pub fn set_active_config(config: AppConfig) {
+    *slot().write().expect("config lock") = config;
+}
+
+/// 从 JSON 合并配置；非法值直接报错（与 TS 的 validateFileConfig 等价的最小实现）。
+pub fn merge_config(base: &AppConfig, file: &Json) -> Result<AppConfig, ConfigError> {
+    let mut merged = base.clone();
+    let Some(fields) = file.as_object() else {
+        return Err(ConfigError("配置文件根节点必须是 JSON 对象".into()));
+    };
+    for (key, value) in fields {
+        match key.as_str() {
+            "port" => merged.port = value.as_u64().unwrap_or(merged.port as u64) as u16,
+            "host" => {
+                if let Some(text) = value.as_str() {
+                    merged.host = text.to_string();
+                }
+            }
+            "autoIncrementPort" => merged.auto_increment_port = value.as_bool().unwrap_or(true),
+            "portMaxAttempts" => {
+                merged.port_max_attempts = value.as_u64().unwrap_or(100) as u32;
+            }
+            "dbPath" => {
+                if let Some(text) = value.as_str() {
+                    merged.db_path = text.to_string();
+                }
+            }
+            "logBodyLimitBytes" => {
+                merged.log_body_limit_bytes = value.as_u64().unwrap_or(102400) as usize;
+            }
+            "logsPageSize" => merged.logs_page_size = value.as_i64().unwrap_or(50),
+            "logsMaxPageSize" => merged.logs_max_page_size = value.as_i64().unwrap_or(200),
+            "requestTimeoutMs" => merged.request_timeout_ms = value.as_i64().unwrap_or(30_000),
+            "logRetentionDays" => merged.log_retention_days = value.as_i64().unwrap_or(30),
+            "logMaxRowsPerTask" => merged.log_max_rows_per_task = value.as_i64().unwrap_or(0),
+            "shutdownGraceMs" => merged.shutdown_grace_ms = value.as_i64().unwrap_or(150),
+            "defaultWindowMinutes" => merged.default_window_minutes = value.as_i64().unwrap_or(5),
+            "pollIntervalMs" => merged.poll_interval_ms = value.as_i64().unwrap_or(4000),
+            _ => {}
+        }
+    }
+    if merged.logs_max_page_size < merged.logs_page_size {
+        return Err(ConfigError("配置项 \"logsMaxPageSize\" 不能小于 \"logsPageSize\"".into()));
+    }
+    Ok(merged)
+}
+
+/// 从磁盘读配置文件（不存在返回默认值）。
+pub fn load_config_from(path: &Path) -> Result<Option<AppConfig>, ConfigError> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    let value: Json = serde_json::from_str(&text)
+        .map_err(|error| ConfigError(format!("配置文件不是合法 JSON: {error}")))?;
+    Ok(Some(merge_config(&AppConfig::default(), &value)?))
+}
+
+/// 配置文件查找顺序：显式 > 环境变量 > 启动目录 > 可执行文件旁。
+pub fn find_config_path(explicit: Option<&str>) -> Option<PathBuf> {
+    if let Some(value) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(value));
+    }
+    if let Ok(value) = std::env::var("JITTER_CONFIG") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    let mut candidates: Vec<PathBuf> = vec![
+        PathBuf::from("jitter.config.json"),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("jitter.config.json")))
+            .unwrap_or_default(),
+    ];
+    candidates.retain(|candidate| candidate.as_os_str().len() > 0 && candidate.exists());
+    candidates.into_iter().next()
+}
+
+/// 线程安全地更新配置的辅助（测试用）。
+pub struct ConfigGuard {
+    previous: AppConfig,
+}
+
+impl ConfigGuard {
+    pub fn set(config: AppConfig) -> ConfigGuard {
+        let previous = get_active_config();
+        set_active_config(config);
+        ConfigGuard { previous }
+    }
+}
+
+impl Drop for ConfigGuard {
+    fn drop(&mut self) {
+        set_active_config(self.previous.clone());
+    }
+}
+
+// 供测试检查合并逻辑。
+#[allow(dead_code)]
+fn _assert_json_merge(value: &Json) -> Result<AppConfig, ConfigError> {
+    merge_config(&AppConfig::default(), value)
+}
