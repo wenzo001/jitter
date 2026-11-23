@@ -6,8 +6,6 @@
 
 #[cfg(windows)]
 mod imp {
-    use std::fs;
-    use std::path::PathBuf;
     use std::process::Command;
 
     use muda::{ContextMenu, IsMenuItem, Menu, MenuEvent, MenuItem, CheckMenuItem};
@@ -85,34 +83,26 @@ mod imp {
         }
     }
 
-    /// 重启：等本进程优雅退出（释放端口）后再拉起新实例。
+    /// 重启：直接拉起新实例（带启动延迟等本进程释放端口与单实例锁），
+    /// 不走 cmd 辅助脚本（避免弹控制台窗口）。
     fn restart_app(quit: &CancellationToken) {
         let Some(current) = jitter_core::system::get_binary_path() else {
             quit.cancel();
             return;
         };
-        let helper = current.parent().map(PathBuf::from).unwrap_or_default().join("jitter-restart.cmd");
-        let script = format!(
-            "@echo off\r\n\
-ping -n 4 127.0.0.1 >nul\r\n\
-start \"\" \"{}\"\r\n\
-del \"%~f0\" >nul 2>&1\r\n",
-            current.display()
-        );
-        if let Err(error) = fs::write(&helper, script) {
-            tracing::warn!("写重启辅助脚本失败: {error}");
-            quit.cancel();
-            return;
-        }
-        let mut command = Command::new("cmd");
-        command.args(["/c", &helper.to_string_lossy()]);
+        let mut command = Command::new(&current);
+        command
+            .env("JITTER_STARTUP_DELAY_MS", "1500")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            let _ = command.creation_flags(0x0000_0008); // DETACHED_PROCESS
+            command.creation_flags(0x0000_0008); // DETACHED_PROCESS
         }
         if let Err(error) = command.spawn() {
-            tracing::warn!("启动重启脚本失败: {error}");
+            tracing::warn!("启动重启实例失败: {error}");
         }
         quit.cancel();
     }

@@ -158,6 +158,20 @@ async fn run() -> anyhow::Result<()> {
     apply_env_overrides(&mut config);
     jitter_core::config::set_active_config(config.clone());
 
+    // 升级/重启后新进程的启动延迟：等旧进程退出，释放端口与单实例锁。
+    let delay = std::env::var("JITTER_STARTUP_DELAY_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay.min(10_000))).await;
+    }
+
+    // 清理上次升级遗留的 .old（旧进程已退出，文件锁已释放）。
+    if let Some(exe) = jitter_core::system::get_binary_path() {
+        let _ = std::fs::remove_file(format!("{}.old", exe.to_string_lossy()));
+    }
+
     // 单实例：已有一个在跑时，只打开它的页面然后退出（避免两个调度器
     // 同时跑同一套任务）。
     if !acquire_single_instance() {

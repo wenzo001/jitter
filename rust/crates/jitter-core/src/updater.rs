@@ -380,35 +380,20 @@ async fn download_and_extract(asset: &UpdateAsset) -> Result<PathBuf, String> {
 /// 替换正在运行的二进制并启动新版本。
 fn install(new_binary: &std::path::Path) -> Result<(), String> {
     let current = system::get_binary_path().ok_or_else(|| "当前不是安装版本，无法自动升级".to_string())?;
-    let dir = current.parent().map(PathBuf::from).unwrap_or_default();
 
     set_progress("installing", 100, "正在替换程序文件…");
 
-    if std::env::consts::OS == "windows" {
-        // 运行中的 exe 不能被覆盖：辅助脚本等本进程消失后再搬文件并启动。
-        let helper = dir.join("jitter-update.cmd");
-        let script = format!(
-            "@echo off\r\n\
-ping -n 4 127.0.0.1 >nul\r\n\
-move /Y \"{}\" \"{}\" >nul\r\n\
-start \"\" \"{}\"\r\n\
-del \"%~f0\" >nul 2>&1\r\n",
-            new_binary.display(),
-            current.display(),
-            current.display()
-        );
-        fs::write(&helper, script).map_err(|error| error.to_string())?;
-        let mut command = Command::new("cmd");
-        command.args(["/c", &helper.to_string_lossy()]);
-        spawn_detached(command)?;
-        return Ok(());
-    }
-
-    // macOS / Linux：就地换文件再启动新二进制。
+    // Windows 允许给运行中的 exe 改名（但不允许覆盖/删除）：
+    // 旧程序改名 .old → 新文件就位 → 直接拉起新进程。
+    // 全程不需要 cmd 辅助脚本（不会弹控制台窗口），失败可回滚。
     let backup = PathBuf::from(format!("{}.old", current.to_string_lossy()));
-    let _ = fs::remove_file(&backup);
-    fs::rename(&current, &backup).map_err(|error| error.to_string())?;
-    fs::copy(new_binary, &current).map_err(|error| error.to_string())?;
+    let _ = fs::remove_file(&backup); // 上次升级的残留；被锁住就忽略
+    fs::rename(&current, &backup).map_err(|error| format!("无法重命名当前程序（可能被占用）：{error}"))?;
+    if let Err(error) = fs::copy(new_binary, &current) {
+        // 回滚：把旧程序改回去，让当前进程继续可用。
+        let _ = fs::rename(&backup, &current);
+        return Err(format!("替换程序文件失败：{error}"));
+    }
 
     #[cfg(unix)]
     {
@@ -423,8 +408,18 @@ del \"%~f0\" >nul 2>&1\r\n",
         let _ = Command::new("codesign").args(["--force", "--sign", "-"]).arg(&current).status();
     }
 
-    spawn_detached(Command::new(current.to_string_lossy().to_string()))?;
-    Ok(())
+    spawn_successor(&current)
+}
+
+/// 拉起新版本：带 1.5 秒启动延迟，等旧进程退出、释放端口和单实例锁。
+fn spawn_successor(exe: &std::path::Path) -> Result<(), String> {
+    let mut command = Command::new(exe);
+    command
+        .env("JITTER_STARTUP_DELAY_MS", "1500")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    spawn_detached(command)
 }
 
 /// 启动一个比本进程活得久的进程。
