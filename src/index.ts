@@ -5,6 +5,8 @@ import { closeDb, getAutoVacuumMode, initDb } from "./db";
 import { listenWithPortRetry, isLocalBindHost } from "./port";
 import { startScheduler, stopAll } from "./scheduler";
 import { setRuntimePort, setShutdownHandler } from "./system";
+import { swapDatabase } from "./backup";
+import { setRestoreHandler as registerRestoreHandler } from "./restore";
 
 export interface ServerOptions {
   port?: number;
@@ -102,6 +104,31 @@ export function startServer(options: ServerOptions = {}): ReturnType<typeof Bun.
   setShutdownHandler(() => {
     void shutdown();
   });
+
+  // 恢复备份：停调度 → 关库 → 换文件 → 重新初始化 → 重启调度。
+  // 恢复前 api.ts 已经做好当前状态的安全快照，数据不会被悄悄丢弃。
+  registerRestoreHandler((backupPath) => {
+    try {
+      stopAll();
+      closeDb();
+      swapDatabase(config.dbPath, backupPath);
+      initDb(config.dbPath);
+      startScheduler();
+      console.log(`数据库已从备份恢复: ${backupPath}`);
+      return true;
+    } catch (error) {
+      console.error("恢复备份失败:", error);
+      // 至少要让服务回到可用状态。
+      try {
+        initDb(config.dbPath);
+        startScheduler();
+      } catch {
+        process.exit(1);
+      }
+      return false;
+    }
+  });
+
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
 

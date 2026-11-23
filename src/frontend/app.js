@@ -84,6 +84,11 @@ const els = {
   swUpdateNotes: document.getElementById("sw-update-notes"),
   swUpdateProgress: document.getElementById("sw-update-progress"),
   swApplyUpdate: document.getElementById("sw-apply-update"),
+  backupCreate: document.getElementById("backup-create"),
+  backupImport: document.getElementById("backup-import"),
+  backupFile: document.getElementById("backup-file"),
+  backupDirHint: document.getElementById("backup-dir-hint"),
+  backupList: document.getElementById("backup-list"),
   refreshTasks: document.getElementById("refresh-tasks"),
   refreshLogs: document.getElementById("refresh-logs"),
   openCleanup: document.getElementById("open-cleanup"),
@@ -1083,12 +1088,172 @@ async function quitApp() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Settings: backup / export / import / restore
+// ---------------------------------------------------------------------------
+
+function formatBackupSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "—";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatBackupTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (entry) => String(entry).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+async function loadBackups() {
+  try {
+    const data = await api("/api/backup/list");
+    els.backupDirHint.textContent = `备份目录：${data.backup_dir}`;
+    renderBackupList(data.backups ?? []);
+  } catch (error) {
+    els.backupDirHint.textContent = `备份列表读取失败：${error.message}`;
+    renderBackupList([]);
+  }
+}
+
+function renderBackupList(entries) {
+  if (!entries.length) {
+    els.backupList.replaceChildren(
+      Object.assign(document.createElement("div"), {
+        className: "backup-empty",
+        textContent: "还没有备份。点「新建备份」生成一份完整快照（任务、日志、设置都在内）。",
+      }),
+    );
+    return;
+  }
+  const items = entries.map((entry) => {
+    const row = document.createElement("div");
+    row.className = "backup-item";
+    const meta = document.createElement("div");
+    meta.className = "backup-meta";
+    const name = document.createElement("div");
+    name.className = "backup-name";
+    name.textContent = entry.name;
+    const size = document.createElement("div");
+    size.className = "backup-size";
+    size.textContent = `${formatBackupSize(entry.size)} · ${formatBackupTime(entry.modified_at)}`;
+    meta.append(name, size);
+
+    const actions = document.createElement("div");
+    actions.className = "backup-actions";
+    const download = document.createElement("button");
+    download.className = "btn";
+    download.type = "button";
+    download.textContent = "下载";
+    download.addEventListener("click", () => {
+      // 直接用浏览器下载（带上名字参数）。
+      window.open(`/api/backup/download?name=${encodeURIComponent(entry.name)}`, "_blank");
+    });
+    const restore = document.createElement("button");
+    restore.className = "btn";
+    restore.type = "button";
+    restore.textContent = "恢复";
+    restore.addEventListener("click", () => void restoreBackup(entry.name));
+    const remove = document.createElement("button");
+    remove.className = "btn";
+    remove.type = "button";
+    remove.textContent = "删除";
+    remove.addEventListener("click", () => void deleteBackup(entry.name));
+    actions.append(download, restore, remove);
+    row.append(meta, actions);
+    return row;
+  });
+  els.backupList.replaceChildren(...items);
+}
+
+async function createBackupSnapshot() {
+  els.backupCreate.disabled = true;
+  els.backupCreate.textContent = "备份中…";
+  try {
+    const data = await api("/api/backup", { method: "POST", signal: AbortSignal.timeout(120_000) });
+    setStatus(`备份已创建：${data.backup.name}`);
+    await loadBackups();
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    els.backupCreate.disabled = false;
+    els.backupCreate.textContent = "新建备份";
+  }
+}
+
+async function restoreBackup(name) {
+  if (
+    !window.confirm(
+      `确定用备份「${name}」恢复吗？\n当前的数据会被覆盖（恢复前会自动另存一份当前状态的安全备份）。`,
+    )
+  ) {
+    return;
+  }
+  els.backupRestoreBusy = true;
+  setStatus("正在恢复备份…");
+  try {
+    const data = await api("/api/backup/restore", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+      signal: AbortSignal.timeout(180_000),
+    });
+    setStatus(data.message ?? "已恢复");
+    // 数据回来了：全部重新加载。
+    await refreshAll();
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    els.backupRestoreBusy = false;
+    await loadBackups();
+  }
+}
+
+async function deleteBackup(name) {
+  if (!window.confirm(`删除备份「${name}」？此操作不可恢复。`)) return;
+  try {
+    await api("/api/backup/delete", { method: "POST", body: JSON.stringify({ name }) });
+    setStatus(`已删除备份 ${name}`);
+    await loadBackups();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+function pickBackupFile() {
+  els.backupFile.value = "";
+  els.backupFile.click();
+}
+
+async function uploadBackupFile(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  if (!file.name.endsWith(".db")) {
+    setStatus("请选择 .db 备份文件", true);
+    return;
+  }
+  setStatus(`正在上传 ${file.name}…`);
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const data = await api(`/api/backup/upload?name=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      body: bytes,
+      headers: { "Content-Type": "application/octet-stream" },
+      signal: AbortSignal.timeout(300_000),
+    });
+    setStatus(`已导入备份 ${data.backup.name}，可在列表里点「恢复」`);
+    await loadBackups();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
 async function openSettings() {
   if (!els.settingsDialog.open) els.settingsDialog.showModal();
   els.swUpdate.hidden = true;
   els.swUpdateProgress.textContent = "";
   await loadSystemInfo();
   await syncRetentionControl();
+  await loadBackups();
 }
 
 function renderTaskCard(task) {
@@ -3043,6 +3208,9 @@ function bindEvents() {
   els.swCheckUpdate.addEventListener("click", () => void checkUpdate());
   els.swApplyUpdate.addEventListener("click", () => void applyUpdate());
   els.swQuit.addEventListener("click", () => void quitApp());
+  els.backupCreate.addEventListener("click", () => void createBackupSnapshot());
+  els.backupImport.addEventListener("click", pickBackupFile);
+  els.backupFile.addEventListener("change", (event) => void uploadBackupFile(event));
   els.cleanupClose.addEventListener("click", closeCleanup);
   els.cleanupCancel.addEventListener("click", closeCleanup);
   els.cleanupExecute.addEventListener("click", executeCleanup);

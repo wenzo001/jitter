@@ -31,6 +31,23 @@ import {
   setAutostart,
 } from "./system";
 import { applyUpdate, checkForUpdate, getUpdateProgress } from "./updater";
+import {
+  backupExists,
+  createBackup,
+  deleteBackup,
+  getBackupDir,
+  listBackups,
+  prepareRestore,
+  resolveBackupPath,
+  saveUploadedBackup,
+} from "./backup";
+import { requestRestore } from "./restore";
+
+function readString(body: unknown, key: string): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : null;
+}
 import { buildSchedule, previewSchedule, scheduleOf, ScheduleError } from "./schedule";
 import { runTestBench, type TestBenchInput } from "./testbench";
 import {
@@ -459,6 +476,110 @@ export const app = new Elysia()
   .post("/api/quit", () => {
     const stopped = requestShutdown();
     return stopped ? { ok: true } : { ok: false, error: "当前环境不支持退出" };
+  })
+  // -------------------------------------------------------------------------
+  // 备份 / 导出 / 导入
+  // -------------------------------------------------------------------------
+  /** List the backups on disk. */
+  .get("/api/backup/list", () => {
+    const dbPath = getActiveConfig().dbPath;
+    return {
+      backups: listBackups(dbPath),
+      backup_dir: getBackupDir(dbPath),
+    };
+  })
+  /** Create a snapshot right now (safe on a live database, merges the WAL). */
+  .post("/api/backup", () => {
+    const entry = createBackup(getActiveConfig().dbPath);
+    return { ok: true, backup: entry };
+  })
+  /** Download a backup file (the export button). */
+  .get("/api/backup/download", ({ query, set }) => {
+    const dbPath = getActiveConfig().dbPath;
+    const name = String(query.name ?? "");
+    let path: string;
+    try {
+      path = resolveBackupPath(dbPath, name);
+    } catch (error) {
+      set.status = 400;
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+    if (!backupExists(dbPath, name)) {
+      set.status = 404;
+      return { error: `备份不存在: ${name}` };
+    }
+    set.headers["Content-Type"] = "application/octet-stream";
+    set.headers["Content-Disposition"] = `attachment; filename="${name}"`;
+    return Bun.file(path);
+  })
+  /** Upload a backup file (the import button; restoring stays a second step). */
+  .post("/api/backup/upload", ({ body, query, set }) => {
+    // Elysia 对 octet-stream 可能给出 ArrayBuffer 或 Uint8Array，两者都收。
+    const bytes =
+      body instanceof Uint8Array
+        ? body
+        : body instanceof ArrayBuffer
+          ? new Uint8Array(body)
+          : null;
+    if (!bytes) {
+      set.status = 400;
+      return { error: "请求体必须是原始字节流" };
+    }
+    const name = String(query.name ?? "").trim();
+    if (!name) {
+      set.status = 400;
+      return { error: "缺少文件名（?name=）" };
+    }
+    try {
+      const entry = saveUploadedBackup(getActiveConfig().dbPath, name, bytes);
+      return { ok: true, backup: entry };
+    } catch (error) {
+      set.status = 400;
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  })
+  /** Delete one backup file. */
+  .post("/api/backup/delete", ({ body, set }) => {
+    const name = readString(body, "name");
+    if (!name) {
+      set.status = 400;
+      return { error: "缺少 name" };
+    }
+    try {
+      deleteBackup(getActiveConfig().dbPath, name);
+      return { ok: true };
+    } catch (error) {
+      set.status = 404;
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  })
+  /**
+   * Restore a backup. A safety snapshot of the CURRENT database is taken
+   * first, so restoring never destroys the present data.
+   */
+  .post("/api/backup/restore", ({ body, set }) => {
+    const name = readString(body, "name");
+    if (!name) {
+      set.status = 400;
+      return { error: "缺少 name" };
+    }
+    try {
+      const dbPath = getActiveConfig().dbPath;
+      const plan = prepareRestore(dbPath, name);
+      const restored = requestRestore(plan.backup_path);
+      if (!restored) {
+        set.status = 409;
+        return { error: "当前环境不支持恢复（数据库由外部进程管理）" };
+      }
+      return {
+        ok: true,
+        message: `已恢复 ${name}；恢复前的数据保存在 ${plan.safety_name}`,
+        safety_backup: plan.safety_name,
+      };
+    } catch (error) {
+      set.status = 400;
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
   })
   /**
    * Is there a newer release? The page shows its notes and lets the user
