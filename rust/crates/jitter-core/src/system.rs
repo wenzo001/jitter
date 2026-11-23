@@ -100,13 +100,17 @@ pub fn build_autostart_entry(
 ) -> AutostartEntry {
     let home_path = Path::new(home);
 
-    let binary_path_buf = Path::new(binary_path);
     // 自启条目必须固定工作目录：否则从 Startup 目录启动时，相对的
     // data/app.db 会落到别处，和手动启动的数据分叉。
-    let work_dir = binary_path_buf
-        .parent()
-        .map(|dir| dir.to_string_lossy().to_string())
-        .unwrap_or_default();
+    // 这里按「目标平台」的路径语义取目录（纯函数要能跨平台模拟）。
+    let work_dir = if platform == "win32" {
+        binary_path
+            .rfind(['\\', '/'])
+            .map(|idx| binary_path[..idx].to_string())
+            .unwrap_or_default()
+    } else {
+        binary_path.rfind('/').map(|idx| binary_path[..idx].to_string()).unwrap_or_default()
+    };
 
     if platform == "win32" {
         let app_data = app_data
