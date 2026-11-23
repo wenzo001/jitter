@@ -271,6 +271,23 @@ fn restore_env_proxy(snapshot: &BTreeMap<String, String>) {
     }
 }
 
+
+/// 展开错误链：reqwest 的顶层信息只有「error sending request」，
+/// 底层原因（DNS / TCP / TLS / 代理）在 source 里，逐层拼上便于排查。
+fn error_text(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && !message.contains(&text) {
+            message.push_str("：");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
 fn build_client(options: &RequestOptions) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder();
     if matches!(options.redirect, Some(crate::types::RedirectMode::Manual)) {
@@ -429,10 +446,10 @@ async fn perform_request(
             result = async {
                 match timeout_duration {
                     Some(duration) => match tokio::time::timeout(duration, attempt).await {
-                        Ok(inner) => inner.map_err(|error| error.to_string()),
+                        Ok(inner) => inner.map_err(|error| error_text(&error)),
                         Err(_) => Err(format!("timeout after {} ms", active_timeout_ms)),
                     },
-                    None => attempt.await.map_err(|error| error.to_string()),
+                    None => attempt.await.map_err(|error| error_text(&error)),
                 }
             } => result,
         };
@@ -454,10 +471,11 @@ async fn perform_request(
                 }
                 caught = Some(message.clone());
                 let caller_aborted = cancel.is_cancelled();
-                let timed_out = !caller_aborted && looks_like_timeout(&message);
-                // 只有「环境代理探测超时且响应头未到」才回退直连。
+                // 环境代理是 best-effort：只要第一轮没拿到响应就回退直连——
+                // 代理被关掉时是「连接被拒」而不是超时，同样必须回退
+                //（与 TS 版 withProxyFallback 对齐；用户显式 -x 的代理不走这里）。
                 let can_fallback =
-                    round == 0 && has_env_proxy && !caller_aborted && timed_out && status.is_none();
+                    round == 0 && has_env_proxy && !caller_aborted && status.is_none();
                 if can_fallback {
                     clear_env_proxy();
                     did_proxy_fallback = true;

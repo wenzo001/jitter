@@ -168,15 +168,13 @@ pub fn register_running(task_id: &str, cancel: CancellationToken) {
     );
 }
 
+/// 一次执行完成：只清理运行状态，**不**排下一次。
+/// 定时触发的调用方负责用 schedule_next_after（跑完后的下一次，
+/// daily 会排明天，不会在同一窗口内连环重跑）；手动执行不影响计划。
 pub fn finish_run(task_id: &str) {
     RUNNING_NOW.fetch_sub(1, Ordering::SeqCst);
-    {
-        // 先释放锁再排下一次：schedule_new_task 内部也要拿同一把锁，
-        // 持锁调用会自死锁（std::sync::Mutex 不可重入）。
-        let mut guard = state().lock().expect("state");
-        guard.running.remove(task_id);
-    }
-    schedule_new_task(task_id);
+    let mut guard = state().lock().expect("state");
+    guard.running.remove(task_id);
 }
 
 /// 正在执行的任务 → 开始时刻（ms）。
@@ -276,6 +274,8 @@ async fn fire(task_id: String, target: i64) {
     let handle = tokio::spawn(async move {
         let _ = executor::execute_task_run(&task, &run_cancel, jitter_core::types::RunSource::Scheduled).await;
         finish_run(&run_task_id);
+        // daily：本次窗口已用掉，排明天；interval：锚定到网格防漂移。
+        schedule_next_after(&task, &spec, target);
     });
     {
         let mut guard = state().lock().expect("state");

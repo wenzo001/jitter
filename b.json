@@ -1,0 +1,1 @@
+{"name": "fail-once", "schedule_kind": "daily", "window_start": "20:36", "window_end": "20:38", "curl": "curl http://127.0.0.1:9/dead"}
