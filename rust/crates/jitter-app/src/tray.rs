@@ -107,7 +107,9 @@ mod imp {
         quit.cancel();
     }
 
-    /// 程序生成的图标：靛蓝→紫罗兰渐变圆角方块 + 白色表盘（4× 超采样抗锯齿）。
+    /// 程序生成的图标：紫→蓝渐变圆角方块 + 白色圆环（4× 超采样抗锯齿）。
+    /// 与 web/src/assets/favicon.svg、exe 资源图标（build.rs 嵌入 jitter.ico）
+    /// 为同一设计，三处保持统一。
     fn icon_rgba(size: u32) -> Vec<u8> {
         const SS: u32 = 4; // 每像素 4×4 子采样
         let b = (size * SS) as f64;
@@ -118,10 +120,6 @@ mod imp {
         let half = b / 2.0 - margin;
         let ring_r = b * 0.295;
         let ring_w = b * 0.078;
-        let hand_w = b * 0.062;
-        // 12 点方向的时针 + 约 2 点方向的分针。
-        let hand_up = (cx, cy - ring_r * 0.60);
-        let hand_right = (cx + ring_r * 0.46, cy - ring_r * 0.14);
         let mut out = vec![0u8; (size * size * 4) as usize];
         for py in 0..size {
             for px in 0..size {
@@ -133,20 +131,16 @@ mod imp {
                         if sd_round_rect(x, y, cx, cy, half, corner) > 0.0 {
                             continue;
                         }
-                        // 顶部靛蓝 → 底部紫罗兰的竖向渐变。
+                        // 顶部紫罗兰 #B44DFF → 底部蓝 #5F7BFF 的竖向渐变。
                         let t = (y / b).clamp(0.0, 1.0);
                         let mut color = (
-                            108.0 + (150.0 - 108.0) * t,
-                            120.0 + (86.0 - 120.0) * t,
-                            255.0,
+                            180.0 + (95.0 - 180.0) * t,
+                            77.0 + (123.0 - 77.0) * t,
+                            255.0 + (255.0 - 255.0) * t,
                         );
                         let d_center = dist(x, y, cx, cy);
                         let d_ring = (d_center - ring_r).abs() - ring_w / 2.0;
-                        let d_hand = seg_dist(x, y, cx, cy, hand_up.0, hand_up.1)
-                            .min(seg_dist(x, y, cx, cy, hand_right.0, hand_right.1))
-                            - hand_w / 2.0;
-                        let d_dot = d_center - hand_w * 0.62;
-                        if d_ring <= 0.0 || d_hand <= 0.0 || d_dot <= 0.0 {
+                        if d_ring <= 0.0 {
                             color = (255.0, 255.0, 255.0);
                         }
                         r += color.0;
@@ -176,19 +170,6 @@ mod imp {
         let dy = (y - cy).abs() - (half - corner);
         let outside = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt();
         outside + dx.max(dy).min(0.0) - corner
-    }
-
-    /// 点到线段的距离（圆头笔画）。
-    fn seg_dist(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
-        let vx = bx - ax;
-        let vy = by - ay;
-        let len2 = vx * vx + vy * vy;
-        let t = if len2 <= f64::EPSILON {
-            0.0
-        } else {
-            (((px - ax) * vx + (py - ay) * vy) / len2).clamp(0.0, 1.0)
-        };
-        dist(px, py, ax + vx * t, ay + vy * t)
     }
 
     fn open_browser(port: u16) {

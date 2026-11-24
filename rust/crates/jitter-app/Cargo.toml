@@ -20,6 +20,9 @@ axum.workspace = true
 include_dir.workspace = true
 mime_guess.workspace = true
 
+[build-dependencies]
+winresource = "0.1"
+
 [[bin]]
 name = "jitter"
 path = "src/main.rs"
