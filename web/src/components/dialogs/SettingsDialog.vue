@@ -183,11 +183,25 @@ async function refreshHoliday() {
 
 const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 
+function parseLocalDate(text: string): Date | null {
+  const [year, month, day] = text.split('-').map(Number)
+  if (!year || !month || !day) return null
+  return new Date(year, month - 1, day)
+}
+
 /** `YYYY-MM-DD` → 周几（数据都是本地日期，用字符串解析避免时区偏差）。 */
 function weekdayOf(date: string): string {
-  const [year, month, day] = date.split('-').map(Number)
-  if (!year || !month || !day) return ''
-  return WEEKDAY_LABELS[new Date(year, month - 1, day).getDay()]
+  const parsed = parseLocalDate(date)
+  return parsed ? WEEKDAY_LABELS[parsed.getDay()] : ''
+}
+
+function nextDayOf(date: string): string | null {
+  const parsed = parseLocalDate(date)
+  if (!parsed) return null
+  parsed.setDate(parsed.getDate() + 1)
+  const month = String(parsed.getMonth() + 1).padStart(2, '0')
+  const day = String(parsed.getDate()).padStart(2, '0')
+  return `${parsed.getFullYear()}-${month}-${day}`
 }
 
 function offDaysOf(year: HolidayYearMeta): HolidayDay[] {
@@ -196,6 +210,34 @@ function offDaysOf(year: HolidayYearMeta): HolidayDay[] {
 
 function makeupDaysOf(year: HolidayYearMeta): HolidayDay[] {
   return year.days.filter((entry) => !entry.isOffDay)
+}
+
+interface HolidayRange {
+  name: string
+  start: string
+  end: string
+  count: number
+}
+
+/** 把连续的放假日期按节日合并成区间，例如「春节 02-15~02-21（7 天）」。 */
+function offDayRanges(year: HolidayYearMeta): HolidayRange[] {
+  const ranges: HolidayRange[] = []
+  for (const day of offDaysOf(year)) {
+    const last = ranges[ranges.length - 1]
+    if (last && last.name === day.name && nextDayOf(last.end) === day.date) {
+      last.end = day.date
+      last.count += 1
+    } else {
+      ranges.push({ name: day.name, start: day.date, end: day.date, count: 1 })
+    }
+  }
+  return ranges
+}
+
+function rangeLabel(range: HolidayRange): string {
+  const start = `${range.start.slice(5)} ${weekdayOf(range.start)}`
+  if (range.start === range.end) return start
+  return `${start} ~ ${range.end.slice(5)} ${weekdayOf(range.end)}`
 }
 
 /* ---------------- 备份 ---------------- */
@@ -697,27 +739,37 @@ function openCleanup() {
     @update:open="holidayDetail = null"
   >
     <template v-if="holidayDetail">
+      <div class="holiday-detail-summary">
+        <span>全年放假 <strong>{{ offDaysOf(holidayDetail).length }}</strong> 天</span>
+        <span>调休上班 <strong>{{ makeupDaysOf(holidayDetail).length }}</strong> 天</span>
+      </div>
+
       <div class="holiday-detail-block">
-        <div class="holiday-detail-title">
-          放假 {{ offDaysOf(holidayDetail).length }} 天
-        </div>
-        <div v-for="day in offDaysOf(holidayDetail)" :key="day.date" class="holiday-detail-row">
-          <span class="holiday-detail-date">{{ day.date }} {{ weekdayOf(day.date) }}</span>
-          <span class="muted">{{ day.name }}</span>
+        <div class="holiday-detail-title">法定节假日放假</div>
+        <div
+          v-for="range in offDayRanges(holidayDetail)"
+          :key="`${range.name}-${range.start}`"
+          class="holiday-detail-row"
+        >
+          <span class="holiday-detail-date">{{ rangeLabel(range) }}</span>
+          <span class="muted">{{ range.name }} · {{ range.count }} 天</span>
         </div>
       </div>
+
       <div class="holiday-detail-block">
-        <div class="holiday-detail-title">
-          调休上班 {{ makeupDaysOf(holidayDetail).length }} 天（这些日子算工作日）
-        </div>
+        <div class="holiday-detail-title">调休上班</div>
         <div v-if="!makeupDaysOf(holidayDetail).length" class="muted" style="font-size: 12.5px">
           这一年没有调休上班日。
         </div>
         <div v-for="day in makeupDaysOf(holidayDetail)" :key="day.date" class="holiday-detail-row">
           <span class="holiday-detail-date">{{ day.date }} {{ weekdayOf(day.date) }}</span>
-          <span class="muted">{{ day.name || '调休上班' }}</span>
+          <span class="muted">{{ day.name ? `${day.name}调休上班` : '调休上班' }}</span>
         </div>
       </div>
+
+      <p class="field-hint" style="margin: 12px 0 0">
+        「仅工作日 / 仅休息日」按这里的数据判断：调休上班日即使落在周末也算工作日，放假日期即使落在工作日也算休息日。
+      </p>
     </template>
   </a-modal>
 </template>
