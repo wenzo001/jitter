@@ -86,6 +86,9 @@ const els = {
   swApplyUpdate: document.getElementById("sw-apply-update"),
   appVersion: document.getElementById("app-version"),
   skipTlsVerify: document.getElementById("skip-tls-verify"),
+  upgradeBanner: document.getElementById("upgrade-banner"),
+  upgradeBannerText: document.getElementById("upgrade-banner-text"),
+  upgradeBannerClose: document.getElementById("upgrade-banner-close"),
   swUpdateRetry: document.getElementById("sw-update-retry"),
   backupCreate: document.getElementById("backup-create"),
   backupImport: document.getElementById("backup-import"),
@@ -1037,6 +1040,67 @@ async function checkUpdate() {
 }
 
 /** Download and install the new release, showing the progress live. */
+
+// ---------------------------------------------------------------------------
+// 升级结果横幅：顶部明显提示，刷新后仍保留直到用户点「知道了」。
+// ---------------------------------------------------------------------------
+
+const UPGRADE_PENDING_KEY = "jitter-upgrade-pending";
+
+function readUpgradePending() {
+  try {
+    const raw = localStorage.getItem(UPGRADE_PENDING_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeUpgradePending(value) {
+  try {
+    if (value) localStorage.setItem(UPGRADE_PENDING_KEY, JSON.stringify(value));
+    else localStorage.removeItem(UPGRADE_PENDING_KEY);
+  } catch {
+    // 隐私模式等场景写不了：横幅只在本页生效。
+  }
+}
+
+function showUpgradeBanner(kind, text) {
+  if (!els.upgradeBanner) return;
+  els.upgradeBanner.classList.toggle("is-success", kind === "success");
+  els.upgradeBanner.classList.toggle("is-error", kind === "error");
+  els.upgradeBannerText.textContent = text;
+  els.upgradeBanner.hidden = false;
+}
+
+function hideUpgradeBanner() {
+  if (!els.upgradeBanner) return;
+  els.upgradeBanner.hidden = true;
+  writeUpgradePending(null);
+}
+
+/** 页面加载时收尾「升级进行中/已完成」的记录（覆盖升级中刷新页面的情况）。 */
+function settleUpgradeBanner() {
+  const pending = readUpgradePending();
+  const current = state.system?.version;
+  if (!pending || !current) return;
+  if (pending.expected && current === pending.expected) {
+    showUpgradeBanner(
+      "success",
+      `升级成功：已从 v${pending.from ?? "?"} 升级到 v${current}，页面数据已同步。`,
+    );
+    // 保留记录，用户点「知道了」再清除。
+    return;
+  }
+  if (pending.expected && current !== pending.expected) {
+    // 版本没变：升级没生效（或用户回滚），留下说明给用户，不再当成功。
+    showUpgradeBanner(
+      "error",
+      `升级未完成：当前仍是 v${current}（目标是 v${pending.expected}）。请在「设置 → 检查更新」里重试。`,
+    );
+  }
+}
+
 /**
  * 升级状态机：busy（进行中）/ success（已升级，数据已刷新）/
  * error（失败，给出原因且「重试」可点）/ idle（未开始）。
@@ -1084,6 +1148,8 @@ async function waitForServerBack(previousVersion) {
 /** 升级成功：刷新页面数据，让用户立刻回到正常业务。 */
 async function finishUpgradeSuccess(newVersion, previousVersion) {
   setUpgradeState("success", `升级成功：v${previousVersion} → v${newVersion}，页面数据已刷新。`);
+  writeUpgradePending({ from: previousVersion, expected: newVersion, at: Date.now() });
+  showUpgradeBanner("success", `升级成功：已从 v${previousVersion} 升级到 v${newVersion}，页面数据已同步。`);
   setStatus(`已升级到 v${newVersion}`);
   await loadSystemInfo();
   await loadTasks({ silent: true });
@@ -1114,6 +1180,8 @@ async function applyUpdate() {
   } catch {
     // 继续按当前版本降级处理。
   }
+
+  writeUpgradePending({ from: previousVersion, expected, at: Date.now() });
 
   const poller = setInterval(async () => {
     try {
@@ -1159,10 +1227,12 @@ async function applyUpdate() {
   if (!result?.ok) {
     const message = result?.message ?? "未知原因";
     if (message.includes("最新版本")) {
+      writeUpgradePending(null);
       setUpgradeState("idle", message);
       els.swApplyUpdate.disabled = true;
     } else {
       setUpgradeState("error", `升级失败：${message}。当前版本仍可正常使用，可点「重试」。`);
+      showUpgradeBanner("error", `升级失败：${message}。当前版本不受影响，可在「设置」里重试。`);
     }
     return;
   }
@@ -3382,6 +3452,7 @@ function bindEvents() {
   });
   els.swApplyUpdate.addEventListener("click", () => void applyUpdate());
   els.swUpdateRetry.addEventListener("click", () => void applyUpdate());
+  els.upgradeBannerClose.addEventListener("click", hideUpgradeBanner);
   if (els.skipTlsVerify) {
     els.skipTlsVerify.addEventListener("change", () => void saveSkipTlsVerify(els.skipTlsVerify.checked));
   }
@@ -3563,7 +3634,8 @@ async function init() {
   await loadClientConfig();
   setDefaultWindow();
   await loadTasks();
-  void loadSystemInfo();
+  await loadSystemInfo();
+  settleUpgradeBanner();
   void refreshMetrics();
   if (state.selectedTaskId) {
     await loadLogs({ reset: true });
