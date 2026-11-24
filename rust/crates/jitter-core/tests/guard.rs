@@ -1,7 +1,8 @@
 use chrono::{Local, NaiveDate, TimeZone};
 use jitter_core::guard::{
-    evaluate_local_guard, has_local_conditions, local_guard_of, parse_time_range, parse_weekdays,
-    LocalGuardConfig,
+    evaluate_host_guard, evaluate_local_guard, has_host_conditions, has_local_conditions,
+    ip_matches_any, ip_matches_pattern, local_guard_of, parse_ip_pattern, parse_time_range,
+    parse_weekdays, HostGuardConfig, LocalGuardConfig,
 };
 use serde_json::json;
 
@@ -15,7 +16,11 @@ fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
         .timestamp_millis()
 }
 
-fn guard_with(weekdays: Option<Vec<i64>>, time_start: Option<&str>, time_end: Option<&str>) -> LocalGuardConfig {
+fn guard_with(
+    weekdays: Option<Vec<i64>>,
+    time_start: Option<&str>,
+    time_end: Option<&str>,
+) -> LocalGuardConfig {
     LocalGuardConfig {
         weekdays,
         time_start: time_start.map(str::to_string),
@@ -29,9 +34,18 @@ fn guard() -> LocalGuardConfig {
 
 #[test]
 fn parse_weekdays_accepts_arrays_and_comma_strings() {
-    assert_eq!(parse_weekdays(Some(&json!([1, 2, 3]))).expect("ok"), Some(vec![1, 2, 3]));
-    assert_eq!(parse_weekdays(Some(&json!("3,1,3"))).expect("ok"), Some(vec![1, 3]));
-    assert_eq!(parse_weekdays(Some(&json!("0,6"))).expect("ok"), Some(vec![0, 6]));
+    assert_eq!(
+        parse_weekdays(Some(&json!([1, 2, 3]))).expect("ok"),
+        Some(vec![1, 2, 3])
+    );
+    assert_eq!(
+        parse_weekdays(Some(&json!("3,1,3"))).expect("ok"),
+        Some(vec![1, 3])
+    );
+    assert_eq!(
+        parse_weekdays(Some(&json!("0,6"))).expect("ok"),
+        Some(vec![0, 6])
+    );
 }
 
 #[test]
@@ -50,7 +64,10 @@ fn parse_weekdays_rejects_out_of_range_or_non_numeric_values() {
 
 #[test]
 fn both_empty_time_range_means_no_restriction() {
-    assert_eq!(parse_time_range(Some(&json!("")), Some(&json!(""))).expect("ok"), None);
+    assert_eq!(
+        parse_time_range(Some(&json!("")), Some(&json!(""))).expect("ok"),
+        None
+    );
     assert_eq!(parse_time_range(None, None).expect("ok"), None);
 }
 
@@ -82,7 +99,10 @@ fn local_guard_of_reads_a_valid_configuration() {
 fn local_guard_of_treats_junk_as_no_restriction() {
     let config = local_guard_of(Some("x,9"), Some("bad"), Some("18:00"));
     assert_eq!(config, LocalGuardConfig::default());
-    assert_eq!(local_guard_of(None, None, None), LocalGuardConfig::default());
+    assert_eq!(
+        local_guard_of(None, None, None),
+        LocalGuardConfig::default()
+    );
 }
 
 #[test]
@@ -96,8 +116,17 @@ fn no_conditions_always_passes() {
 #[test]
 fn weekday_allow_list_passes_and_blocks() {
     // 2026-01-05 是周一。
-    assert!(evaluate_local_guard(&guard_with(Some(vec![1]), None, None), at(2026, 1, 5, 10, 30)).passed);
-    let blocked = evaluate_local_guard(&guard_with(Some(vec![2, 3]), None, None), at(2026, 1, 5, 10, 30));
+    assert!(
+        evaluate_local_guard(
+            &guard_with(Some(vec![1]), None, None),
+            at(2026, 1, 5, 10, 30)
+        )
+        .passed
+    );
+    let blocked = evaluate_local_guard(
+        &guard_with(Some(vec![2, 3]), None, None),
+        at(2026, 1, 5, 10, 30),
+    );
     assert!(!blocked.passed);
     assert!(blocked.reason.contains("周一"));
 }
@@ -139,4 +168,71 @@ fn both_conditions_must_pass() {
     assert!(evaluate_local_guard(&config, at(2026, 1, 5, 10, 0)).passed);
     assert!(!evaluate_local_guard(&config, at(2026, 1, 5, 20, 0)).passed);
     assert!(!evaluate_local_guard(&config, at(2026, 1, 6, 10, 0)).passed);
+}
+
+#[test]
+fn ip_pattern_accepts_wildcards_and_multiple_groups() {
+    assert_eq!(
+        parse_ip_pattern(Some(&json!(" 10.1.* , 192.168.* "))).expect("ok"),
+        Some("10.1.*,192.168.*".to_string())
+    );
+    assert_eq!(parse_ip_pattern(Some(&json!(""))).expect("ok"), None);
+    assert_eq!(parse_ip_pattern(None).expect("ok"), None);
+    assert!(parse_ip_pattern(Some(&json!("10.1.abc"))).is_err());
+    assert!(parse_ip_pattern(Some(&json!("..."))).is_err());
+}
+
+#[test]
+fn ip_wildcard_matches_digits_and_dots() {
+    assert!(ip_matches_pattern("10.1.22.5", "10.1.*"));
+    assert!(ip_matches_pattern("10.1.22.5", "10.*"));
+    assert!(ip_matches_pattern("10.1.22.5", "*"));
+    assert!(ip_matches_pattern("10.1.22.5", "*.5"));
+    assert!(!ip_matches_pattern("10.1.22.5", "10.2.*"));
+    assert!(!ip_matches_pattern("10.1.22.5", "10.1.22"));
+    assert!(ip_matches_any("192.168.1.9", "10.1.*,192.168.*"));
+    assert!(!ip_matches_any("172.16.0.2", "10.1.*,192.168.*"));
+}
+
+#[test]
+fn host_guard_requires_ac_power_when_configured() {
+    let config = HostGuardConfig {
+        require_ac_power: true,
+        ip_pattern: None,
+    };
+    assert!(has_host_conditions(&config));
+    assert!(evaluate_host_guard(&config, Some(true), &[]).passed);
+    let battery = evaluate_host_guard(&config, Some(false), &[]);
+    assert!(!battery.passed);
+    assert!(battery.reason.contains("电池"));
+    let unknown = evaluate_host_guard(&config, None, &[]);
+    assert!(!unknown.passed);
+    assert!(unknown.reason.contains("无法获取电源状态"));
+}
+
+#[test]
+fn host_guard_checks_any_local_ip_against_pattern() {
+    let config = HostGuardConfig {
+        require_ac_power: false,
+        ip_pattern: Some("10.1.*".to_string()),
+    };
+    let ips = vec!["172.30.228.138".to_string(), "10.1.22.5".to_string()];
+    let verdict = evaluate_host_guard(&config, Some(true), &ips);
+    assert!(verdict.passed);
+    assert!(verdict.reason.contains("10.1.22.5"));
+
+    let blocked = evaluate_host_guard(&config, Some(true), &["192.168.1.2".to_string()]);
+    assert!(!blocked.passed);
+    assert!(blocked.reason.contains("不匹配"));
+
+    let empty = evaluate_host_guard(&config, Some(true), &[]);
+    assert!(!empty.passed);
+    assert!(empty.reason.contains("未能读取本机 IP"));
+}
+
+#[test]
+fn host_guard_without_configuration_always_passes() {
+    let config = HostGuardConfig::default();
+    assert!(!has_host_conditions(&config));
+    assert!(evaluate_host_guard(&config, None, &[]).passed);
 }

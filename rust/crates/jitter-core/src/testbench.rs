@@ -7,9 +7,17 @@
 use serde::Serialize;
 use serde_json::Value as Json;
 
-use crate::curl_parser::{parse_curl_command, normalize_structured, StructuredRequestInput, CurlParseError};
-use crate::executor::{self, evaluate_precheck, evaluate_success, execute_test_request, TestRequestOutcome};
-use crate::guard::{self, evaluate_local_guard, has_local_conditions, LocalGuardConfig};
+use crate::curl_parser::{
+    normalize_structured, parse_curl_command, CurlParseError, StructuredRequestInput,
+};
+use crate::executor::{
+    self, evaluate_precheck, evaluate_success, execute_test_request, TestRequestOutcome,
+};
+use crate::guard::{
+    self, evaluate_host_guard, evaluate_local_guard, has_host_conditions, has_local_conditions,
+    HostGuardConfig, LocalGuardConfig,
+};
+use crate::host;
 use crate::types::{JsonMap, RequestSpec};
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,7 +62,10 @@ pub struct TestBenchResult {
 }
 
 fn is_truthy(value: &Json) -> bool {
-    matches!(value, Json::Bool(true)) || value == &Json::from(1) || value == &Json::from("1") || value == &Json::from("true")
+    matches!(value, Json::Bool(true))
+        || value == &Json::from(1)
+        || value == &Json::from("1")
+        || value == &Json::from("true")
 }
 
 fn pick_str<'a>(input: &'a Json, key: &str) -> Option<&'a str> {
@@ -88,15 +99,26 @@ fn headers_input(value: Option<&Json>) -> Result<Option<HeadersInput>, String> {
 /// 从前缀构造请求（`""` = 主请求，`"precheck"` / `"notify"`）。
 /// curl 文本优先于结构化字段，与任务表单一致。
 fn build_request(prefix: &str, input: &Json) -> Result<RequestSpec, String> {
-    let curl_key = if prefix.is_empty() { "curl" } else { &format!("{prefix}_curl") };
+    let curl_key = if prefix.is_empty() {
+        "curl"
+    } else {
+        &format!("{prefix}_curl")
+    };
     if let Some(raw) = pick_str(input, curl_key) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             return parse_curl_command(trimmed).map_err(|error| error.0);
         }
     }
-    let url_key = if prefix.is_empty() { "url" } else { &format!("{prefix}_url") };
-    let url = pick_str(input, url_key).unwrap_or_default().trim().to_string();
+    let url_key = if prefix.is_empty() {
+        "url"
+    } else {
+        &format!("{prefix}_url")
+    };
+    let url = pick_str(input, url_key)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if url.is_empty() {
         return Err(match prefix {
             "" => "请粘贴 curl 命令".to_string(),
@@ -104,9 +126,21 @@ fn build_request(prefix: &str, input: &Json) -> Result<RequestSpec, String> {
             _ => "请填写通知 curl".to_string(),
         });
     }
-    let method_key = if prefix.is_empty() { "method" } else { &format!("{prefix}_method") };
-    let headers_key = if prefix.is_empty() { "headers" } else { &format!("{prefix}_headers") };
-    let body_key = if prefix.is_empty() { "body" } else { &format!("{prefix}_body") };
+    let method_key = if prefix.is_empty() {
+        "method"
+    } else {
+        &format!("{prefix}_method")
+    };
+    let headers_key = if prefix.is_empty() {
+        "headers"
+    } else {
+        &format!("{prefix}_headers")
+    };
+    let body_key = if prefix.is_empty() {
+        "body"
+    } else {
+        &format!("{prefix}_body")
+    };
 
     let headers = headers_input(input.get(headers_key))?;
     let (header_map, header_lines) = match headers {
@@ -156,7 +190,12 @@ fn describe_transport(request: &RequestSpec) -> String {
     if extras.is_empty() {
         format!("{} {}", request.method, request.url)
     } else {
-        format!("{} {}（{}）", request.method, request.url, extras.join("，"))
+        format!(
+            "{} {}（{}）",
+            request.method,
+            request.url,
+            extras.join("，")
+        )
     }
 }
 
@@ -165,7 +204,9 @@ fn parse_expect_status(value: Option<&Json>) -> Result<Option<i64>, String> {
     if value.is_null() || value == &Json::from("") {
         return Ok(None);
     }
-    let parsed = value.as_i64().or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()));
+    let parsed = value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()));
     match parsed {
         Some(status) if (100..=599).contains(&status) => Ok(Some(status)),
         _ => Err("期望状态码必须是 100–599 的整数".to_string()),
@@ -180,7 +221,11 @@ fn parse_expect_body(value: Option<&Json>) -> Result<Option<String>, String> {
     let Some(text) = value.as_str() else {
         return Err("期望响应体必须是字符串".to_string());
     };
-    Ok(if text.is_empty() { None } else { Some(text.to_string()) })
+    Ok(if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    })
 }
 
 fn parse_expect_expr(value: Option<&Json>, label: &str) -> Result<Option<String>, String> {
@@ -192,7 +237,11 @@ fn parse_expect_expr(value: Option<&Json>, label: &str) -> Result<Option<String>
         return Err(format!("{label}必须是字符串"));
     };
     let trimmed = text.trim();
-    Ok(if trimmed.is_empty() { None } else { Some(trimmed.to_string()) })
+    Ok(if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    })
 }
 
 fn failure_step(key: &str, title: &str, detail: String, started: i64) -> TestStep {
@@ -207,15 +256,28 @@ fn failure_step(key: &str, title: &str, detail: String, started: i64) -> TestSte
     }
 }
 
-fn response_step(key: &str, title: &str, request: &RequestSpec, response: &TestRequestOutcome, started: i64) -> TestStep {
+fn response_step(
+    key: &str,
+    title: &str,
+    request: &RequestSpec,
+    response: &TestRequestOutcome,
+    started: i64,
+) -> TestStep {
     let failed = response.error.is_some() || response.aborted || response.status.is_none();
     let detail = if let Some(status) = response.status {
-        let truncated = if response.truncated { " · 响应体已截断" } else { "" };
+        let truncated = if response.truncated {
+            " · 响应体已截断"
+        } else {
+            ""
+        };
         format!("HTTP {status} · {} ms{truncated}", response.duration_ms)
     } else if response.aborted {
         "请求已中断".to_string()
     } else {
-        response.error.clone().unwrap_or_else(|| "没有拿到响应".to_string())
+        response
+            .error
+            .clone()
+            .unwrap_or_else(|| "没有拿到响应".to_string())
     };
     TestStep {
         key: key.to_string(),
@@ -262,7 +324,12 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
             spec
         }
         Err(message) => {
-            steps.push(failure_step("parse", "解析 curl", message.clone(), parse_started));
+            steps.push(failure_step(
+                "parse",
+                "解析 curl",
+                message.clone(),
+                parse_started,
+            ));
             summary.error = Some(message);
             summary.total_ms = (executor::now_ms() - started_at).max(0);
             return TestBenchResult { steps, summary };
@@ -286,7 +353,8 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         Ok(value) => value,
         Err(message) => return assert_input_failed(steps, summary, started_at, message),
     };
-    let precheck_expr = match parse_expect_expr(input.get("precheck_expr"), "前置条件表达式") {
+    let precheck_expr = match parse_expect_expr(input.get("precheck_expr"), "前置条件表达式")
+    {
         Ok(value) => value,
         Err(message) => return assert_input_failed(steps, summary, started_at, message),
     };
@@ -295,7 +363,10 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         Ok(value) => value,
         Err(error) => return assert_input_failed(steps, summary, started_at, error.0),
     };
-    let time_range = match guard::parse_time_range(input.get("precheck_time_start"), input.get("precheck_time_end")) {
+    let time_range = match guard::parse_time_range(
+        input.get("precheck_time_start"),
+        input.get("precheck_time_end"),
+    ) {
         Ok(value) => value,
         Err(error) => return assert_input_failed(steps, summary, started_at, error.0),
     };
@@ -304,14 +375,41 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         time_start: time_range.as_ref().map(|(start, _)| start.clone()),
         time_end: time_range.as_ref().map(|(_, end)| end.clone()),
     };
+    let require_ac = input
+        .get("precheck_require_ac")
+        .map(is_truthy)
+        .unwrap_or(false);
+    let ip_pattern = match guard::parse_ip_pattern(input.get("precheck_ip_pattern")) {
+        Ok(value) => value,
+        Err(error) => return assert_input_failed(steps, summary, started_at, error.0),
+    };
+    let host_config = HostGuardConfig {
+        require_ac_power: require_ac,
+        ip_pattern,
+    };
 
-    let guard_on = input.get("precheck_enabled").map(is_truthy).unwrap_or(false);
-    let precheck_curl = pick_str(input, "precheck_curl").map(str::trim).filter(|text| !text.is_empty());
+    let guard_on = input
+        .get("precheck_enabled")
+        .map(is_truthy)
+        .unwrap_or(false);
+    let precheck_curl = pick_str(input, "precheck_curl")
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
     let has_guard_curl = precheck_curl.is_some();
 
-    if guard_on && !has_local_conditions(&local_config) && !has_guard_curl {
-        let message = "已启用执行前判断，但没有配置本地条件或前置 curl".to_string();
-        steps.push(failure_step("precheck", "执行前判断", message.clone(), executor::now_ms()));
+    if guard_on
+        && !has_local_conditions(&local_config)
+        && !has_host_conditions(&host_config)
+        && !has_guard_curl
+    {
+        let message =
+            "已启用执行前判断，但没有配置本地条件、电源 / 本机 IP 条件或前置 curl".to_string();
+        steps.push(failure_step(
+            "precheck",
+            "执行前判断",
+            message.clone(),
+            executor::now_ms(),
+        ));
         summary.error = Some(message);
         summary.total_ms = (executor::now_ms() - started_at).max(0);
         return TestBenchResult { steps, summary };
@@ -338,12 +436,46 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         }
     }
 
+    if guard_on && has_host_conditions(&host_config) {
+        let host_started = executor::now_ms();
+        let environment = host::current_environment();
+        let verdict = evaluate_host_guard(
+            &host_config,
+            environment.on_ac_power,
+            &environment.local_ips,
+        );
+        steps.push(TestStep {
+            key: "env".to_string(),
+            title: "电源 / 本机 IP 条件".to_string(),
+            status: if verdict.passed { "ok" } else { "fail" }.to_string(),
+            detail: verdict.reason.clone(),
+            duration_ms: Some((executor::now_ms() - host_started).max(0)),
+            request: None,
+            response: None,
+        });
+        if !verdict.passed {
+            summary.skipped = true;
+            summary.error = Some(verdict.reason);
+            steps.push(skip_main_step(
+                &main,
+                "电源 / 本机 IP 条件不满足，本次不会发送主请求",
+            ));
+            summary.total_ms = (executor::now_ms() - started_at).max(0);
+            return TestBenchResult { steps, summary };
+        }
+    }
+
     if guard_on && has_guard_curl {
         let guard_started = executor::now_ms();
         let guard_request = match build_request("precheck", input) {
             Ok(spec) => spec,
             Err(message) => {
-                steps.push(failure_step("precheck", "前置判断", message.clone(), guard_started));
+                steps.push(failure_step(
+                    "precheck",
+                    "前置判断",
+                    message.clone(),
+                    guard_started,
+                ));
                 summary.error = Some(message);
                 summary.total_ms = (executor::now_ms() - started_at).max(0);
                 return TestBenchResult { steps, summary };
@@ -381,7 +513,13 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
     // 3) 主请求。
     let main_started = executor::now_ms();
     let main_response = execute_test_request(&main).await;
-    steps.push(response_step("main", "主请求", &main, &main_response, main_started));
+    steps.push(response_step(
+        "main",
+        "主请求",
+        &main,
+        &main_response,
+        main_started,
+    ));
     summary.status = main_response.status;
     summary.error = main_response.error.clone();
 
@@ -418,7 +556,11 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         detail: if conditions.is_empty() {
             "没有可判定的响应".to_string()
         } else {
-            format!("{} → {}", conditions.join(" 且 "), if matched { "命中" } else { "未命中" })
+            format!(
+                "{} → {}",
+                conditions.join(" 且 "),
+                if matched { "命中" } else { "未命中" }
+            )
         },
         duration_ms: None,
         request: None,
@@ -443,7 +585,10 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
             let (request, detail) = match build_request("notify", input) {
                 Ok(preview) => (
                     Some(request_step_info(&preview)),
-                    format!("演练模式：将发送 {}，但没有真正发出", describe_transport(&preview)),
+                    format!(
+                        "演练模式：将发送 {}，但没有真正发出",
+                        describe_transport(&preview)
+                    ),
                 ),
                 Err(message) => (None, format!("通知配置无效：{message}")),
             };
@@ -460,8 +605,15 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
             match build_request("notify", input) {
                 Ok(notify) => {
                     let notify_response = execute_test_request(&notify).await;
-                    steps.push(response_step("notify", "发送通知", &notify, &notify_response, notify_started));
-                    summary.notify_sent = notify_response.status.is_some() && notify_response.error.is_none();
+                    steps.push(response_step(
+                        "notify",
+                        "发送通知",
+                        &notify,
+                        &notify_response,
+                        notify_started,
+                    ));
+                    summary.notify_sent =
+                        notify_response.status.is_some() && notify_response.error.is_none();
                     if !summary.notify_sent {
                         summary.notify_failed = true;
                         if summary.error.is_none() {
@@ -481,8 +633,18 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
     TestBenchResult { steps, summary }
 }
 
-fn assert_input_failed(mut steps: Vec<TestStep>, mut summary: TestBenchSummary, started_at: i64, message: String) -> TestBenchResult {
-    steps.push(failure_step("assert-input", "校验条件配置", message.clone(), executor::now_ms()));
+fn assert_input_failed(
+    mut steps: Vec<TestStep>,
+    mut summary: TestBenchSummary,
+    started_at: i64,
+    message: String,
+) -> TestBenchResult {
+    steps.push(failure_step(
+        "assert-input",
+        "校验条件配置",
+        message.clone(),
+        executor::now_ms(),
+    ));
     summary.error = Some(message);
     summary.total_ms = (executor::now_ms() - started_at).max(0);
     TestBenchResult { steps, summary }

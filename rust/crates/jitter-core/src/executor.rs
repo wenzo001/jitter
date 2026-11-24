@@ -14,11 +14,14 @@ use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as Json};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{get_active_config, AppConfig};
 use crate::condition::evaluate_condition;
-use crate::db::{insert_log, NewLogInput};
-use crate::guard::{evaluate_local_guard, local_guard_of};
+use crate::config::{get_active_config, AppConfig};
 use crate::db::TaskRow;
+use crate::db::{insert_log, NewLogInput};
+use crate::guard::{
+    evaluate_host_guard, evaluate_local_guard, has_host_conditions, local_guard_of, HostGuardConfig,
+};
+use crate::host;
 use crate::types::RequestOptions;
 
 /// 传输层重试：只对「连接被重置」类错误，且只发生在响应头到达之前。
@@ -179,7 +182,8 @@ fn parse_stored_headers(raw: Option<&str>) -> Result<Option<JsonMap<String, Json
     if raw.trim().is_empty() {
         return Ok(None);
     }
-    let parsed: Json = serde_json::from_str(raw).map_err(|error| format!("请求头数据格式损坏: {error}"))?;
+    let parsed: Json =
+        serde_json::from_str(raw).map_err(|error| format!("请求头数据格式损坏: {error}"))?;
     let Some(map) = parsed.as_object() else {
         return Err("请求头数据格式损坏".to_string());
     };
@@ -219,7 +223,10 @@ pub fn parse_request_options(raw: Option<&str>) -> RequestOptions {
             options.proxy = Some(trimmed.to_string());
         }
     }
-    if let Some(auth) = record.get("proxyAuthorization").and_then(|value| value.as_str()) {
+    if let Some(auth) = record
+        .get("proxyAuthorization")
+        .and_then(|value| value.as_str())
+    {
         let trimmed = auth.trim();
         if !trimmed.is_empty() {
             options.proxy_authorization = Some(trimmed.to_string());
@@ -240,7 +247,14 @@ struct RequestResult {
 
 fn env_proxy_snapshot() -> BTreeMap<String, String> {
     let mut snapshot = BTreeMap::new();
-    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+    for key in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
         if let Ok(value) = std::env::var(key) {
             if !value.trim().is_empty() {
                 snapshot.insert(key.to_string(), value);
@@ -251,7 +265,14 @@ fn env_proxy_snapshot() -> BTreeMap<String, String> {
 }
 
 fn clear_env_proxy() {
-    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+    for key in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
         std::env::remove_var(key);
     }
 }
@@ -261,7 +282,6 @@ fn restore_env_proxy(snapshot: &BTreeMap<String, String>) {
         std::env::set_var(key, value);
     }
 }
-
 
 /// 展开错误链：reqwest 的顶层信息只有「error sending request」，
 /// 底层原因（DNS / TCP / TLS / 代理）在 source 里，逐层拼上便于排查。
@@ -279,7 +299,10 @@ fn error_text(error: &dyn std::error::Error) -> String {
     message
 }
 
-fn build_client(options: &RequestOptions, default_insecure: bool) -> Result<reqwest::Client, String> {
+fn build_client(
+    options: &RequestOptions,
+    default_insecure: bool,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder();
     if matches!(options.redirect, Some(crate::types::RedirectMode::Manual)) {
         builder = builder.redirect(reqwest::redirect::Policy::none());
@@ -339,11 +362,12 @@ async fn perform_request(
         BTreeMap::new()
     };
     let has_env_proxy = !env_proxy.is_empty();
-    let first_timeout_ms = if has_env_proxy && (timeout_ms <= 0 || timeout_ms > PROXY_PROBE_TIMEOUT_MS as i64) {
-        PROXY_PROBE_TIMEOUT_MS as i64
-    } else {
-        timeout_ms
-    };
+    let first_timeout_ms =
+        if has_env_proxy && (timeout_ms <= 0 || timeout_ms > PROXY_PROBE_TIMEOUT_MS as i64) {
+            PROXY_PROBE_TIMEOUT_MS as i64
+        } else {
+            timeout_ms
+        };
 
     let mut caught: Option<String> = None;
     let mut did_proxy_fallback = false;
@@ -353,7 +377,11 @@ async fn perform_request(
         if cancel.is_cancelled() {
             break;
         }
-        let active_timeout_ms = if round == 0 { first_timeout_ms } else { timeout_ms };
+        let active_timeout_ms = if round == 0 {
+            first_timeout_ms
+        } else {
+            timeout_ms
+        };
         last_timeout_ms = active_timeout_ms;
         status = None;
         headers_json = None;
@@ -575,32 +603,43 @@ fn record_skip(
     source: crate::types::RunSource,
 ) -> i64 {
     let stored_body = exchange.and_then(|exchange| {
-        exchange
-            .status
-            .map(|_| {
-                if exchange.truncated {
-                    format!("{}\n[truncated]", exchange.body)
-                } else {
-                    exchange.body.clone()
-                }
-            })
+        exchange.status.map(|_| {
+            if exchange.truncated {
+                format!("{}\n[truncated]", exchange.body)
+            } else {
+                exchange.body.clone()
+            }
+        })
     });
     insert_log(&NewLogInput {
         task_id: task.id.clone(),
         executed_at: now_ms(),
-        request_url: exchange.map(|exchange| exchange.request_url.clone()).flatten(),
-        request_method: exchange.map(|exchange| exchange.request_method.clone()).flatten(),
-        request_headers: exchange.map(|exchange| exchange.request_headers.clone()).flatten(),
-        request_body: exchange.map(|exchange| exchange.request_body.clone()).flatten(),
+        request_url: exchange
+            .map(|exchange| exchange.request_url.clone())
+            .flatten(),
+        request_method: exchange
+            .map(|exchange| exchange.request_method.clone())
+            .flatten(),
+        request_headers: exchange
+            .map(|exchange| exchange.request_headers.clone())
+            .flatten(),
+        request_body: exchange
+            .map(|exchange| exchange.request_body.clone())
+            .flatten(),
         response_status: exchange.map(|exchange| exchange.status).flatten(),
-        response_headers: exchange.map(|exchange| exchange.headers_json.clone()).flatten(),
+        response_headers: exchange
+            .map(|exchange| exchange.headers_json.clone())
+            .flatten(),
         response_body: stored_body,
         duration_ms: Some(exchange.map(|exchange| exchange.duration_ms).unwrap_or(0)),
         error: Some(format!(
             "{reason}；已跳过主请求 {} {}",
             task.request_method, task.request_url
         )),
-        aborted: exchange.map(|exchange| exchange.aborted).unwrap_or(false).into(),
+        aborted: exchange
+            .map(|exchange| exchange.aborted)
+            .unwrap_or(false)
+            .into(),
         kind: Some(crate::types::LogKind::Skipped),
         parent_log_id: None,
         matched: Some(0),
@@ -628,11 +667,16 @@ pub struct RunOutcome {
 }
 
 /// 执行一个任务：前置判断 → 主请求 → 判定 → 命中则通知。
-pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source: crate::types::RunSource) -> RunOutcome {
+pub async fn execute_task_run(
+    task: &TaskRow,
+    cancel: &CancellationToken,
+    source: crate::types::RunSource,
+) -> RunOutcome {
     let config: AppConfig = get_active_config();
 
-    // 前置判断先行：本地条件零成本，guard curl 只在配置了的情况下才发。
-    if task.precheck_enabled == 1 {
+    // 前置判断只约束定时自动执行：页面「立即执行」是人工触发，跳过所有前置条件。
+    // 本地条件零成本；电源 / IP 读本机信息；guard curl 只在配置了的情况下才发。
+    if task.precheck_enabled == 1 && matches!(source, crate::types::RunSource::Scheduled) {
         let guard_config = local_guard_of(
             task.precheck_weekdays.as_deref(),
             task.precheck_time_start.as_deref(),
@@ -641,7 +685,11 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source
         let verdict = evaluate_local_guard(&guard_config, now_ms());
         if !verdict.passed {
             let main_log_id = record_skip(task, &verdict.reason, None, source);
-            tracing::warn!("[jitter] 任务「{}」跳过本次执行：{}", task.name, verdict.reason);
+            tracing::warn!(
+                "[jitter] 任务「{}」跳过本次执行：{}",
+                task.name,
+                verdict.reason
+            );
             return RunOutcome {
                 main_log_id,
                 status: None,
@@ -654,6 +702,37 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source
             };
         }
 
+        let host_config = HostGuardConfig {
+            require_ac_power: task.precheck_require_ac == 1,
+            ip_pattern: task.precheck_ip_pattern.clone(),
+        };
+        if has_host_conditions(&host_config) {
+            let environment = host::current_environment();
+            let verdict = evaluate_host_guard(
+                &host_config,
+                environment.on_ac_power,
+                &environment.local_ips,
+            );
+            if !verdict.passed {
+                let main_log_id = record_skip(task, &verdict.reason, None, source);
+                tracing::warn!(
+                    "[jitter] 任务「{}」跳过本次执行：{}",
+                    task.name,
+                    verdict.reason
+                );
+                return RunOutcome {
+                    main_log_id,
+                    status: None,
+                    aborted: false,
+                    matched: false,
+                    skipped: true,
+                    error: Some(verdict.reason),
+                    notify_log_id: None,
+                    duration_ms: 0,
+                };
+            }
+        }
+
         if let Some(precheck_url) = &task.precheck_url {
             let precheck = run_precheck(task, cancel, &config).await;
             if !precheck.verdict.passed {
@@ -663,7 +742,9 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source
                     Some(&SkipExchange {
                         request_url: Some(precheck_url.clone()),
                         request_method: Some(
-                            task.precheck_method.clone().unwrap_or_else(|| "GET".to_string()),
+                            task.precheck_method
+                                .clone()
+                                .unwrap_or_else(|| "GET".to_string()),
                         ),
                         request_headers: task.precheck_headers.clone(),
                         request_body: task.precheck_body.clone(),
@@ -676,7 +757,11 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source
                     }),
                     source,
                 );
-                tracing::warn!("[jitter] 任务「{}」跳过本次执行：{}", task.name, precheck.verdict.reason);
+                tracing::warn!(
+                    "[jitter] 任务「{}」跳过本次执行：{}",
+                    task.name,
+                    precheck.verdict.reason
+                );
                 return RunOutcome {
                     main_log_id,
                     status: precheck.status,
@@ -765,25 +850,31 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source
             Some(_) if notify.truncated => Some(format!("{}\n[truncated]", notify.body)),
             Some(_) => Some(notify.body.clone()),
         };
-        notify_log_id = Some(insert_log(&NewLogInput {
-            task_id: task.id.clone(),
-            executed_at: notify_executed_at,
-            request_url: task.notify_url.clone(),
-            request_method: Some(task.notify_method.clone().unwrap_or_else(|| "GET".to_string())),
-            request_headers: task.notify_headers.clone(),
-            request_body: task.notify_body.clone(),
-            response_status: notify.status,
-            response_headers: notify.headers_json.clone(),
-            response_body: notify_body,
-            duration_ms: Some(notify.duration_ms),
-            error: notify.error.clone(),
-            aborted: notify.aborted.into(),
-            kind: Some(crate::types::LogKind::Notify),
-            parent_log_id: Some(main_log_id),
-            matched: None,
-            run_source: Some(source.as_str().to_string()),
-        })
-        .expect("write notify log"));
+        notify_log_id = Some(
+            insert_log(&NewLogInput {
+                task_id: task.id.clone(),
+                executed_at: notify_executed_at,
+                request_url: task.notify_url.clone(),
+                request_method: Some(
+                    task.notify_method
+                        .clone()
+                        .unwrap_or_else(|| "GET".to_string()),
+                ),
+                request_headers: task.notify_headers.clone(),
+                request_body: task.notify_body.clone(),
+                response_status: notify.status,
+                response_headers: notify.headers_json.clone(),
+                response_body: notify_body,
+                duration_ms: Some(notify.duration_ms),
+                error: notify.error.clone(),
+                aborted: notify.aborted.into(),
+                kind: Some(crate::types::LogKind::Notify),
+                parent_log_id: Some(main_log_id),
+                matched: None,
+                run_source: Some(source.as_str().to_string()),
+            })
+            .expect("write notify log"),
+        );
     }
 
     RunOutcome {
@@ -810,7 +901,11 @@ struct PrecheckRun {
 }
 
 /// 前置 curl：与正常执行完全相同的传输链路。
-async fn run_precheck(task: &TaskRow, cancel: &CancellationToken, config: &AppConfig) -> PrecheckRun {
+async fn run_precheck(
+    task: &TaskRow,
+    cancel: &CancellationToken,
+    config: &AppConfig,
+) -> PrecheckRun {
     let result = perform_request(
         task.precheck_url.as_deref().unwrap_or(""),
         task.precheck_method.as_deref().unwrap_or("GET"),

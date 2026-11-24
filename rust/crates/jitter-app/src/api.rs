@@ -72,7 +72,13 @@ fn headers_input(value: Option<&Json>) -> Result<Option<HeadersInput>, String> {
 fn to_boolean(value: Option<&Json>) -> bool {
     match value {
         Some(Json::Bool(true)) => true,
-        Some(value) if value == &Json::from(1) || value == &Json::from("1") || value == &Json::from("true") => true,
+        Some(value)
+            if value == &Json::from(1)
+                || value == &Json::from("1")
+                || value == &Json::from("true") =>
+        {
+            true
+        }
         _ => false,
     }
 }
@@ -82,7 +88,9 @@ fn parse_expect_status(value: Option<&Json>, label: &str) -> Result<Option<i64>,
     if value.is_null() || value == &Json::from("") {
         return Ok(None);
     }
-    let parsed = value.as_i64().or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()));
+    let parsed = value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()));
     match parsed {
         Some(status) if (100..=599).contains(&status) => Ok(Some(status)),
         _ => Err(format!("{label}必须是 100–599 的整数")),
@@ -140,29 +148,80 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
 
     // 调度：一套载荷覆盖三种模式（build_schedule 负责全部校验）。
     let schedule_fields = JsonMap::from_iter([
-        ("schedule_kind".to_string(), object.get("schedule_kind").cloned().unwrap_or(Json::Null)),
+        (
+            "schedule_kind".to_string(),
+            object.get("schedule_kind").cloned().unwrap_or(Json::Null),
+        ),
         (
             "window_start".to_string(),
-            Json::String(object.get("window_start").and_then(|value| value.as_str()).map(str::trim).unwrap_or_default().to_string()),
+            Json::String(
+                object
+                    .get("window_start")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
         ),
         (
             "window_end".to_string(),
-            Json::String(object.get("window_end").and_then(|value| value.as_str()).map(str::trim).unwrap_or_default().to_string()),
+            Json::String(
+                object
+                    .get("window_end")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
         ),
-        ("daily_jitter_minutes".to_string(), object.get("daily_jitter_minutes").cloned().unwrap_or(Json::Null)),
-        ("interval_seconds".to_string(), object.get("interval_seconds").cloned().unwrap_or(Json::Null)),
-        ("interval_jitter_seconds".to_string(), object.get("interval_jitter_seconds").cloned().unwrap_or(Json::Null)),
-        ("interval_start_at".to_string(), object.get("interval_start_at").cloned().unwrap_or(Json::Null)),
+        (
+            "daily_jitter_minutes".to_string(),
+            object
+                .get("daily_jitter_minutes")
+                .cloned()
+                .unwrap_or(Json::Null),
+        ),
+        (
+            "interval_seconds".to_string(),
+            object
+                .get("interval_seconds")
+                .cloned()
+                .unwrap_or(Json::Null),
+        ),
+        (
+            "interval_jitter_seconds".to_string(),
+            object
+                .get("interval_jitter_seconds")
+                .cloned()
+                .unwrap_or(Json::Null),
+        ),
+        (
+            "interval_start_at".to_string(),
+            object
+                .get("interval_start_at")
+                .cloned()
+                .unwrap_or(Json::Null),
+        ),
     ]);
     let schedule = build_schedule(&schedule_fields).map_err(|error| error.0)?;
     let is_daily = schedule.kind == jitter_core::schedule::ScheduleKind::Daily;
     let window_start = if is_daily {
-        object.get("window_start").and_then(|value| value.as_str()).map(str::trim).unwrap_or_default().to_string()
+        object
+            .get("window_start")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string()
     } else {
         String::new()
     };
     let window_end = if is_daily {
-        object.get("window_end").and_then(|value| value.as_str()).map(str::trim).unwrap_or_default().to_string()
+        object
+            .get("window_end")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string()
     } else {
         String::new()
     };
@@ -176,17 +235,27 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
     let mode = match object.get("mode").and_then(|value| value.as_str()) {
         Some("structured") => "structured",
         Some("curl") => "curl",
-        _ => if has_curl { "curl" } else { "structured" },
+        _ => {
+            if has_curl {
+                "curl"
+            } else {
+                "structured"
+            }
+        }
     };
 
-    let (spec, curl_command): (jitter_core::types::RequestSpec, Option<String>) = if mode == "curl" {
+    let (spec, curl_command): (jitter_core::types::RequestSpec, Option<String>) = if mode == "curl"
+    {
         let curl = object
             .get("curl")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .ok_or_else(|| "请粘贴 curl 命令".to_string())?;
-        (parse_curl_command(curl).map_err(|error| error.0)?, Some(curl.to_string()))
+        (
+            parse_curl_command(curl).map_err(|error| error.0)?,
+            Some(curl.to_string()),
+        )
     } else {
         let url = object
             .get("url")
@@ -208,12 +277,21 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         };
         let structured = jitter_core::curl_parser::StructuredRequestInput {
             url,
-            method: object.get("method").and_then(|value| value.as_str()).map(str::to_string),
+            method: object
+                .get("method")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
             headers: header_map,
             header_lines,
-            body: object.get("body").and_then(|value| value.as_str()).map(str::to_string),
+            body: object
+                .get("body")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
         };
-        (jitter_core::curl_parser::normalize_structured(&structured).map_err(|error| error.0)?, None)
+        (
+            jitter_core::curl_parser::normalize_structured(&structured).map_err(|error| error.0)?,
+            None,
+        )
     };
 
     // 通知：notify_enabled → 必须填 notify_curl。
@@ -228,15 +306,23 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
             .filter(|text| !text.is_empty())
             .ok_or_else(|| "启用通知时必须填写通知 curl".to_string())?;
         notify_curl = Some(curl.to_string());
-        notify_request = Some(request_parts(&parse_curl_command(curl).map_err(|error| error.0)?));
+        notify_request = Some(request_parts(
+            &parse_curl_command(curl).map_err(|error| error.0)?,
+        ));
     }
 
     // 命中条件与通知无关：决定每次执行记录的「命中」标记。
     let expect_status = parse_expect_status(object.get("expect_status"), "期望状态码")?;
     let expect_body = match object.get("expect_body") {
         Some(value) if !value.is_null() => {
-            let text = value.as_str().ok_or_else(|| "期望响应体必须是字符串".to_string())?;
-            if text.is_empty() { None } else { Some(text.to_string()) }
+            let text = value
+                .as_str()
+                .ok_or_else(|| "期望响应体必须是字符串".to_string())?;
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
         }
         _ => None,
     };
@@ -245,23 +331,39 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
     // 执行前判断：本地条件（星期 / 时段）与/或前置 curl。
     let precheck_enabled = to_boolean(object.get("precheck_enabled"));
     let precheck_weekdays = if precheck_enabled {
-        jitter_core::guard::parse_weekdays(object.get("precheck_weekdays")).map_err(|error| error.0)?
+        jitter_core::guard::parse_weekdays(object.get("precheck_weekdays"))
+            .map_err(|error| error.0)?
     } else {
         None
     };
     let precheck_time = if precheck_enabled {
-        jitter_core::guard::parse_time_range(object.get("precheck_time_start"), object.get("precheck_time_end"))
-            .map_err(|error| error.0)?
+        jitter_core::guard::parse_time_range(
+            object.get("precheck_time_start"),
+            object.get("precheck_time_end"),
+        )
+        .map_err(|error| error.0)?
     } else {
         None
     };
     let mut precheck_curl: Option<String> = None;
     let mut precheck_request: Option<RequestParts> = None;
     if precheck_enabled {
-        if let Some(curl) = object.get("precheck_curl").and_then(|value| value.as_str()).map(str::trim).filter(|text| !text.is_empty()) {
+        if let Some(curl) = object
+            .get("precheck_curl")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
             precheck_curl = Some(curl.to_string());
-            precheck_request = Some(request_parts(&parse_curl_command(curl).map_err(|error| error.0)?));
-        } else if let Some(url) = object.get("precheck_url").and_then(|value| value.as_str()).map(str::trim).filter(|text| !text.is_empty()) {
+            precheck_request = Some(request_parts(
+                &parse_curl_command(curl).map_err(|error| error.0)?,
+            ));
+        } else if let Some(url) = object
+            .get("precheck_url")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
             let headers = headers_input(object.get("precheck_headers"))?;
             let (header_map, header_lines) = match headers {
                 Some(HeadersInput::Map(map)) => (Some(map), None),
@@ -270,13 +372,20 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
             };
             let structured = jitter_core::curl_parser::StructuredRequestInput {
                 url: url.to_string(),
-                method: object.get("precheck_method").and_then(|value| value.as_str()).map(str::to_string),
+                method: object
+                    .get("precheck_method")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
                 headers: header_map,
                 header_lines,
-                body: object.get("precheck_body").and_then(|value| value.as_str()).map(str::to_string),
+                body: object
+                    .get("precheck_body")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
             };
             precheck_request = Some(request_parts(
-                &jitter_core::curl_parser::normalize_structured(&structured).map_err(|error| error.0)?,
+                &jitter_core::curl_parser::normalize_structured(&structured)
+                    .map_err(|error| error.0)?,
             ));
         }
     }
@@ -290,13 +399,26 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
     } else {
         None
     };
+    let precheck_require_ac = precheck_enabled && to_boolean(object.get("precheck_require_ac"));
+    let precheck_ip_pattern = if precheck_enabled {
+        jitter_core::guard::parse_ip_pattern(object.get("precheck_ip_pattern"))
+            .map_err(|error| error.0)?
+    } else {
+        None
+    };
 
     if precheck_enabled {
         let has_local = precheck_weekdays.is_some() || precheck_time.is_some();
-        if !has_local && precheck_request.is_none() {
-            return Err("启用执行前判断时，至少配置本地条件（星期 / 时段）或前置判断 curl 之一".to_string());
+        let has_host = precheck_require_ac || precheck_ip_pattern.is_some();
+        if !has_local && !has_host && precheck_request.is_none() {
+            return Err(
+                "启用执行前判断时，至少配置本地条件（星期 / 时段 / 电源 / 本机 IP）或前置判断 curl 之一"
+                    .to_string(),
+            );
         }
-        if precheck_request.is_none() && (precheck_expect_status.is_some() || precheck_expr.is_some()) {
+        if precheck_request.is_none()
+            && (precheck_expect_status.is_some() || precheck_expr.is_some())
+        {
             return Err("配置了前置状态码或表达式时，必须填写前置判断 curl".to_string());
         }
     }
@@ -326,6 +448,8 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         precheck_weekdays,
         precheck_time_start: precheck_time.as_ref().map(|(start, _)| start.clone()),
         precheck_time_end: precheck_time.as_ref().map(|(_, end)| end.clone()),
+        precheck_require_ac,
+        precheck_ip_pattern,
     })
 }
 
@@ -348,10 +472,19 @@ fn task_view(task: &db::TaskRow) -> Json {
     let started_at = running.get(&task.id).copied();
     let mut view = serde_json::to_value(task).unwrap_or(Json::Null);
     if let Some(object) = view.as_object_mut() {
-        object.insert("schedule_description".to_string(), Json::String(description));
+        object.insert(
+            "schedule_description".to_string(),
+            Json::String(description),
+        );
         object.insert("running".to_string(), Json::Bool(started_at.is_some()));
-        object.insert("running_since".to_string(), started_at.map(Json::from).unwrap_or(Json::Null));
-        object.insert("schedule_error".to_string(), schedule_error.map(Json::String).unwrap_or(Json::Null));
+        object.insert(
+            "running_since".to_string(),
+            started_at.map(Json::from).unwrap_or(Json::Null),
+        );
+        object.insert(
+            "schedule_error".to_string(),
+            schedule_error.map(Json::String).unwrap_or(Json::Null),
+        );
     }
     view
 }
@@ -375,7 +508,11 @@ async fn create_task(AxumJson(body): AxumJson<Json>) -> Response {
     match db::create_task(&input, &id, executor::now_ms()) {
         Ok(task) => {
             scheduler::schedule_new_task(&task.id);
-            (StatusCode::CREATED, AxumJson(json!({ "task": task_view(&task) }))).into_response()
+            (
+                StatusCode::CREATED,
+                AxumJson(json!({ "task": task_view(&task) })),
+            )
+                .into_response()
         }
         Err(error) => bad_request(error.0),
     }
@@ -425,7 +562,12 @@ async fn stop_task(Path(id): Path<String>) -> Response {
     match db::get_task(&id) {
         Ok(Some(task)) if task.status == "active" => {
             scheduler::cancel_task(&id);
-            match db::update_task_status(&id, jitter_core::types::TaskStatus::Stopped, None, executor::now_ms()) {
+            match db::update_task_status(
+                &id,
+                jitter_core::types::TaskStatus::Stopped,
+                None,
+                executor::now_ms(),
+            ) {
                 Ok(()) => {
                     // TS 版停止时一并清掉暂停区间。
                     if task.paused_until.is_some() {
@@ -447,7 +589,12 @@ async fn start_task(Path(id): Path<String>) -> Response {
     match db::get_task(&id) {
         Ok(Some(task)) if task.status == "stopped" => {
             // 与 TS 版一致：恢复 = 状态回 active + 重新排计划。
-            if let Err(error) = db::update_task_status(&id, jitter_core::types::TaskStatus::Active, None, executor::now_ms()) {
+            if let Err(error) = db::update_task_status(
+                &id,
+                jitter_core::types::TaskStatus::Active,
+                None,
+                executor::now_ms(),
+            ) {
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0);
             }
             if task.paused_until.is_some() {
@@ -473,7 +620,8 @@ async fn run_task(Path(id): Path<String>) -> Response {
     // 与 TS 版一致：同步执行，返回完整结果（页面显示判定与耗时）。
     let cancel = tokio_util::sync::CancellationToken::new();
     scheduler::register_running(&id, cancel.clone());
-    let outcome = executor::execute_task_run(&task, &cancel, jitter_core::types::RunSource::Manual).await;
+    let outcome =
+        executor::execute_task_run(&task, &cancel, jitter_core::types::RunSource::Manual).await;
     scheduler::finish_run(&id);
     AxumJson(json!({
         "ok": true,
@@ -489,13 +637,19 @@ async fn run_task(Path(id): Path<String>) -> Response {
 }
 
 async fn pause_task(Path(id): Path<String>, AxumJson(body): AxumJson<Json>) -> Response {
-    let days = body.get("days").and_then(|value| value.as_i64()).unwrap_or(1);
+    let days = body
+        .get("days")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(1);
     let starts_today = body
         .get("starts_today")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
     if !(1..=jitter_core::window::MAX_PAUSE_DAYS).contains(&days) {
-        return bad_request(format!("暂停天数必须是 1–{} 天", jitter_core::window::MAX_PAUSE_DAYS));
+        return bad_request(format!(
+            "暂停天数必须是 1–{} 天",
+            jitter_core::window::MAX_PAUSE_DAYS
+        ));
     }
     let now = executor::now_ms();
     let pause = jitter_core::window::pause_interval(now, days, starts_today);
@@ -576,7 +730,9 @@ async fn resume_task(Path(id): Path<String>) -> Response {
     }
 
     // stopped → active：恢复调度。
-    if let Err(error) = db::update_task_status(&id, jitter_core::types::TaskStatus::Active, None, now) {
+    if let Err(error) =
+        db::update_task_status(&id, jitter_core::types::TaskStatus::Active, None, now)
+    {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0);
     }
     if task.paused_until.is_some() {
@@ -602,7 +758,10 @@ async fn reorder_tasks(AxumJson(body): AxumJson<Json>) -> Response {
         .collect();
     let known: std::collections::HashSet<&String> = existing.iter().collect();
     let unique: std::collections::HashSet<&String> = ids.iter().collect();
-    if ids.len() != existing.len() || unique.len() != ids.len() || ids.iter().any(|id| !known.contains(id)) {
+    if ids.len() != existing.len()
+        || unique.len() != ids.len()
+        || ids.iter().any(|id| !known.contains(id))
+    {
         return conflict("任务列表已变化，请刷新后重试");
     }
     match db::reorder_tasks(&ids) {
@@ -615,7 +774,10 @@ async fn reorder_tasks(AxumJson(body): AxumJson<Json>) -> Response {
     }
 }
 
-async fn list_logs(Path(id): Path<String>, Query(params): Query<std::collections::HashMap<String, String>>) -> Response {
+async fn list_logs(
+    Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
     if db::get_task(&id).ok().flatten().is_none() {
         return not_found();
     }
@@ -636,14 +798,18 @@ async fn list_logs(Path(id): Path<String>, Query(params): Query<std::collections
         let (at, log_id) = (parts[0].parse::<i64>(), parts[1].parse::<i64>());
         match (at, log_id) {
             (Ok(executed_at), Ok(log_id)) if executed_at >= 0 && log_id > 0 => {
-                before = Some(db::LogCursor { executed_at, id: log_id });
+                before = Some(db::LogCursor {
+                    executed_at,
+                    id: log_id,
+                });
             }
             _ => return bad_request("before 必须是 <executed_at>:<id> 形式的游标"),
         }
     }
 
     // 保留窗口之外的日志不查询、不渲染。
-    let retention_days = db::get_effective_retention_days(config.log_retention_days).unwrap_or(config.log_retention_days);
+    let retention_days = db::get_effective_retention_days(config.log_retention_days)
+        .unwrap_or(config.log_retention_days);
     let since = if retention_days > 0 {
         Some(executor::now_ms() - retention_days * 24 * 60 * 60 * 1000)
     } else {
@@ -656,7 +822,10 @@ async fn list_logs(Path(id): Path<String>, Query(params): Query<std::collections
             if has_more {
                 rows.truncate(limit as usize);
             }
-            AxumJson(json!({ "logs": rows, "has_more": has_more, "retention_days": retention_days })).into_response()
+            AxumJson(
+                json!({ "logs": rows, "has_more": has_more, "retention_days": retention_days }),
+            )
+            .into_response()
         }
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
     }
@@ -684,7 +853,8 @@ async fn metrics() -> Response {
 async fn config() -> Response {
     let config = get_active_config();
     // 保留窗口取「实际生效」值（界面设置覆盖默认）。
-    let retention = db::get_effective_retention_days(config.log_retention_days).unwrap_or(config.log_retention_days);
+    let retention = db::get_effective_retention_days(config.log_retention_days)
+        .unwrap_or(config.log_retention_days);
     AxumJson(json!({
         "logsPageSize": config.logs_page_size,
         "defaultWindowMinutes": config.default_window_minutes,
@@ -703,6 +873,7 @@ async fn get_settings() -> Response {
         "logRetentionDays": retention,
         "logMaxRowsPerTask": config.log_max_rows_per_task,
         "skipTlsVerify": db::get_skip_tls_verify(),
+        "preventSleepOnAc": db::get_prevent_sleep_on_ac(),
     }))
     .into_response()
 }
@@ -713,6 +884,8 @@ struct SettingsBody {
     log_retention_days: Option<i64>,
     #[serde(rename = "skipTlsVerify")]
     skip_tls_verify: Option<bool>,
+    #[serde(rename = "preventSleepOnAc")]
+    prevent_sleep_on_ac: Option<bool>,
 }
 
 async fn update_settings(AxumJson(body): AxumJson<SettingsBody>) -> Response {
@@ -730,7 +903,25 @@ async fn update_settings(AxumJson(body): AxumJson<SettingsBody>) -> Response {
             return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0);
         }
     }
+    if let Some(prevent) = body.prevent_sleep_on_ac {
+        let value = if prevent { "1" } else { "0" };
+        if let Err(error) = db::set_setting(db::PREVENT_SLEEP_ON_AC_SETTING, Some(value)) {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0);
+        }
+        jitter_core::host::set_prevent_sleep(prevent);
+    }
     get_settings().await
+}
+
+/// 当前主机环境：电源状态与本机 IPv4，任务表单用它显示辅助提示。
+async fn system_environment() -> Response {
+    let environment = jitter_core::host::current_environment();
+    AxumJson(json!({
+        "onAcPower": environment.on_ac_power,
+        "localIps": environment.local_ips,
+        "preventSleepOnAc": db::get_prevent_sleep_on_ac(),
+    }))
+    .into_response()
 }
 
 async fn cleanup_logs(AxumJson(body): AxumJson<Json>) -> Response {
@@ -770,11 +961,17 @@ async fn cleanup_logs(AxumJson(body): AxumJson<Json>) -> Response {
         Some(value) => {
             let expected = executor::now_ms() - days * DAY_MS;
             match value.as_i64() {
-                Some(cutoff) if cutoff > 0 && cutoff <= expected + 5 * 60_000 && cutoff >= expected - DAY_MS => {
+                Some(cutoff)
+                    if cutoff > 0
+                        && cutoff <= expected + 5 * 60_000
+                        && cutoff >= expected - DAY_MS =>
+                {
                     Some(cutoff)
                 }
                 _ => {
-                    return bad_request("cutoff 必须来自对应档位的清理预检（不得放大删除范围或使用过期预检）");
+                    return bad_request(
+                        "cutoff 必须来自对应档位的清理预检（不得放大删除范围或使用过期预检）",
+                    );
                 }
             }
         }
@@ -829,19 +1026,58 @@ async fn schedule_preview(AxumJson(body): AxumJson<Json>) -> Response {
         None => return bad_request("请求体必须是 JSON 对象"),
     };
     let fields = JsonMap::from_iter([
-        ("schedule_kind".to_string(), object.get("schedule_kind").cloned().unwrap_or(Json::Null)),
+        (
+            "schedule_kind".to_string(),
+            object.get("schedule_kind").cloned().unwrap_or(Json::Null),
+        ),
         (
             "window_start".to_string(),
-            Json::String(object.get("window_start").and_then(|value| value.as_str()).unwrap_or_default().to_string()),
+            Json::String(
+                object
+                    .get("window_start")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
         ),
         (
             "window_end".to_string(),
-            Json::String(object.get("window_end").and_then(|value| value.as_str()).unwrap_or_default().to_string()),
+            Json::String(
+                object
+                    .get("window_end")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
         ),
-        ("daily_jitter_minutes".to_string(), object.get("daily_jitter_minutes").cloned().unwrap_or(Json::Null)),
-        ("interval_seconds".to_string(), object.get("interval_seconds").cloned().unwrap_or(Json::Null)),
-        ("interval_jitter_seconds".to_string(), object.get("interval_jitter_seconds").cloned().unwrap_or(Json::Null)),
-        ("interval_start_at".to_string(), object.get("interval_start_at").cloned().unwrap_or(Json::Null)),
+        (
+            "daily_jitter_minutes".to_string(),
+            object
+                .get("daily_jitter_minutes")
+                .cloned()
+                .unwrap_or(Json::Null),
+        ),
+        (
+            "interval_seconds".to_string(),
+            object
+                .get("interval_seconds")
+                .cloned()
+                .unwrap_or(Json::Null),
+        ),
+        (
+            "interval_jitter_seconds".to_string(),
+            object
+                .get("interval_jitter_seconds")
+                .cloned()
+                .unwrap_or(Json::Null),
+        ),
+        (
+            "interval_start_at".to_string(),
+            object
+                .get("interval_start_at")
+                .cloned()
+                .unwrap_or(Json::Null),
+        ),
     ]);
     let schedule = match build_schedule(&fields) {
         Ok(schedule) => schedule,
@@ -854,9 +1090,9 @@ async fn schedule_preview(AxumJson(body): AxumJson<Json>) -> Response {
         .map(|count| count.clamp(1, 20))
         .unwrap_or(7) as usize;
     let preview = jitter_core::schedule::preview_schedule(&schedule, executor::now_ms(), count);
-    let window = schedule.window.as_ref().map(|window| {
-        json!({ "start": window.start, "end": window.end, "instant": window.instant })
-    });
+    let window = schedule.window.as_ref().map(
+        |window| json!({ "start": window.start, "end": window.end, "instant": window.instant }),
+    );
     AxumJson(json!({
         "ok": true,
         "kind": schedule.kind.as_str(),
@@ -877,14 +1113,19 @@ async fn test_bench_run(AxumJson(body): AxumJson<Json>) -> Response {
     let result = jitter_core::testbench::run_test_bench(&body).await;
 
     let mut test_run_id: Option<i64> = None;
-    let task_id = body.get("task_id").and_then(|value| value.as_str()).map(str::trim).filter(|text| !text.is_empty());
+    let task_id = body
+        .get("task_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
     if let Some(task_id) = task_id {
         if db::get_task(task_id).ok().flatten().is_some() {
             let ok = !result.summary.skipped
                 && result.summary.matched
                 && result.summary.error.is_none()
                 && !result.summary.notify_failed;
-            let summary = serde_json::to_string(&result.summary).unwrap_or_else(|_| "{}".to_string());
+            let summary =
+                serde_json::to_string(&result.summary).unwrap_or_else(|_| "{}".to_string());
             let steps = serde_json::to_string(&result.steps).unwrap_or_else(|_| "[]".to_string());
             match db::insert_test_run(task_id, ok, &summary, &steps, executor::now_ms()) {
                 Ok(id) => test_run_id = Some(id),
@@ -953,7 +1194,10 @@ async fn index() -> Html<&'static str> {
 /// 前端脚本。
 async fn app_js() -> Response {
     (
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
         crate::APP_JS,
     )
         .into_response()
@@ -982,7 +1226,8 @@ struct AutostartBody {
 async fn set_autostart_handler(AxumJson(body): AxumJson<AutostartBody>) -> Response {
     let enabled = body.enabled.unwrap_or(false);
     match system::set_autostart(enabled) {
-        Ok(()) => AxumJson(json!({ "ok": true, "autostart": system::is_autostart_enabled() })).into_response(),
+        Ok(()) => AxumJson(json!({ "ok": true, "autostart": system::is_autostart_enabled() }))
+            .into_response(),
         Err(message) => bad_request(message),
     }
 }
@@ -1014,7 +1259,9 @@ async fn backup_create() -> Response {
     }
 }
 
-async fn backup_download(Query(params): Query<std::collections::HashMap<String, String>>) -> Response {
+async fn backup_download(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
     let db_path = current_db_path();
     let name = params.get("name").cloned().unwrap_or_default();
     let target = match backup::resolve_backup_path(&db_path, &name) {
@@ -1027,7 +1274,10 @@ async fn backup_download(Query(params): Query<std::collections::HashMap<String, 
     match tokio::fs::read(&target).await {
         Ok(bytes) => Response::builder()
             .header(header::CONTENT_TYPE, "application/octet-stream")
-            .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            )
             .body(axum::body::Body::from(bytes))
             .expect("download response"),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
@@ -1038,7 +1288,12 @@ async fn backup_upload(
     Query(params): Query<std::collections::HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
-    let name = params.get("name").cloned().unwrap_or_default().trim().to_string();
+    let name = params
+        .get("name")
+        .cloned()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if name.is_empty() {
         return bad_request("缺少文件名（?name=）");
     }
@@ -1206,6 +1461,7 @@ pub fn build_router() -> Router {
         .route("/api/tasks/:id/test-runs", get(task_test_runs))
         .route("/api/test-runs/:id", get(test_run_detail))
         .route("/api/system", get(system_info))
+        .route("/api/system/environment", get(system_environment))
         .route("/api/system/autostart", post(set_autostart_handler))
         .route("/api/quit", post(quit))
         .route("/api/backup/list", get(backup_list))

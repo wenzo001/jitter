@@ -25,8 +25,21 @@ http.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # 升级检查在环境代理不可用时回退到 Windows 系统代理（注册表）。
+# windows-sys：AC 电源状态（GetSystemPowerStatus）、本机 IPv4（GetAdaptersAddresses）、
+# 防休眠（SetThreadExecutionState）。
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Power",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
+
+# macOS / Linux：getifaddrs 枚举本机 IPv4。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }

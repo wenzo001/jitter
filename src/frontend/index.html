@@ -828,6 +828,14 @@
                   </div>
                 </div>
                 <div class="field">
+                  <label class="check"><input id="precheck-require-ac" type="checkbox" />只在接通电源（AC）时执行</label>
+                </div>
+                <div class="field">
+                  <label for="precheck-ip-pattern">只在本地 IP 匹配时执行（可选）</label>
+                  <input id="precheck-ip-pattern" type="text" placeholder="例如 10.1.* 或 192.168.*,10.*" />
+                  <p class="hint" id="precheck-env-hint"></p>
+                </div>
+                <div class="field">
                   <label for="precheck-curl">前置判断 curl（可选）</label>
                   <textarea id="precheck-curl" placeholder="curl -X GET 'https://example.com/status' -H 'Authorization: Bearer …'"></textarea>
                 </div>
@@ -841,7 +849,7 @@
                     <textarea id="precheck-expr" rows="2" placeholder="例如 data.pending=0"></textarea>
                   </div>
                 </div>
-                <p class="hint">到达执行时间后先判断：星期与时段不满足就直接跳过（不发任何请求）；配了前置 curl 时再发请求，按状态码/表达式判定。全部满足才发主请求，否则本次跳过并在记录里写明原因。本地条件与前置 curl 至少配一项；时段结束早于开始视为跨午夜。</p>
+                <p class="hint">到达执行时间后先判断：星期、时段、电源、本机 IP 不满足就直接跳过（不发任何请求）；配了前置 curl 时再发请求，按状态码/表达式判定。全部满足才发主请求，否则本次跳过并在记录里写明原因。这些条件只约束定时自动执行，页面「立即执行」不受限制。所有本地条件与前置 curl 至少配一项；本机 IP 里的 <code>*</code> 匹配任意数字或点，多组用逗号分隔；时段结束早于开始视为跨午夜。</p>
               </div>
             </div>
 
@@ -998,6 +1006,15 @@
         </section>
 
         <section class="settings-block">
+          <h3>系统</h3>
+          <label class="check settings-check">
+            <input id="prevent-sleep-on-ac" type="checkbox" />
+            接通电源时防止系统休眠（电池供电时不干预）
+          </label>
+          <p class="hint">开启后会定期检查电源状态：插电时阻止系统空闲休眠，保证定时任务能按时执行；使用电池时仍按系统设置休眠。</p>
+        </section>
+
+        <section class="settings-block">
           <h3>日志保留</h3>
           <div class="row" style="gap: 8px">
             <select id="retention-days-2">
@@ -1098,6 +1115,14 @@
               <label for="test-precheck-time-end">执行时段结束（可选）</label>
               <input id="test-precheck-time-end" type="time" step="60" />
             </div>
+          </div>
+          <div class="field">
+            <label class="check"><input id="test-precheck-require-ac" type="checkbox" />只在接通电源（AC）时执行</label>
+          </div>
+          <div class="field">
+            <label for="test-precheck-ip-pattern">只在本地 IP 匹配时执行（可选）</label>
+            <input id="test-precheck-ip-pattern" type="text" placeholder="例如 10.1.* 或 192.168.*,10.*" />
+            <p class="hint" id="test-precheck-env-hint"></p>
           </div>
           <div class="field">
             <label for="test-precheck-curl">前置判断 curl（可选）</label>

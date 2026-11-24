@@ -72,7 +72,9 @@ pub fn parse_time_range(
     end: Option<&Json>,
 ) -> Result<Option<(String, String)>, GuardError> {
     let text = |value: Option<&Json>| -> Option<String> {
-        value.and_then(|value| value.as_str()).map(|text| text.trim().to_string())
+        value
+            .and_then(|value| value.as_str())
+            .map(|text| text.trim().to_string())
     };
     let start_text = text(start).unwrap_or_default();
     let end_text = text(end).unwrap_or_default();
@@ -147,8 +149,12 @@ pub fn local_guard_of(
             }
         }
     }
-    let start = time_start.filter(|value| !value.is_empty()).map(str::to_string);
-    let end = time_end.filter(|value| !value.is_empty()).map(str::to_string);
+    let start = time_start
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let end = time_end
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let valid_range = matches!((&start, &end), (Some(start), Some(end))
         if is_hhmm(start) && is_hhmm(end) && start != end);
     LocalGuardConfig {
@@ -159,7 +165,10 @@ pub fn local_guard_of(
 }
 
 pub fn has_local_conditions(config: &LocalGuardConfig) -> bool {
-    (config.weekdays.as_ref().map_or(false, |days| !days.is_empty()))
+    (config
+        .weekdays
+        .as_ref()
+        .map_or(false, |days| !days.is_empty()))
         || (config.time_start.is_some() && config.time_end.is_some())
 }
 
@@ -202,12 +211,14 @@ pub fn evaluate_local_guard(config: &LocalGuardConfig, now: i64) -> GuardVerdict
             weekday = (weekday + 6) % 7;
         }
         if !in_range {
-            let suffix = if cross_midnight { "（跨午夜）" } else { "" };
+            let suffix = if cross_midnight {
+                "（跨午夜）"
+            } else {
+                ""
+            };
             return GuardVerdict {
                 passed: false,
-                reason: format!(
-                    "当前 {clock} 不在执行时段 {start}–{end}{suffix} 内"
-                ),
+                reason: format!("当前 {clock} 不在执行时段 {start}–{end}{suffix} 内"),
             };
         }
     }
@@ -225,10 +236,7 @@ pub fn evaluate_local_guard(config: &LocalGuardConfig, now: i64) -> GuardVerdict
         }
     }
 
-    let mut parts: Vec<String> = vec![format!(
-        "今天{} {clock}",
-        WEEKDAY_LABELS[weekday as usize]
-    )];
+    let mut parts: Vec<String> = vec![format!("今天{} {clock}", WEEKDAY_LABELS[weekday as usize])];
     if let (Some(start), Some(end)) = (&config.time_start, &config.time_end) {
         parts.push(format!("时段 {start}–{end}"));
     }
@@ -246,5 +254,162 @@ pub fn evaluate_local_guard(config: &LocalGuardConfig, now: i64) -> GuardVerdict
     GuardVerdict {
         passed: true,
         reason: format!("本地条件满足（{}）", parts.join("，")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 电源 / 本机 IP 条件
+// ---------------------------------------------------------------------------
+
+/// 存储行里的环境条件：只有接通电源才执行、只有本机 IP 匹配才执行。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostGuardConfig {
+    pub require_ac_power: bool,
+    pub ip_pattern: Option<String>,
+}
+
+/// 解析「本机 IP」条件：允许数字、点与 `*`，多组用逗号或空格分隔。
+/// 空值表示不限制；返回统一成逗号分隔的规范化字符串。
+pub fn parse_ip_pattern(value: Option<&Json>) -> Result<Option<String>, GuardError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let raw = match value {
+        Json::Null => return Ok(None),
+        Json::String(text) => text.trim(),
+        _ => return err("本机 IP 条件必须是字符串"),
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let mut patterns: Vec<String> = Vec::new();
+    for part in raw.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+        if part.is_empty() {
+            continue;
+        }
+        if !part
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == '*')
+        {
+            return err("本机 IP 条件只能包含数字、点和 *（多组用逗号分隔）");
+        }
+        if !part.chars().any(|ch| ch.is_ascii_digit()) && !part.contains('*') {
+            return err("本机 IP 条件不能只有点");
+        }
+        patterns.push(part.to_string());
+    }
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(patterns.join(",")))
+}
+
+/// 单个模式的通配匹配：`*` 匹配任意数量的字符（实际 IP 里只有数字和点）。
+pub fn ip_matches_pattern(ip: &str, pattern: &str) -> bool {
+    let ip: Vec<char> = ip.chars().collect();
+    let pattern: Vec<char> = pattern.chars().collect();
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut mark = 0usize;
+    while i < ip.len() {
+        if j < pattern.len() && pattern[j] == ip[i] {
+            i += 1;
+            j += 1;
+        } else if j < pattern.len() && pattern[j] == '*' {
+            star = Some(j);
+            mark = i;
+            j += 1;
+        } else if let Some(star_index) = star {
+            j = star_index + 1;
+            mark += 1;
+            i = mark;
+        } else {
+            return false;
+        }
+    }
+    while j < pattern.len() && pattern[j] == '*' {
+        j += 1;
+    }
+    j == pattern.len()
+}
+
+/// 多个模式的任意一个命中即可。
+pub fn ip_matches_any(ip: &str, patterns: &str) -> bool {
+    patterns
+        .split(',')
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .any(|pattern| ip_matches_pattern(ip, pattern))
+}
+
+pub fn has_host_conditions(config: &HostGuardConfig) -> bool {
+    config.require_ac_power
+        || config
+            .ip_pattern
+            .as_ref()
+            .map_or(false, |pattern| !pattern.is_empty())
+}
+
+/// 判断电源 / 本机 IP 条件。`on_ac_power` 为 `None` 表示无法判断。
+pub fn evaluate_host_guard(
+    config: &HostGuardConfig,
+    on_ac_power: Option<bool>,
+    local_ips: &[String],
+) -> GuardVerdict {
+    if config.require_ac_power {
+        match on_ac_power {
+            Some(true) => {}
+            Some(false) => {
+                return GuardVerdict {
+                    passed: false,
+                    reason: "当前使用电池供电，未接通电源".to_string(),
+                }
+            }
+            None => {
+                return GuardVerdict {
+                    passed: false,
+                    reason: "无法获取电源状态，不能确认已接通电源".to_string(),
+                }
+            }
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if config.require_ac_power {
+        parts.push("已接通电源".to_string());
+    }
+    if let Some(pattern) = &config.ip_pattern {
+        if !pattern.is_empty() {
+            let matched = local_ips
+                .iter()
+                .find(|ip| ip_matches_any(ip, pattern))
+                .cloned();
+            if matched.is_none() {
+                let current = if local_ips.is_empty() {
+                    "未能读取本机 IP".to_string()
+                } else {
+                    local_ips.join(", ")
+                };
+                return GuardVerdict {
+                    passed: false,
+                    reason: format!("本机 IP（{current}）不匹配条件 {pattern}"),
+                };
+            }
+            parts.push(format!(
+                "本机 IP {} 匹配 {pattern}",
+                matched.unwrap_or_default()
+            ));
+        }
+    }
+
+    if parts.is_empty() {
+        return GuardVerdict {
+            passed: true,
+            reason: "未设置电源 / 本机 IP 条件".to_string(),
+        };
+    }
+    GuardVerdict {
+        passed: true,
+        reason: format!("环境条件满足（{}）", parts.join("，")),
     }
 }

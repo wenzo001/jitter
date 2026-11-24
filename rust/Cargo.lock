@@ -1090,7 +1090,7 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jitter-app"
-version = "1.0.10"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1108,13 +1108,14 @@ dependencies = [
 
 [[package]]
 name = "jitter-core"
-version = "1.0.10"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
  "futures-util",
  "http",
+ "libc",
  "percent-encoding",
  "reqwest",
  "rusqlite",
@@ -1125,6 +1126,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "windows-sys 0.59.0",
  "winreg",
  "zip",
 ]

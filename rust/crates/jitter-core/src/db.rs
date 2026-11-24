@@ -16,6 +16,8 @@ use crate::types::{LogKind, RedirectMode, TaskStatus};
 pub const LOG_RETENTION_SETTING: &str = "logRetentionDays";
 /// 全局「默认跳过 TLS 证书校验」开关；缺省视为开启（打卡系统多为自签证书）。
 pub const SKIP_TLS_VERIFY_SETTING: &str = "skipTlsVerify";
+/// 接通电源时防止系统休眠（默认关闭）。
+pub const PREVENT_SLEEP_ON_AC_SETTING: &str = "preventSleepOnAc";
 
 /// 一轮保留清理最多删多少行：无上限的 DELETE 会把服务冻住，积压分批消化。
 pub const PRUNE_BATCH_ROWS: i64 = 5000;
@@ -81,6 +83,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   precheck_weekdays TEXT,
   precheck_time_start TEXT,
   precheck_time_end TEXT,
+  precheck_require_ac INTEGER NOT NULL DEFAULT 0,
+  precheck_ip_pattern TEXT,
   expect_status    INTEGER,
   expect_body      TEXT,
   expect_expr      TEXT
@@ -177,6 +181,8 @@ pub struct TaskRow {
     pub precheck_weekdays: Option<String>,
     pub precheck_time_start: Option<String>,
     pub precheck_time_end: Option<String>,
+    pub precheck_require_ac: i64,
+    pub precheck_ip_pattern: Option<String>,
     pub expect_status: Option<i64>,
     pub expect_body: Option<String>,
     pub expect_expr: Option<String>,
@@ -225,6 +231,8 @@ fn map_task(row: &Row<'_>) -> rusqlite::Result<TaskRow> {
         precheck_weekdays: row.get("precheck_weekdays")?,
         precheck_time_start: row.get("precheck_time_start")?,
         precheck_time_end: row.get("precheck_time_end")?,
+        precheck_require_ac: row.get("precheck_require_ac")?,
+        precheck_ip_pattern: row.get("precheck_ip_pattern")?,
         expect_status: row.get("expect_status")?,
         expect_body: row.get("expect_body")?,
         expect_expr: row.get("expect_expr")?,
@@ -365,6 +373,8 @@ pub struct NewTaskInput {
     pub precheck_weekdays: Option<Vec<i64>>,
     pub precheck_time_start: Option<String>,
     pub precheck_time_end: Option<String>,
+    pub precheck_require_ac: bool,
+    pub precheck_ip_pattern: Option<String>,
 }
 
 /// 创建/更新任务共用的列值计算（guard 开关的判定逻辑与 TS 版一致）。
@@ -374,6 +384,8 @@ struct TaskColumns {
     precheck: Option<RequestParts>,
     guard_enabled: bool,
     weekdays: Option<String>,
+    require_ac: bool,
+    ip_pattern: Option<String>,
 }
 
 fn task_columns(input: &NewTaskInput) -> TaskColumns {
@@ -395,7 +407,12 @@ fn task_columns(input: &NewTaskInput) -> TaskColumns {
         .unwrap_or(false)
         || input.precheck_time_start.is_some()
         || input.precheck_time_end.is_some();
-    let guard_enabled = input.precheck_enabled && (precheck.is_some() || local_guard);
+    let host_guard = input.precheck_require_ac
+        || input
+            .precheck_ip_pattern
+            .as_ref()
+            .map_or(false, |pattern| !pattern.is_empty());
+    let guard_enabled = input.precheck_enabled && (precheck.is_some() || local_guard || host_guard);
     let weekdays = if guard_enabled {
         input
             .precheck_weekdays
@@ -410,15 +427,24 @@ fn task_columns(input: &NewTaskInput) -> TaskColumns {
     } else {
         None
     };
+    let ip_pattern = if guard_enabled {
+        input
+            .precheck_ip_pattern
+            .clone()
+            .filter(|pattern| !pattern.is_empty())
+    } else {
+        None
+    };
     TaskColumns {
         notify_enabled,
         notify,
         precheck,
         guard_enabled,
         weekdays,
+        require_ac: guard_enabled && input.precheck_require_ac,
+        ip_pattern,
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // 全局连接
@@ -452,11 +478,15 @@ impl From<rusqlite::Error> for DbError {
     }
 }
 
-fn with_db<T>(callback: impl FnOnce(&mut Connection, &Path) -> Result<T, DbError>) -> Result<T, DbError> {
+fn with_db<T>(
+    callback: impl FnOnce(&mut Connection, &Path) -> Result<T, DbError>,
+) -> Result<T, DbError> {
     let mut guard = db_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db = guard.as_mut().ok_or_else(|| DbError("数据库尚未初始化，请先调用 initDb()".into()))?;
+    let db = guard
+        .as_mut()
+        .ok_or_else(|| DbError("数据库尚未初始化，请先调用 initDb()".into()))?;
     let path = db.path.clone();
     callback(&mut db.conn, &path)
 }
@@ -468,7 +498,9 @@ pub fn with_connection<T>(
     let mut guard = db_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db = guard.as_mut().ok_or_else(|| DbError("数据库尚未初始化，请先调用 initDb()".into()))?;
+    let db = guard
+        .as_mut()
+        .ok_or_else(|| DbError("数据库尚未初始化，请先调用 initDb()".into()))?;
     callback(&db.conn)
 }
 
@@ -492,14 +524,22 @@ pub fn resolve_db_path(path: Option<&str>, env: Option<&str>) -> PathBuf {
 }
 
 /// 追加列；返回 true 表示该列是本次新增的（需要回填的列据此只回填一次）。
-fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<bool, DbError> {
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<bool, DbError> {
     let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns: Vec<String> = statement
         .query_map([], |row| row.get::<_, String>(1))?
         .filter_map(|result| result.ok())
         .collect();
     if !columns.iter().any(|name| name == column) {
-        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
         return Ok(true);
     }
     Ok(false)
@@ -529,7 +569,9 @@ fn backfill_pause_from(conn: &mut Connection) -> Result<(), DbError> {
             "SELECT id, paused_until FROM tasks WHERE paused_until IS NOT NULL AND paused_from IS NULL",
         )?;
         let mapped = statement
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
             .filter_map(|result| result.ok())
             .collect();
         mapped
@@ -601,9 +643,8 @@ fn backfill_schedule_kind(conn: &mut Connection) -> Result<(), DbError> {
         return Ok(());
     }
     for (id, name, _, window_start, window_end) in broken {
-        let has_window = is_hhmm(&window_start)
-            && is_hhmm(&window_end)
-            && window_start != window_end;
+        let has_window =
+            is_hhmm(&window_start) && is_hhmm(&window_end) && window_start != window_end;
         if has_window {
             conn.execute(
                 "UPDATE tasks SET schedule_kind = 'daily', daily_jitter_minutes = 0,
@@ -620,9 +661,7 @@ fn backfill_schedule_kind(conn: &mut Connection) -> Result<(), DbError> {
                 params!["00:00", "00:05", id],
             )?;
         }
-        tracing::warn!(
-            "[jitter] 已把旧调度「{name}」改为「每天窗口」；请到页面确认执行时间"
-        );
+        tracing::warn!("[jitter] 已把旧调度「{name}」改为「每天窗口」；请到页面确认执行时间");
     }
     Ok(())
 }
@@ -630,7 +669,8 @@ fn backfill_schedule_kind(conn: &mut Connection) -> Result<(), DbError> {
 /// 给每个任务一个显式位置，保持「最新在前」的可见顺序。
 fn backfill_sort_order(conn: &mut Connection) -> Result<(), DbError> {
     let ids: Vec<String> = {
-        let mut statement = conn.prepare("SELECT id FROM tasks ORDER BY created_at DESC, rowid DESC")?;
+        let mut statement =
+            conn.prepare("SELECT id FROM tasks ORDER BY created_at DESC, rowid DESC")?;
         let mapped: Vec<String> = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .filter_map(|result| result.ok())
@@ -642,37 +682,83 @@ fn backfill_sort_order(conn: &mut Connection) -> Result<(), DbError> {
     }
     let tx = conn.transaction()?;
     for (index, id) in ids.iter().enumerate() {
-        tx.execute("UPDATE tasks SET sort_order = ?1 WHERE id = ?2", params![index as i64, id])?;
+        tx.execute(
+            "UPDATE tasks SET sort_order = ?1 WHERE id = ?2",
+            params![index as i64, id],
+        )?;
     }
     tx.commit()?;
     Ok(())
 }
 
 fn migrate(conn: &mut Connection) -> Result<(), DbError> {
-    ensure_column(conn, "tasks", "request_options", "TEXT NOT NULL DEFAULT '{}'")?;
-    ensure_column(conn, "tasks", "notify_options", "TEXT NOT NULL DEFAULT '{}'")?;
+    ensure_column(
+        conn,
+        "tasks",
+        "request_options",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )?;
+    ensure_column(
+        conn,
+        "tasks",
+        "notify_options",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )?;
     ensure_column(conn, "tasks", "paused_until", "INTEGER")?;
     ensure_column(conn, "tasks", "paused_from", "INTEGER")?;
     ensure_column(conn, "tasks", "expect_expr", "TEXT")?;
-    ensure_column(conn, "tasks", "schedule_kind", "TEXT NOT NULL DEFAULT 'daily'")?;
-    ensure_column(conn, "tasks", "daily_jitter_minutes", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        conn,
+        "tasks",
+        "schedule_kind",
+        "TEXT NOT NULL DEFAULT 'daily'",
+    )?;
+    ensure_column(
+        conn,
+        "tasks",
+        "daily_jitter_minutes",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(conn, "tasks", "interval_seconds", "INTEGER")?;
-    ensure_column(conn, "tasks", "interval_jitter_seconds", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        conn,
+        "tasks",
+        "interval_jitter_seconds",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(conn, "tasks", "interval_start_at", "INTEGER")?;
-    ensure_column(conn, "tasks", "precheck_enabled", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        conn,
+        "tasks",
+        "precheck_enabled",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(conn, "tasks", "precheck_curl_command", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_url", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_method", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_headers", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_body", "TEXT")?;
-    ensure_column(conn, "tasks", "precheck_options", "TEXT NOT NULL DEFAULT '{}'")?;
+    ensure_column(
+        conn,
+        "tasks",
+        "precheck_options",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )?;
     ensure_column(conn, "tasks", "precheck_expect_status", "INTEGER")?;
     ensure_column(conn, "tasks", "precheck_expr", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_weekdays", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_time_start", "TEXT")?;
     ensure_column(conn, "tasks", "precheck_time_end", "TEXT")?;
+    ensure_column(
+        conn,
+        "tasks",
+        "precheck_require_ac",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(conn, "tasks", "precheck_ip_pattern", "TEXT")?;
     ensure_column(conn, "logs", "run_source", "TEXT")?;
-    let sort_order_added = ensure_column(conn, "tasks", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+    let sort_order_added =
+        ensure_column(conn, "tasks", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
     // 只在列刚加时按创建时间回填一次；之后必须尊重用户拖动后的顺序。
     if sort_order_added {
         backfill_sort_order(conn)?;
@@ -697,8 +783,9 @@ pub fn init_db(path: Option<&str>) -> Result<(), DbError> {
 
     if target != Path::new(":memory:") {
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| DbError(format!("无法创建数据目录 {}: {error}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|error| {
+                DbError(format!("无法创建数据目录 {}: {error}", parent.display()))
+            })?;
         }
     }
 
@@ -731,7 +818,10 @@ pub fn reorder_tasks(ids: &[String]) -> Result<(), DbError> {
     with_db(|conn, _| {
         let tx = conn.transaction()?;
         for (index, id) in ids.iter().enumerate() {
-            tx.execute("UPDATE tasks SET sort_order = ?1 WHERE id = ?2", params![index as i64, id])?;
+            tx.execute(
+                "UPDATE tasks SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, id],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -754,10 +844,11 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
               precheck_enabled, precheck_curl_command, precheck_url, precheck_method, precheck_headers,
               precheck_body, precheck_options, precheck_expect_status, precheck_expr,
               precheck_weekdays, precheck_time_start, precheck_time_end,
+              precheck_require_ac, precheck_ip_pattern,
               expect_status, expect_body, expect_expr
             ) VALUES (
               ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-              ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44
+              ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46
             )",
             params![
                 id,
@@ -803,6 +894,8 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
                 columns.weekdays,
                 if columns.guard_enabled { input.precheck_time_start.clone() } else { None },
                 if columns.guard_enabled { input.precheck_time_end.clone() } else { None },
+                if columns.require_ac { 1 } else { 0 },
+                columns.ip_pattern,
                 input.expect_status,
                 input.expect_body,
                 input.expect_expr,
@@ -814,7 +907,11 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
 }
 
 /// 覆盖任务的可编辑配置，保留 id/status/next_run_at/paused_*/created_at。
-pub fn update_task_config(id: &str, input: &NewTaskInput, now: i64) -> Result<Option<TaskRow>, DbError> {
+pub fn update_task_config(
+    id: &str,
+    input: &NewTaskInput,
+    now: i64,
+) -> Result<Option<TaskRow>, DbError> {
     let columns = task_columns(input);
     let notify = columns.notify.as_ref();
     let precheck = columns.precheck.as_ref();
@@ -831,8 +928,9 @@ pub fn update_task_config(id: &str, input: &NewTaskInput, now: i64) -> Result<Op
               precheck_headers = ?26, precheck_body = ?27, precheck_options = ?28,
               precheck_expect_status = ?29, precheck_expr = ?30,
               precheck_weekdays = ?31, precheck_time_start = ?32, precheck_time_end = ?33,
-              expect_status = ?34, expect_body = ?35, expect_expr = ?36, updated_at = ?37
-             WHERE id = ?38",
+              precheck_require_ac = ?34, precheck_ip_pattern = ?35,
+              expect_status = ?36, expect_body = ?37, expect_expr = ?38, updated_at = ?39
+             WHERE id = ?40",
             params![
                 input.name,
                 input.curl_command,
@@ -869,6 +967,8 @@ pub fn update_task_config(id: &str, input: &NewTaskInput, now: i64) -> Result<Op
                 columns.weekdays,
                 if columns.guard_enabled { input.precheck_time_start.clone() } else { None },
                 if columns.guard_enabled { input.precheck_time_end.clone() } else { None },
+                if columns.require_ac { 1 } else { 0 },
+                columns.ip_pattern,
                 input.expect_status,
                 input.expect_body,
                 input.expect_expr,
@@ -891,7 +991,8 @@ pub fn get_task(id: &str) -> Result<Option<TaskRow>, DbError> {
 
 pub fn list_tasks() -> Result<Vec<TaskRow>, DbError> {
     with_db(|conn, _| {
-        let mut statement = conn.prepare("SELECT * FROM tasks ORDER BY sort_order ASC, created_at DESC")?;
+        let mut statement =
+            conn.prepare("SELECT * FROM tasks ORDER BY sort_order ASC, created_at DESC")?;
         let rows = statement.query_map([], map_task)?;
         Ok(rows.filter_map(|result| result.ok()).collect())
     })
@@ -946,7 +1047,12 @@ pub fn set_task_pause(
     })
 }
 
-pub fn update_task_status(id: &str, status: TaskStatus, next_run_at: Option<i64>, now: i64) -> Result<(), DbError> {
+pub fn update_task_status(
+    id: &str,
+    status: TaskStatus,
+    next_run_at: Option<i64>,
+    now: i64,
+) -> Result<(), DbError> {
     let text = match status {
         TaskStatus::Active => "active",
         TaskStatus::Stopped => "stopped",
@@ -1014,8 +1120,9 @@ pub fn insert_log(input: &NewLogInput) -> Result<i64, DbError> {
 
 pub fn get_log(id: i64) -> Result<Option<LogRow>, DbError> {
     with_db(|conn, _| {
-        let mut statement =
-            conn.prepare(&format!("SELECT {LOG_FULL_COLUMNS} FROM logs WHERE id = ?1"))?;
+        let mut statement = conn.prepare(&format!(
+            "SELECT {LOG_FULL_COLUMNS} FROM logs WHERE id = ?1"
+        ))?;
         let mut rows = statement.query_map(params![id], map_log)?;
         Ok(rows.next().transpose()?)
     })
@@ -1028,7 +1135,11 @@ pub struct LogCursor {
     pub id: i64,
 }
 
-pub fn list_logs(task_id: &str, limit: i64, before: Option<LogCursor>) -> Result<Vec<LogRow>, DbError> {
+pub fn list_logs(
+    task_id: &str,
+    limit: i64,
+    before: Option<LogCursor>,
+) -> Result<Vec<LogRow>, DbError> {
     with_db(|conn, _| {
         let mut statement;
         let mut rows;
@@ -1048,7 +1159,13 @@ pub fn list_logs(task_id: &str, limit: i64, before: Option<LogCursor>) -> Result
                       LIMIT ?5",
                 )?;
                 rows = statement.query_map(
-                    params![task_id, cursor.executed_at, cursor.executed_at, cursor.id, limit],
+                    params![
+                        task_id,
+                        cursor.executed_at,
+                        cursor.executed_at,
+                        cursor.id,
+                        limit
+                    ],
                     map_log,
                 )?;
             }
@@ -1127,10 +1244,7 @@ pub fn incremental_vacuum(pages: i64) -> Result<i64, DbError> {
         return Ok(0);
     }
     with_db(|conn, _| {
-        conn.execute_batch(&format!(
-            "PRAGMA incremental_vacuum({});",
-            pages.max(1)
-        ))?;
+        conn.execute_batch(&format!("PRAGMA incremental_vacuum({});", pages.max(1)))?;
         Ok(pages)
     })
 }
@@ -1151,7 +1265,9 @@ pub fn db_path() -> Option<PathBuf> {
 }
 
 fn file_size(path: &Path) -> i64 {
-    std::fs::metadata(path).map(|meta| meta.len() as i64).unwrap_or(0)
+    std::fs::metadata(path)
+        .map(|meta| meta.len() as i64)
+        .unwrap_or(0)
 }
 
 /// 数据库与 WAL/SHM 侧车文件的实际大小。
@@ -1191,7 +1307,11 @@ const LOG_BYTES_EXPR: &str = "(
   length(coalesce(error, '')) + 64
 )";
 
-fn count_logs(conn: &Connection, where_clause: &str, cutoff: Option<i64>) -> Result<LogCountRow, DbError> {
+fn count_logs(
+    conn: &Connection,
+    where_clause: &str,
+    cutoff: Option<i64>,
+) -> Result<LogCountRow, DbError> {
     let sql = format!(
         "SELECT count(*) AS count,
                 coalesce(sum({LOG_BYTES_EXPR}), 0) AS bytes,
@@ -1285,7 +1405,11 @@ pub struct LogPruneOutcome {
 }
 
 /// 保留清理：删超过 `retention_days` 的日志，和每任务只留最新的 `max_rows_per_task` 条。
-pub fn prune_logs(now: i64, retention_days: i64, max_rows_per_task: i64) -> Result<LogPruneOutcome, DbError> {
+pub fn prune_logs(
+    now: i64,
+    retention_days: i64,
+    max_rows_per_task: i64,
+) -> Result<LogPruneOutcome, DbError> {
     with_db(|conn, _| {
         let mut by_age = 0i64;
         let mut by_count = 0i64;
@@ -1417,6 +1541,13 @@ pub fn get_skip_tls_verify() -> bool {
     }
 }
 
+pub fn get_prevent_sleep_on_ac() -> bool {
+    match get_setting(PREVENT_SLEEP_ON_AC_SETTING) {
+        Ok(Some(value)) => value.trim() == "1",
+        _ => false,
+    }
+}
+
 pub fn get_effective_retention_days(default_days: i64) -> Result<i64, DbError> {
     if let Some(raw) = get_setting(LOG_RETENTION_SETTING)? {
         if let Ok(parsed) = raw.parse::<i64>() {
@@ -1456,7 +1587,9 @@ pub fn cleanup_logs(cutoff: Option<i64>) -> Result<LogCleanupOutcome, DbError> {
     let (deleted, vacuum_error) = with_db(|conn, _| {
         let deleted = match cutoff {
             None => conn.execute("DELETE FROM logs", [])?,
-            Some(value) => conn.execute("DELETE FROM logs WHERE executed_at < ?1", params![value])?,
+            Some(value) => {
+                conn.execute("DELETE FROM logs WHERE executed_at < ?1", params![value])?
+            }
         } as i64;
         let mut vacuum_error = None;
         let result = (|| -> rusqlite::Result<()> {
@@ -1493,7 +1626,13 @@ fn count_remaining() -> Result<i64, DbError> {
 }
 
 /// 持久化一条测试台留档并清理超过 TEST_RUN_KEEP 的旧记录。
-pub fn insert_test_run(task_id: &str, ok: bool, summary: &str, steps: &str, created_at: i64) -> Result<i64, DbError> {
+pub fn insert_test_run(
+    task_id: &str,
+    ok: bool,
+    summary: &str,
+    steps: &str,
+    created_at: i64,
+) -> Result<i64, DbError> {
     with_db(|conn, _| {
         let tx = conn.transaction()?;
         tx.execute(
@@ -1544,7 +1683,9 @@ pub fn list_test_runs(task_id: &str, limit: i64) -> Result<Vec<TestRunSummaryRow
 
 pub fn get_test_run(id: i64) -> Result<Option<TestRunRow>, DbError> {
     with_db(|conn, _| {
-        let mut statement = conn.prepare("SELECT id, task_id, created_at, ok, summary, steps FROM test_runs WHERE id = ?1")?;
+        let mut statement = conn.prepare(
+            "SELECT id, task_id, created_at, ok, summary, steps FROM test_runs WHERE id = ?1",
+        )?;
         let mut rows = statement.query_map(params![id], |row| {
             Ok(TestRunRow {
                 id: row.get(0)?,

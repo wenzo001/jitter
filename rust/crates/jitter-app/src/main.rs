@@ -219,6 +219,9 @@ async fn run() -> anyhow::Result<()> {
     jitter_core::db::init_db(Some(&db_path))?;
     tracing::info!("数据库: {db_path}");
 
+    // 全局设置：接通电源时防止系统休眠（默认关闭）。
+    jitter_core::host::set_prevent_sleep(jitter_core::db::get_prevent_sleep_on_ac());
+
     // 调度器。
     let recovered = scheduler::start().await?;
     tracing::info!("已恢复 {recovered} 个 active 任务");

@@ -46,6 +46,9 @@ const els = {
   precheckCurl: document.getElementById("precheck-curl"),
   precheckStatus: document.getElementById("precheck-status"),
   precheckExpr: document.getElementById("precheck-expr"),
+  precheckRequireAc: document.getElementById("precheck-require-ac"),
+  precheckIpPattern: document.getElementById("precheck-ip-pattern"),
+  precheckEnvHint: document.getElementById("precheck-env-hint"),
   notifyEnabled: document.getElementById("notify-enabled"),
   notifyFields: document.getElementById("notify-fields"),
   notifyCurl: document.getElementById("notify-curl"),
@@ -86,6 +89,7 @@ const els = {
   swApplyUpdate: document.getElementById("sw-apply-update"),
   appVersion: document.getElementById("app-version"),
   skipTlsVerify: document.getElementById("skip-tls-verify"),
+  preventSleepOnAc: document.getElementById("prevent-sleep-on-ac"),
   upgradeBanner: document.getElementById("upgrade-banner"),
   upgradeBannerText: document.getElementById("upgrade-banner-text"),
   upgradeBannerClose: document.getElementById("upgrade-banner-close"),
@@ -153,6 +157,9 @@ const els = {
   testPrecheckCurl: document.getElementById("test-precheck-curl"),
   testPrecheckStatus: document.getElementById("test-precheck-status"),
   testPrecheckExpr: document.getElementById("test-precheck-expr"),
+  testPrecheckRequireAc: document.getElementById("test-precheck-require-ac"),
+  testPrecheckIpPattern: document.getElementById("test-precheck-ip-pattern"),
+  testPrecheckEnvHint: document.getElementById("test-precheck-env-hint"),
   testExpectStatus: document.getElementById("test-expect-status"),
   testExpectExpr: document.getElementById("test-expect-expr"),
   testExpectBody: document.getElementById("test-expect-body"),
@@ -434,6 +441,38 @@ function syncNotify() {
 
 function syncPrecheck() {
   els.precheckFields.hidden = !els.precheckEnabled.checked;
+  if (els.precheckEnabled.checked) void refreshPrecheckEnvHint();
+}
+
+let hostEnvironmentCache = null;
+
+/** 当前电源 / 本机 IP 提示：编辑任务时帮助填写 IP 条件。 */
+async function loadHostEnvironment(refresh = false) {
+  if (hostEnvironmentCache && !refresh) return hostEnvironmentCache;
+  try {
+    hostEnvironmentCache = await api("/api/system/environment", {
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    hostEnvironmentCache = null;
+  }
+  return hostEnvironmentCache;
+}
+
+function describeHostEnvironment(env) {
+  if (!env) return "";
+  const power =
+    env.onAcPower === true ? "已接通电源" : env.onAcPower === false ? "电池供电" : "电源状态未知";
+  const ips =
+    Array.isArray(env.localIps) && env.localIps.length > 0 ? env.localIps.join(", ") : "未读取到";
+  return `当前电源：${power} · 当前本机 IP：${ips}`;
+}
+
+async function refreshPrecheckEnvHint() {
+  const env = await loadHostEnvironment(true);
+  const text = describeHostEnvironment(env);
+  if (els.precheckEnvHint) els.precheckEnvHint.textContent = text;
+  if (els.testPrecheckEnvHint) els.testPrecheckEnvHint.textContent = text;
 }
 
 function weekdayBoxes(containerId) {
@@ -1450,6 +1489,7 @@ async function loadRequestSettings() {
   try {
     const settings = await api("/api/settings", { signal: AbortSignal.timeout(5_000) });
     if (els.skipTlsVerify) els.skipTlsVerify.checked = settings?.skipTlsVerify !== false;
+    if (els.preventSleepOnAc) els.preventSleepOnAc.checked = settings?.preventSleepOnAc === true;
   } catch {
     // 读不到就保持界面默认（勾选）。
   }
@@ -1463,6 +1503,21 @@ async function saveSkipTlsVerify(checked) {
     });
     setStatus(checked ? "已开启：默认跳过 TLS 证书校验" : "已关闭默认跳过（仅 -k 生效）");
   } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+async function savePreventSleepOnAc(checked) {
+  try {
+    await api("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({ preventSleepOnAc: checked }),
+    });
+    setStatus(
+      checked ? "已开启：接通电源时防止系统休眠" : "已关闭：恢复系统默认休眠策略",
+    );
+  } catch (error) {
+    if (els.preventSleepOnAc) els.preventSleepOnAc.checked = !checked;
     setStatus(error.message, true);
   }
 }
@@ -2199,6 +2254,8 @@ function setEditMode(task) {
   setCheckedWeekdays("precheck-weekdays", storedWeekdays);
   els.precheckTimeStart.value = task.precheck_time_start ?? "";
   els.precheckTimeEnd.value = task.precheck_time_end ?? "";
+  els.precheckRequireAc.checked = task.precheck_require_ac === 1;
+  els.precheckIpPattern.value = task.precheck_ip_pattern ?? "";
 }
 
 function clearEditMode() {
@@ -2320,6 +2377,10 @@ async function onCreate(event) {
     const precheckCurl = els.precheckCurl.value.trim();
     if (precheckCurl) payload.precheck_curl = precheckCurl;
 
+    const ipPattern = els.precheckIpPattern.value.trim();
+    if (ipPattern) payload.precheck_ip_pattern = ipPattern;
+    if (els.precheckRequireAc.checked) payload.precheck_require_ac = true;
+
     const rawPreStatus = els.precheckStatus.value.trim();
     let preStatus = null;
     if (rawPreStatus !== "") {
@@ -2337,8 +2398,8 @@ async function onCreate(event) {
     if (preStatus !== null) payload.precheck_expect_status = preStatus;
     if (preExpr) payload.precheck_expr = preExpr;
 
-    if (days.length === 0 && !timeStart && !precheckCurl) {
-      showFormError("启用执行前判断时，至少配置执行星期、执行时段或前置 curl 之一");
+    if (days.length === 0 && !timeStart && !ipPattern && !els.precheckRequireAc.checked && !precheckCurl) {
+      showFormError("启用执行前判断时，至少配置执行星期、执行时段、电源、本机 IP 或前置 curl 之一");
       return;
     }
   }
@@ -3037,6 +3098,7 @@ function formCurl() {
 
 function syncTestPrecheck() {
   els.testPrecheckFields.hidden = !els.testPrecheckEnabled.checked;
+  if (els.testPrecheckEnabled.checked) void refreshPrecheckEnvHint();
 }
 
 function syncTestNotify() {
@@ -3079,6 +3141,8 @@ function openTestDialog(task = null) {
     );
     els.testPrecheckTimeStart.value = task.precheck_time_start ?? "";
     els.testPrecheckTimeEnd.value = task.precheck_time_end ?? "";
+    els.testPrecheckRequireAc.checked = task.precheck_require_ac === 1;
+    els.testPrecheckIpPattern.value = task.precheck_ip_pattern ?? "";
     els.testExpectStatus.value =
       task.expect_status === null || task.expect_status === undefined
         ? ""
@@ -3096,6 +3160,8 @@ function openTestDialog(task = null) {
     setCheckedWeekdays("test-precheck-weekdays", checkedWeekdays("precheck-weekdays"));
     els.testPrecheckTimeStart.value = els.precheckTimeStart.value;
     els.testPrecheckTimeEnd.value = els.precheckTimeEnd.value;
+    els.testPrecheckRequireAc.checked = els.precheckRequireAc.checked;
+    els.testPrecheckIpPattern.value = els.precheckIpPattern.value.trim();
     els.testExpectStatus.value = els.expectStatus.value;
     els.testExpectExpr.value = els.expectExpr.value.trim();
     els.testExpectBody.value = els.expectBody.value;
@@ -3270,6 +3336,8 @@ function applyTestToForm() {
   setCheckedWeekdays("precheck-weekdays", checkedWeekdays("test-precheck-weekdays"));
   els.precheckTimeStart.value = els.testPrecheckTimeStart.value;
   els.precheckTimeEnd.value = els.testPrecheckTimeEnd.value;
+  els.precheckRequireAc.checked = els.testPrecheckRequireAc.checked;
+  els.precheckIpPattern.value = els.testPrecheckIpPattern.value.trim();
 
   els.expectStatus.value = els.testExpectStatus.value;
   els.expectExpr.value = els.testExpectExpr.value;
@@ -3351,6 +3419,10 @@ async function sendTest() {
     const precheckCurl = els.testPrecheckCurl.value.trim();
     if (precheckCurl) payload.precheck_curl = precheckCurl;
 
+    const ipPattern = els.testPrecheckIpPattern.value.trim();
+    if (ipPattern) payload.precheck_ip_pattern = ipPattern;
+    if (els.testPrecheckRequireAc.checked) payload.precheck_require_ac = true;
+
     const rawStatus = els.testPrecheckStatus.value.trim();
     const rawExpr = els.testPrecheckExpr.value.trim();
     if (!precheckCurl && (rawStatus !== "" || rawExpr !== "")) {
@@ -3361,8 +3433,8 @@ async function sendTest() {
     if (rawStatus !== "") payload.precheck_expect_status = Number(rawStatus);
     if (rawExpr !== "") payload.precheck_expr = rawExpr;
 
-    if (days.length === 0 && !timeStart && !precheckCurl) {
-      els.testError.textContent = "启用执行前判断时，至少配置执行星期、执行时段或前置 curl 之一";
+    if (days.length === 0 && !timeStart && !ipPattern && !els.testPrecheckRequireAc.checked && !precheckCurl) {
+      els.testError.textContent = "启用执行前判断时，至少配置执行星期、执行时段、电源、本机 IP 或前置 curl 之一";
       els.testError.hidden = false;
       return;
     }
@@ -3467,6 +3539,11 @@ function bindEvents() {
   els.upgradeBannerClose.addEventListener("click", hideUpgradeBanner);
   if (els.skipTlsVerify) {
     els.skipTlsVerify.addEventListener("change", () => void saveSkipTlsVerify(els.skipTlsVerify.checked));
+  }
+  if (els.preventSleepOnAc) {
+    els.preventSleepOnAc.addEventListener("change", () =>
+      void savePreventSleepOnAc(els.preventSleepOnAc.checked),
+    );
   }
   els.swQuit.addEventListener("click", () => void quitApp());
   els.backupCreate.addEventListener("click", () => void createBackupSnapshot());
