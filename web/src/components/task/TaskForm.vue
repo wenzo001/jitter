@@ -20,6 +20,7 @@ const tasksStore = useTasksStore()
 
 const emit = defineEmits<{
   saved: [task: Task]
+  close: []
 }>()
 
 const model = ref<TaskFormModel>(emptyFormModel())
@@ -167,12 +168,19 @@ function resetForm(statusText?: string) {
 
 function onCancel() {
   if (!dirty.value) {
-    resetForm(editingId.value ? '已取消编辑' : undefined)
+    resetForm()
+    emit('close')
     return
   }
-  askThen('放弃未保存的修改？', '当前填写的内容还没有保存，取消后会清空。', '放弃修改', () => {
-    resetForm(editingId.value ? '已取消编辑' : '已重置表单')
+  askThen('放弃未保存的修改？', '当前填写的内容还没有保存，关闭后会清空。', '放弃修改', () => {
+    resetForm()
+    emit('close')
   })
+}
+
+/** 打开「新建任务」：清空上一次的编辑状态。 */
+function startCreate() {
+  resetForm()
 }
 
 function resetIfEditing(taskId: string) {
@@ -489,6 +497,7 @@ async function submit() {
     await tasksStore.load()
     tasksStore.select(task.id)
     emit('saved', task)
+    emit('close')
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     app.setStatus(message, true)
@@ -549,19 +558,18 @@ function applyTest(config: TestBenchConfig) {
   app.setStatus('已把试跑配置带入表单，确认后点「创建任务」或「保存修改」')
 }
 
-defineExpose({ loadTask, resetIfEditing, isDirty: dirty, applyTestConfig: applyTest })
+defineExpose({
+  loadTask,
+  resetIfEditing,
+  isDirty: dirty,
+  applyTestConfig: applyTest,
+  startCreate,
+  requestClose: onCancel,
+})
 </script>
 
 <template>
-  <div class="panel">
-    <div class="panel-head">
-      <h2 class="panel-title">
-        {{ editingId ? '编辑任务' : '新建任务' }}
-        <small v-if="editingId">正在编辑「{{ editingName }}」</small>
-      </h2>
-      <span v-if="dirty" class="muted" style="font-size: 12px">有未保存的修改</span>
-    </div>
-
+  <div class="task-form-shell">
     <form class="task-form" novalidate @submit.prevent="submit">
       <!-- 1. 请求 -->
       <section class="form-section">
@@ -899,7 +907,7 @@ defineExpose({ loadTask, resetIfEditing, isDirty: dirty, applyTestConfig: applyT
           <template v-else>带 <span class="req">*</span> 为必填；其余可留空使用默认值</template>
         </div>
         <div class="buttons">
-          <a-button @click="onCancel">{{ editingId ? '取消编辑' : '重置' }}</a-button>
+          <a-button @click="onCancel">{{ editingId ? '取消编辑' : '取消' }}</a-button>
           <a-button type="primary" :loading="submitting" @click="submit">
             {{ editingId ? '保存修改' : '创建任务' }}
           </a-button>

@@ -33,6 +33,9 @@ const settingsOpen = ref(false)
 const cleanupOpen = ref(false)
 const globalTestOpen = ref(false)
 
+const formOpen = ref(false)
+const formTitle = ref('新建任务')
+
 const pauseOpen = ref(false)
 const pauseTarget = ref<Task | null>(null)
 const deleteOpen = ref(false)
@@ -87,16 +90,28 @@ function selectTask(id: string) {
   tasks.select(id)
 }
 
+function openCreate() {
+  taskFormRef.value?.startCreate()
+  formTitle.value = '新建任务'
+  formOpen.value = true
+}
+
 async function editTask(task: Task) {
   try {
     const data = await getTask(task.id)
     if (!data?.task) return
+    formTitle.value = `编辑任务 · ${data.task.name}`
     taskFormRef.value?.loadTask(data.task)
-    document.querySelector('.task-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    formOpen.value = true
     app.setStatus(`正在编辑任务「${task.name}」`)
   } catch (error) {
     app.setStatus(error instanceof Error ? error.message : String(error), true)
   }
+}
+
+function closeFormPanel() {
+  formOpen.value = false
+  formTitle.value = '新建任务'
 }
 
 async function testTask(task: Task) {
@@ -132,8 +147,10 @@ function openGlobalTest() {
 }
 
 function applyGlobalTest(config: TestBenchConfig) {
+  taskFormRef.value?.startCreate()
   taskFormRef.value?.applyTestConfig(config)
-  document.querySelector('.task-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  formTitle.value = '新建任务'
+  formOpen.value = true
 }
 
 async function onReorder(ids: string[]) {
@@ -281,70 +298,87 @@ onBeforeUnmount(() => {
 
 <template>
   <a-config-provider :locale="zhCN" :theme="theme">
-    <header class="app-topbar">
-      <div class="topbar-inner">
-        <div class="brand">
-          <span class="brand-mark" />
-          <span class="brand-name">Jitter</span>
-          <span v-if="app.version" class="muted" style="font-size: 12px">v{{ app.version }}</span>
-          <span class="brand-sub">先测通，再定时 · 按秒 / 分 / 时 / 天调用 curl</span>
-        </div>
-        <div class="topbar-actions">
-          <span v-if="metricsText" class="metrics-strip">{{ metricsText }}</span>
-          <a-button size="small" @click="statsOpen = true">统计</a-button>
-          <a-button size="small" @click="settingsOpen = true">设置</a-button>
-          <a-button size="small" type="primary" ghost @click="openGlobalTest">试跑 curl</a-button>
-          <span class="status-line" :class="{ 'is-error': app.status.error }">{{ app.status.text }}</span>
-        </div>
-      </div>
-    </header>
-
-    <a-alert
-      v-if="app.banner"
-      :type="app.banner.kind === 'success' ? 'success' : 'error'"
-      :message="app.banner.text"
-      banner
-      closable
-      style="border-radius: 0"
-      @close="app.dismissBanner()"
-    />
-
-    <main class="page">
-      <div class="layout">
-        <section class="column">
-          <div class="panel">
-            <div class="panel-head">
-              <h2 class="panel-title">任务 <small>{{ tasks.tasks.length }} 个</small></h2>
-              <a-button size="small" type="text" :loading="tasks.loading" @click="refreshAll">
-                刷新
-              </a-button>
-            </div>
-            <TaskList
-              :tasks="tasks.tasks"
-              :selected-id="tasks.selectedId"
-              :now="tasks.now"
-              :busy-id="busyId"
-              @select="selectTask"
-              @run="onRun"
-              @edit="editTask"
-              @test="testTask"
-              @pause="openPause"
-              @resume-pause="action($event, 'resumePause')"
-              @stop="action($event, 'stop')"
-              @start="action($event, 'start')"
-              @remove="openDelete"
-              @reorder="onReorder"
-            />
+    <div class="app-shell">
+      <header class="app-topbar">
+        <div class="topbar-inner">
+          <div class="brand">
+            <span class="brand-mark" />
+            <span class="brand-name">Jitter</span>
+            <span v-if="app.version" class="muted" style="font-size: 12px">v{{ app.version }}</span>
+            <span class="brand-sub">先测通，再定时 · 按秒 / 分 / 时 / 天调用 curl</span>
           </div>
+          <div class="topbar-actions">
+            <span v-if="metricsText" class="metrics-strip">{{ metricsText }}</span>
+            <a-button size="small" @click="statsOpen = true">统计</a-button>
+            <a-button size="small" @click="settingsOpen = true">设置</a-button>
+            <a-button size="small" type="primary" ghost @click="openGlobalTest">试跑 curl</a-button>
+            <span class="status-line" :class="{ 'is-error': app.status.error }">{{ app.status.text }}</span>
+          </div>
+        </div>
+      </header>
 
-          <TaskForm ref="taskFormRef" @saved="refreshAll" />
-        </section>
+      <a-alert
+        v-if="app.banner"
+        :type="app.banner.kind === 'success' ? 'success' : 'error'"
+        :message="app.banner.text"
+        banner
+        closable
+        style="border-radius: 0"
+        @close="app.dismissBanner()"
+      />
 
-        <section class="column">
-          <LogsPanel @cleanup="cleanupOpen = true" />
-        </section>
-      </div>
-    </main>
+      <main class="page">
+        <div class="layout">
+          <section class="column">
+            <div class="panel">
+              <div class="panel-head">
+                <h2 class="panel-title">任务 <small>{{ tasks.tasks.length }} 个</small></h2>
+                <div class="panel-actions">
+                  <a-button size="small" type="primary" @click="openCreate">新建任务</a-button>
+                  <a-button size="small" type="text" :loading="tasks.loading" @click="refreshAll">
+                    刷新
+                  </a-button>
+                </div>
+              </div>
+              <TaskList
+                :tasks="tasks.tasks"
+                :selected-id="tasks.selectedId"
+                :now="tasks.now"
+                :busy-id="busyId"
+                @select="selectTask"
+                @run="onRun"
+                @edit="editTask"
+                @test="testTask"
+                @pause="openPause"
+                @resume-pause="action($event, 'resumePause')"
+                @stop="action($event, 'stop')"
+                @start="action($event, 'start')"
+                @remove="openDelete"
+                @reorder="onReorder"
+              />
+            </div>
+          </section>
+
+          <section class="column">
+            <LogsPanel @cleanup="cleanupOpen = true" />
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <a-modal
+      :open="formOpen"
+      :title="formTitle"
+      width="min(920px, 96vw)"
+      :footer="null"
+      :mask-closable="false"
+      :style="{ top: '40px' }"
+      wrap-class-name="task-form-modal"
+      force-render
+      @cancel="taskFormRef?.requestClose()"
+    >
+      <TaskForm ref="taskFormRef" @saved="refreshAll" @close="closeFormPanel" />
+    </a-modal>
 
     <PauseDialog v-model:open="pauseOpen" :task="pauseTarget" @saved="onPauseSaved" />
     <DeleteTaskDialog v-model:open="deleteOpen" :task="deleteTarget" @deleted="onDeleted" />

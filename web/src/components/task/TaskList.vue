@@ -82,7 +82,7 @@ function moveBy(task: Task, delta: number) {
 
 <template>
   <div v-if="tasks.length === 0" class="empty">
-    还没有任务。把 curl 粘到下面的表单，点「先试跑」确认能通，再选择执行时间保存。
+    还没有任务。点右上角「新建任务」，把 curl 粘进来，先试跑确认能通，再选择执行时间保存。
   </div>
   <div v-else class="task-list" @dragend="resetDrag">
     <div
