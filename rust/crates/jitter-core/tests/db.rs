@@ -81,6 +81,32 @@ fn task_with_guard(name: &str) -> NewTaskInput {
 }
 
 #[test]
+fn run_on_startup_round_trips_and_defaults_off() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = format!("{dir}\\app.db");
+    let _ = fs::remove_file(&path);
+    init_db(Some(&path)).expect("init");
+
+    let mut input = task_input("startup");
+    let off = create_task(&input, "t0", 1000).expect("create");
+    assert_eq!(off.run_on_startup, 0, "默认关闭");
+
+    input.run_on_startup = true;
+    let on = create_task(&input, "t1", 1000).expect("create");
+    assert_eq!(on.run_on_startup, 1);
+
+    input.run_on_startup = false;
+    let updated = update_task_config("t1", &input, 2000)
+        .expect("update")
+        .expect("exists");
+    assert_eq!(updated.run_on_startup, 0);
+
+    cleanup(&path);
+    close_db();
+}
+
+#[test]
 fn creates_and_reads_a_task_with_notification_config() {
     let dir = temp_dir();
     let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -49,6 +49,7 @@ const els = {
   precheckRequireAc: document.getElementById("precheck-require-ac"),
   precheckIpPattern: document.getElementById("precheck-ip-pattern"),
   precheckEnvHint: document.getElementById("precheck-env-hint"),
+  runOnStartup: document.getElementById("run-on-startup"),
   notifyEnabled: document.getElementById("notify-enabled"),
   notifyFields: document.getElementById("notify-fields"),
   notifyCurl: document.getElementById("notify-curl"),
@@ -1709,6 +1710,9 @@ function renderTaskCard(task) {
       task.precheck_enabled
         ? h("span", { class: "badge badge-pending" }, "执行条件")
         : null,
+      task.run_on_startup === 1
+        ? h("span", { class: "badge status-muted", title: "Jitter 启动后会自动执行一次" }, "开机执行")
+        : null,
       requestOptions.insecure
         ? h("span", { class: "badge badge-insecure" }, "跳过 TLS 校验")
         : null,
@@ -1801,6 +1805,9 @@ function renderLog(log) {
       : null,
     log.run_source === "manual"
       ? h("span", { class: "badge status-muted", title: "页面「立即执行」触发，不是定时触发" }, "手动")
+      : null,
+    log.run_source === "startup"
+      ? h("span", { class: "badge status-muted", title: "Jitter 启动后自动执行" }, "开机")
       : null,
   );
 
@@ -2269,6 +2276,7 @@ function setEditMode(task) {
   syncExpectBlock(true);
 
   els.precheckEnabled.checked = task.precheck_enabled === 1;
+  els.runOnStartup.checked = task.run_on_startup === 1;
   syncPrecheck();
   els.precheckCurl.value = precheckCurlFromTask(task);
   els.precheckStatus.value =
@@ -2328,6 +2336,7 @@ async function onCreate(event) {
     mode,
     notify_enabled: els.notifyEnabled.checked,
     precheck_enabled: els.precheckEnabled.checked,
+    run_on_startup: els.runOnStartup.checked,
   };
 
   if (scheduleKind === "daily") {

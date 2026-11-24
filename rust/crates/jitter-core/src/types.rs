@@ -70,13 +70,15 @@ impl LogKind {
     }
 }
 
-/// 一次执行的触发来源（写入 logs.run_source，页面据此区分手动/定时）。
+/// 一次执行的触发来源（写入 logs.run_source，页面据此区分手动/定时/开机）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunSource {
     /// 定时器触发。
     Scheduled,
     /// 页面「立即执行」。
     Manual,
+    /// Jitter 启动后按任务配置自动执行一次。
+    Startup,
 }
 
 impl RunSource {
@@ -84,6 +86,7 @@ impl RunSource {
         match self {
             RunSource::Scheduled => "scheduled",
             RunSource::Manual => "manual",
+            RunSource::Startup => "startup",
         }
     }
 }

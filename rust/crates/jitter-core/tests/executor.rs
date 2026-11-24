@@ -373,6 +373,39 @@ async fn local_guard_skips_the_main_request() {
 }
 
 #[tokio::test]
+async fn startup_run_honors_precheck_but_manual_bypasses() {
+    use chrono::Datelike;
+
+    let _db = setup_db(jitter_core::config::AppConfig::default());
+    let url = spawn_server(vec![http_response("200 OK", "ok")]).await;
+    let mut input = task_input(&url);
+    input.precheck_enabled = true;
+    // 选一个「明天」的星期，确保启动自动执行会被本地条件拦下。
+    let today = chrono::Local::now().weekday().num_days_from_sunday() as i64;
+    input.precheck_weekdays = Some(vec![(today + 1) % 7]);
+    let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
+
+    let startup = execute_task_run(
+        &task,
+        &CancellationToken::new(),
+        jitter_core::types::RunSource::Startup,
+    )
+    .await;
+    assert!(startup.skipped, "开机自动执行仍要检查执行条件");
+    assert_eq!(startup.status, None);
+
+    // 页面「立即执行」不受条件限制，会真实发出请求。
+    let manual = execute_task_run(
+        &task,
+        &CancellationToken::new(),
+        jitter_core::types::RunSource::Manual,
+    )
+    .await;
+    assert!(!manual.skipped);
+    assert!(manual.matched);
+}
+
+#[tokio::test]
 async fn curl_guard_failure_records_the_exchange() {
     let _db = setup_db(jitter_core::config::AppConfig {
         request_timeout_ms: 5000,

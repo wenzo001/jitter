@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -78,6 +79,76 @@ pub async fn start() -> anyhow::Result<usize> {
     });
     *SWEEP_HANDLE.lock().expect("sweep handle") = Some(sweep);
     Ok(recovered)
+}
+
+/// 进程启动后，对勾选「开机后自动执行一次」的任务各执行一次。
+/// 只在 main 启动时调用；恢复备份 / 导入后重启调度不会触发。
+/// 启动瞬间先固定任务清单，延迟 15 秒等网络就绪后再逐个执行；
+/// 执行前重新读取任务，尊重这 15 秒内用户做的停止/取消勾选/暂停。
+pub fn spawn_startup_runs() {
+    let Ok(tasks) = jitter_core::db::list_tasks() else {
+        return;
+    };
+    let ids: Vec<String> = tasks
+        .into_iter()
+        .filter(|task| task.run_on_startup == 1 && task.status == "active")
+        .map(|task| task.id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        if SWEEP_STOP.load(Ordering::SeqCst) {
+            return;
+        }
+        for id in ids {
+            if SWEEP_STOP.load(Ordering::SeqCst) {
+                return;
+            }
+            let Ok(Some(task)) = jitter_core::db::get_task(&id) else {
+                continue;
+            };
+            if task.run_on_startup == 0 || task.status != "active" {
+                continue;
+            }
+            // 暂停区间内不补跑（与定时调度保持一致）。
+            let now = executor::now_ms();
+            if let (Some(from), Some(until)) = (task.paused_from, task.paused_until) {
+                if now >= from && now < until {
+                    continue;
+                }
+            }
+            if !try_begin_run(&task.id) {
+                continue;
+            }
+            tracing::info!("[scheduler] startup run {}", task.id);
+            let cancel = CancellationToken::new();
+            RUNNING_NOW.fetch_add(1, Ordering::SeqCst);
+            let finish_id = task.id.clone();
+            let registered_id = task.id.clone();
+            let run_cancel = cancel.clone();
+            let handle = tokio::spawn(async move {
+                let _ = executor::execute_task_run(
+                    &task,
+                    &run_cancel,
+                    jitter_core::types::RunSource::Startup,
+                )
+                .await;
+                finish_run(&finish_id);
+            });
+            state().lock().expect("state").running.insert(
+                registered_id,
+                Running {
+                    cancel,
+                    handle,
+                    started_at: executor::now_ms(),
+                },
+            );
+            // 多任务错开半秒，避免开机瞬间同时发请求。
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
 }
 
 pub async fn stop() {

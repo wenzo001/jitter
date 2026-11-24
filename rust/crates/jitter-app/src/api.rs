@@ -406,6 +406,7 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
     } else {
         None
     };
+    let run_on_startup = to_boolean(object.get("run_on_startup"));
 
     if precheck_enabled {
         let has_local = precheck_weekdays.is_some() || precheck_time.is_some();
@@ -450,6 +451,7 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         precheck_time_end: precheck_time.as_ref().map(|(_, end)| end.clone()),
         precheck_require_ac,
         precheck_ip_pattern,
+        run_on_startup,
     })
 }
 

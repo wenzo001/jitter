@@ -225,6 +225,7 @@ async fn run() -> anyhow::Result<()> {
     // 调度器。
     let recovered = scheduler::start().await?;
     tracing::info!("已恢复 {recovered} 个 active 任务");
+    scheduler::spawn_startup_runs();
 
     // HTTP 服务。
     let app = api::build_router();

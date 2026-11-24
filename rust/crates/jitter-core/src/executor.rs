@@ -674,9 +674,9 @@ pub async fn execute_task_run(
 ) -> RunOutcome {
     let config: AppConfig = get_active_config();
 
-    // 前置判断只约束定时自动执行：页面「立即执行」是人工触发，跳过所有前置条件。
+    // 前置判断约束定时与开机自动执行：页面「立即执行」是人工触发，跳过所有前置条件。
     // 本地条件零成本；电源 / IP 读本机信息；guard curl 只在配置了的情况下才发。
-    if task.precheck_enabled == 1 && matches!(source, crate::types::RunSource::Scheduled) {
+    if task.precheck_enabled == 1 && !matches!(source, crate::types::RunSource::Manual) {
         let guard_config = local_guard_of(
             task.precheck_weekdays.as_deref(),
             task.precheck_time_start.as_deref(),

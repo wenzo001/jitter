@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   precheck_time_end TEXT,
   precheck_require_ac INTEGER NOT NULL DEFAULT 0,
   precheck_ip_pattern TEXT,
+  run_on_startup   INTEGER NOT NULL DEFAULT 0,
   expect_status    INTEGER,
   expect_body      TEXT,
   expect_expr      TEXT
@@ -183,6 +184,7 @@ pub struct TaskRow {
     pub precheck_time_end: Option<String>,
     pub precheck_require_ac: i64,
     pub precheck_ip_pattern: Option<String>,
+    pub run_on_startup: i64,
     pub expect_status: Option<i64>,
     pub expect_body: Option<String>,
     pub expect_expr: Option<String>,
@@ -233,6 +235,7 @@ fn map_task(row: &Row<'_>) -> rusqlite::Result<TaskRow> {
         precheck_time_end: row.get("precheck_time_end")?,
         precheck_require_ac: row.get("precheck_require_ac")?,
         precheck_ip_pattern: row.get("precheck_ip_pattern")?,
+        run_on_startup: row.get("run_on_startup")?,
         expect_status: row.get("expect_status")?,
         expect_body: row.get("expect_body")?,
         expect_expr: row.get("expect_expr")?,
@@ -375,6 +378,8 @@ pub struct NewTaskInput {
     pub precheck_time_end: Option<String>,
     pub precheck_require_ac: bool,
     pub precheck_ip_pattern: Option<String>,
+    /// Jitter 启动后自动执行一次（单任务配置，默认关闭）。
+    pub run_on_startup: bool,
 }
 
 /// 创建/更新任务共用的列值计算（guard 开关的判定逻辑与 TS 版一致）。
@@ -756,6 +761,12 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column(conn, "tasks", "precheck_ip_pattern", "TEXT")?;
+    ensure_column(
+        conn,
+        "tasks",
+        "run_on_startup",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(conn, "logs", "run_source", "TEXT")?;
     let sort_order_added =
         ensure_column(conn, "tasks", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
@@ -845,10 +856,10 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
               precheck_body, precheck_options, precheck_expect_status, precheck_expr,
               precheck_weekdays, precheck_time_start, precheck_time_end,
               precheck_require_ac, precheck_ip_pattern,
-              expect_status, expect_body, expect_expr
+              expect_status, expect_body, expect_expr, run_on_startup
             ) VALUES (
               ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-              ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46
+              ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47
             )",
             params![
                 id,
@@ -899,6 +910,7 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
                 input.expect_status,
                 input.expect_body,
                 input.expect_expr,
+                if input.run_on_startup { 1 } else { 0 },
             ],
         )?;
         Ok(())
@@ -929,8 +941,9 @@ pub fn update_task_config(
               precheck_expect_status = ?29, precheck_expr = ?30,
               precheck_weekdays = ?31, precheck_time_start = ?32, precheck_time_end = ?33,
               precheck_require_ac = ?34, precheck_ip_pattern = ?35,
-              expect_status = ?36, expect_body = ?37, expect_expr = ?38, updated_at = ?39
-             WHERE id = ?40",
+              expect_status = ?36, expect_body = ?37, expect_expr = ?38,
+              run_on_startup = ?39, updated_at = ?40
+             WHERE id = ?41",
             params![
                 input.name,
                 input.curl_command,
@@ -972,6 +985,7 @@ pub fn update_task_config(
                 input.expect_status,
                 input.expect_body,
                 input.expect_expr,
+                if input.run_on_startup { 1 } else { 0 },
                 now,
                 id,
             ],
