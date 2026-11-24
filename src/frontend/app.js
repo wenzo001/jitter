@@ -55,6 +55,8 @@ const els = {
   expectStatus: document.getElementById("expect-status"),
   expectBody: document.getElementById("expect-body"),
   expectExpr: document.getElementById("expect-expr"),
+  expectBlock: document.getElementById("expect-block"),
+  expectSummary: document.getElementById("expect-summary"),
   formError: document.getElementById("form-error"),
   submit: document.getElementById("submit"),
   logsTitle: document.getElementById("logs-title"),
@@ -475,6 +477,27 @@ async function refreshPrecheckEnvHint() {
   if (els.testPrecheckEnvHint) els.testPrecheckEnvHint.textContent = text;
 }
 
+/** 「成功条件」默认折叠：只有自定义过才自动展开，并在标题旁说明当前规则。 */
+function syncExpectBlock(forceOpen = false) {
+  if (!els.expectBlock) return;
+  const parts = [];
+  if (els.expectStatus.value.trim()) parts.push(`状态码 ${els.expectStatus.value.trim()}`);
+  if (els.expectBody.value.trim()) parts.push("响应体相等");
+  if (els.expectExpr.value.trim()) parts.push(`表达式 ${els.expectExpr.value.trim()}`);
+  const custom = parts.length > 0;
+  if (els.expectSummary) {
+    els.expectSummary.textContent = custom
+      ? `已自定义：${parts.join(" + ")}`
+      : "默认：任意 2xx 视为成功";
+  }
+  if (forceOpen && custom) els.expectBlock.open = true;
+}
+
+function resetExpectBlock() {
+  if (els.expectBlock) els.expectBlock.open = false;
+  syncExpectBlock();
+}
+
 function weekdayBoxes(containerId) {
   const container = document.getElementById(containerId);
   return container ? [...container.querySelectorAll('input[type="checkbox"]')] : [];
@@ -515,10 +538,10 @@ function syncDailyMode() {
   els.dailyJitterField.hidden = mode !== "jitter";
   els.dailyHint.textContent =
     mode === "range"
-      ? "每天在窗口内随机挑一个时刻执行一次；结束早于开始视为跨午夜窗口（例如 23:50–00:10），按开始日计一次。"
+      ? "每天在开始~结束之间随机选一个时刻执行一次；结束早于开始表示跨午夜（例如 23:50–00:10），按开始那天计一次。"
       : mode === "exact"
-        ? "每天就在这个时刻执行一次，不随机。"
-        : "以该时刻为中心，前后各随机浮动 N 分钟内执行（例如 18:00 + 5 → 17:55 到 18:05 之间随机一个时刻）。";
+        ? "每天就在这个时间执行一次，不随机。"
+        : "以该时间为中心，前后各随机浮动 N 分钟内执行（例如 18:00 + 5 → 17:55 到 18:05 之间随机一个时刻）。";
   schedulePreview();
 }
 
@@ -1527,11 +1550,6 @@ function renderTaskCard(task) {
   const cross = kind === "daily" && task.window_end < task.window_start;
   const active = task.status === "active";
   const pause = active ? pauseStateOf(task) : null;
-  const conditions = [];
-  if (task.expect_status !== null) conditions.push(`状态=${task.expect_status}`);
-  if (task.expect_body !== null) conditions.push("响应体相等");
-  if (task.expect_expr !== null) conditions.push(`条件=${task.expect_expr}`);
-  if (!conditions.length) conditions.push("任意 2xx");
 
   let requestOptions = {};
   try {
@@ -1558,8 +1576,8 @@ function renderTaskCard(task) {
         ? pause.started
           ? `暂停至 ${formatDay(pause.until)}`
           : `${formatDay(pause.from)} 起暂停`
-        : "运行中"
-      : "已停止",
+        : "调度中"
+      : "已停用",
   );
 
   // A request that is in flight right now. Without this the user cannot tell
@@ -1591,6 +1609,7 @@ function renderTaskCard(task) {
       class: `task-card${task.id === state.selectedTaskId ? " selected" : ""}`,
       dataset: { id: task.id },
       tabindex: "0",
+      title: "点击查看这个任务的执行记录",
       "aria-label": `任务 ${task.name}`,
       "aria-current": task.id === state.selectedTaskId ? "true" : null,
     },
@@ -1634,7 +1653,7 @@ function renderTaskCard(task) {
                 class: "btn btn-primary",
                 type: "button",
                 dataset: { action: "run" },
-                title: "真实执行一次：会发请求，命中条件会发通知，并写入执行记录",
+                title: "真实执行一次：会发请求，满足成功条件会发通知，并写入执行记录",
               },
               "立即执行",
             ),
@@ -1662,14 +1681,22 @@ function renderTaskCard(task) {
                     h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "pause" } }, "调整暂停"),
                     h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "resume" } }, "取消暂停"),
                   ]
-                : h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "pause" } }, "暂停")
+                : h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "pause" } }, "暂停几天")
               : null,
             active
-              ? h("button", { class: "btn btn-quiet btn-danger-text", type: "button", dataset: { action: "stop" } }, "停止")
-              : h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "resume" } }, "恢复调度"),
+              ? h("button", { class: "btn btn-quiet btn-danger-text", type: "button", dataset: { action: "stop" } }, "停止调度")
+              : h("button", { class: "btn btn-quiet", type: "button", dataset: { action: "resume" } }, "启用调度"),
+            h(
+              "button",
+              {
+                class: "btn btn-quiet btn-danger-text",
+                type: "button",
+                dataset: { action: "delete" },
+              },
+              "删除任务",
+            ),
           ),
         ),
-        h("button", { class: "btn btn-danger", type: "button", dataset: { action: "delete" } }, "删除"),
       ),
     ),
     h(
@@ -1680,7 +1707,7 @@ function renderTaskCard(task) {
       brokenBadge,
       cross ? h("span", { class: "badge badge-cross" }, "跨午夜") : null,
       task.precheck_enabled
-        ? h("span", { class: "badge badge-pending" }, "前置判断")
+        ? h("span", { class: "badge badge-pending" }, "执行条件")
         : null,
       requestOptions.insecure
         ? h("span", { class: "badge badge-insecure" }, "跳过 TLS 校验")
@@ -1708,15 +1735,15 @@ function renderTaskCard(task) {
               ? `已暂停 ${calendarDays(pause.from, pause.until)} 天（${formatDay(pause.from)} 起），${formatTime(pause.until)} 恢复；下次 ${formatTime(task.next_run_at)}`
               : `下次 ${formatTime(task.next_run_at)}；${formatDay(pause.from)} 00:00 起暂停 ${calendarDays(pause.from, pause.until)} 天，${formatTime(pause.until)} 恢复`
             : `下次 ${formatTime(task.next_run_at)}`
-          : "已停止，历史日志保留",
+          : "调度已停用，历史记录保留",
       ),
       h("span", { class: "foot-sep", "aria-hidden": "true" }, "·"),
-      h("span", {}, task.notify_enabled ? `通知已开启（${conditions.join(" 且 ")}）` : "通知未开启"),
+      h("span", {}, task.notify_enabled ? "通知：成功时发送" : "通知：未开启"),
       h("span", { class: "foot-sep", "aria-hidden": "true" }, "·"),
       h(
         "span",
         {},
-        task.precheck_enabled ? "定时执行前会先判断，不满足则跳过（立即执行不受限）" : "无条件执行",
+        task.precheck_enabled ? "执行条件：已开启（仅定时）" : "无执行条件",
       ),
     ),
   );
@@ -1766,7 +1793,7 @@ function renderLog(log) {
       ? h(
           "span",
           { class: `badge ${log.matched ? "status-ok" : "status-muted"}` },
-          log.matched ? "命中成功条件" : "未命中",
+          log.matched ? "成功" : "未成功",
         )
       : null,
     log.kind === "notify" && log.parent_log_id !== null
@@ -1896,7 +1923,10 @@ function renderLogs() {
 
   if (!state.selectedTaskId) {
     els.logsEmpty.hidden = false;
-    els.logsEmpty.textContent = "选择一个任务查看执行记录";
+    els.logsEmpty.textContent =
+      state.tasks.length === 0
+        ? "创建任务后，这里会显示每次执行结果。"
+        : "点击任意任务卡片查看执行记录";
     return;
   }
   if (rows.length === 0) {
@@ -2088,7 +2118,7 @@ function renderMetricsStrip(data) {
   const parts = [
     item("今日", overview.today_runs, " 次"),
     item("近 7 天成功率", formatRate(overview.success_rate_7d)),
-    item("均", formatDuration(overview.avg_duration_ms_7d)),
+    item("均耗时", formatDuration(overview.avg_duration_ms_7d)),
   ];
   if (overview.running > 0) parts.push(item("", overview.running, " 个执行中"));
   const children = [];
@@ -2236,6 +2266,7 @@ function setEditMode(task) {
   els.expectStatus.value = task.expect_status === null ? "" : String(task.expect_status);
   els.expectBody.value = task.expect_body ?? "";
   els.expectExpr.value = task.expect_expr ?? "";
+  syncExpectBlock(true);
 
   els.precheckEnabled.checked = task.precheck_enabled === 1;
   syncPrecheck();
@@ -2274,6 +2305,7 @@ function cancelEdit() {
   syncSchedule();
   syncNotify();
   syncPrecheck();
+  resetExpectBlock();
   showFormError("");
   setStatus("已取消编辑");
 }
@@ -2285,6 +2317,7 @@ async function onCreate(event) {
   const name = els.name.value.trim();
   if (!name) {
     showFormError("请填写任务名称");
+    els.name.focus();
     return;
   }
   const scheduleKind = getScheduleKind();
@@ -2303,10 +2336,12 @@ async function onCreate(event) {
       const windowEnd = els.windowEnd.value;
       if (!windowStart || !windowEnd) {
         showFormError("请填写执行窗口");
+        els.windowStart.focus();
         return;
       }
       if (windowStart === windowEnd) {
-        showFormError("窗口起止时间不能相同；想要固定时刻请选「精确时间」");
+        showFormError("窗口起止时间不能相同；想要固定时刻请选「固定时间」");
+        els.windowStart.focus();
         return;
       }
       payload.window_start = windowStart;
@@ -2315,6 +2350,7 @@ async function onCreate(event) {
       const time = els.exactTime.value;
       if (!time) {
         showFormError("请选择每天的执行时间");
+        els.exactTime.focus();
         return;
       }
       payload.window_start = time;
@@ -2333,6 +2369,7 @@ async function onCreate(event) {
     const unit = Number(els.intervalUnit.value);
     if (!Number.isInteger(value) || value < 1) {
       showFormError("执行间隔必须是大于 0 的整数");
+      els.intervalValue.focus();
       return;
     }
     const seconds = value * unit;
@@ -2363,6 +2400,7 @@ async function onCreate(event) {
     const timeEnd = els.precheckTimeEnd.value;
     if ((timeStart && !timeEnd) || (!timeStart && timeEnd)) {
       showFormError("执行时段需要同时填写开始和结束时间");
+      els.precheckTimeStart.focus();
       return;
     }
     if (timeStart && timeEnd) {
@@ -2386,20 +2424,21 @@ async function onCreate(event) {
     if (rawPreStatus !== "") {
       preStatus = Number(rawPreStatus);
       if (!Number.isInteger(preStatus) || preStatus < 100 || preStatus > 599) {
-        showFormError("前置判断的期望状态码必须是 100–599 的整数");
+        showFormError("条件检查的期望状态码必须是 100–599 的整数");
         return;
       }
     }
     const preExpr = els.precheckExpr.value.trim();
     if (!precheckCurl && (preStatus !== null || preExpr)) {
-      showFormError("配置了前置状态码或表达式时，必须填写前置判断 curl");
+      showFormError("配置了条件状态码或表达式时，必须填写条件检查 curl");
+      els.precheckCurl.focus();
       return;
     }
     if (preStatus !== null) payload.precheck_expect_status = preStatus;
     if (preExpr) payload.precheck_expr = preExpr;
 
     if (days.length === 0 && !timeStart && !ipPattern && !els.precheckRequireAc.checked && !precheckCurl) {
-      showFormError("启用执行前判断时，至少配置执行星期、执行时段、电源、本机 IP 或前置 curl 之一");
+      showFormError("启用执行条件时，至少配置执行星期、执行时段、电源、本机 IP 或前置 curl 之一");
       return;
     }
   }
@@ -2408,6 +2447,7 @@ async function onCreate(event) {
     const curl = els.curl.value.trim();
     if (!curl) {
       showFormError("请粘贴 curl 命令");
+      els.curl.focus();
       return;
     }
     payload.curl = curl;
@@ -2415,6 +2455,7 @@ async function onCreate(event) {
     const url = els.url.value.trim();
     if (!url) {
       showFormError("请填写 URL");
+      els.url.focus();
       return;
     }
     payload.url = url;
@@ -2427,6 +2468,7 @@ async function onCreate(event) {
     const notifyCurl = els.notifyCurl.value.trim();
     if (!notifyCurl) {
       showFormError("请填写通知 curl");
+      els.notifyCurl.focus();
       return;
     }
     payload.notify_curl = notifyCurl;
@@ -2438,6 +2480,7 @@ async function onCreate(event) {
     const status = Number(rawStatus);
     if (!Number.isInteger(status) || status < 100 || status > 599) {
       showFormError("期望状态码必须是 100–599 的整数");
+      els.expectStatus.focus();
       return;
     }
     payload.expect_status = status;
@@ -2459,6 +2502,7 @@ async function onCreate(event) {
     syncSchedule();
     syncNotify();
     syncPrecheck();
+    resetExpectBlock();
     const savedMessage = !editingId
       ? `已创建任务「${data.task.name}」`
       : data.task.status === "active"
@@ -2485,7 +2529,7 @@ async function onTaskAction(button) {
   try {
     await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: "POST" });
     setStatus(
-      action === "stop" ? "任务已停止" : wasPaused ? "已取消暂停，任务恢复调度" : "任务已恢复",
+      action === "stop" ? "调度已停用" : wasPaused ? "已取消暂停，恢复定时执行" : "已启用调度",
     );
     await loadTasks({ silent: true });
     if (state.selectedTaskId === taskId) {
@@ -2509,7 +2553,7 @@ async function onRunNow(button) {
     !window.confirm(
       `立即执行任务「${name}」？
 
-会真实发送请求；命中成功条件时还会发送通知 curl，并写入执行记录。`,
+会真实发送请求；满足成功条件时还会发送通知 curl，并写入执行记录。`,
     )
   ) {
     return;
@@ -2527,12 +2571,12 @@ async function onRunNow(button) {
       signal: controller.signal,
     });
     const parts = [
-      data.skipped ? `任务「${name}」被前置判断跳过` : `任务「${name}」已执行一次`,
+      data.skipped ? `任务「${name}」被执行条件跳过` : `任务「${name}」已执行一次`,
     ];
     if (!data.skipped && data.status !== null) parts.push(`HTTP ${data.status}`);
     if (data.error) parts.push(data.error);
-    else if (data.matched) parts.push(data.notifySent ? "命中并发通知" : "命中条件");
-    else parts.push("未命中条件");
+    else if (data.matched) parts.push(data.notifySent ? "成功并发通知" : "成功");
+    else parts.push("未满足成功条件");
     if (!data.skipped) parts.push(`${data.durationMs} ms`);
     setStatus(parts.join(" · "), Boolean(data.error));
     await loadTasks({ silent: true });
@@ -3251,13 +3295,13 @@ function renderTestStep(step, index) {
 
 function renderTestResult(result) {
   const summary = result.summary ?? {};
-  let label = "未命中成功条件";
+  let label = "未满足成功条件";
   let cls = "status-warn";
   if (summary.skipped) {
-    label = "前置判断未通过，本次跳过";
+    label = "执行条件未满足，本次跳过";
     cls = "status-warn";
   } else if (summary.matched) {
-    label = summary.notifySent ? "命中成功条件并发通知" : "命中成功条件";
+    label = summary.notifySent ? "成功，已发送通知" : "成功";
     cls = "status-ok";
   } else if (summary.error) {
     label = "执行失败";
@@ -3302,7 +3346,7 @@ async function loadTestHistory(taskId) {
             title: "点击查看这次的步骤",
             onclick: () => showTestRun(run.id),
           },
-          `${formatShortTime(run.created_at)} ${run.ok ? "命中" : "未命中"}`,
+          `${formatShortTime(run.created_at)} ${run.ok ? "成功" : "未成功"}`,
         ),
       ),
     );
@@ -3426,7 +3470,7 @@ async function sendTest() {
     const rawStatus = els.testPrecheckStatus.value.trim();
     const rawExpr = els.testPrecheckExpr.value.trim();
     if (!precheckCurl && (rawStatus !== "" || rawExpr !== "")) {
-      els.testError.textContent = "配置了前置状态码或表达式时，必须填写前置判断 curl";
+      els.testError.textContent = "配置了条件状态码或表达式时，必须填写条件检查 curl";
       els.testError.hidden = false;
       return;
     }
@@ -3434,7 +3478,7 @@ async function sendTest() {
     if (rawExpr !== "") payload.precheck_expr = rawExpr;
 
     if (days.length === 0 && !timeStart && !ipPattern && !els.testPrecheckRequireAc.checked && !precheckCurl) {
-      els.testError.textContent = "启用执行前判断时，至少配置执行星期、执行时段、电源、本机 IP 或前置 curl 之一";
+      els.testError.textContent = "启用执行条件时，至少配置执行星期、执行时段、电源、本机 IP 或前置 curl 之一";
       els.testError.hidden = false;
       return;
     }
@@ -3511,6 +3555,10 @@ function bindEvents() {
   });
   els.notifyEnabled.addEventListener("change", syncNotify);
   els.precheckEnabled.addEventListener("change", syncPrecheck);
+  [els.expectStatus, els.expectBody, els.expectExpr].forEach((input) => {
+    input.addEventListener("input", () => syncExpectBlock());
+    input.addEventListener("change", () => syncExpectBlock());
+  });
   els.form.addEventListener("submit", onCreate);
   els.cancelEdit.addEventListener("click", cancelEdit);
 
@@ -3717,6 +3765,7 @@ async function init() {
   syncSchedule();
   syncNotify();
   syncPrecheck();
+  resetExpectBlock();
   initPauseDays();
   bindEvents();
   setStatus("加载中…");

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- 与托盘图标同一套设计（渐变圆角方块 + 白色表盘） -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%236c78ff'/%3E%3Cstop offset='1' stop-color='%239656ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='3.3' y='3.3' width='57.4' height='57.4' rx='16.6' fill='url(%23g)'/%3E%3Ccircle cx='32' cy='32' r='18.9' fill='none' stroke='%23fff' stroke-width='5'/%3E%3Cpath d='M32 32 L32 20.7' stroke='%23fff' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M32 32 L40.7 29.4' stroke='%23fff' stroke-width='4' stroke-linecap='round'/%3E%3Ccircle cx='32' cy='32' r='2.5' fill='%23fff'/%3E%3C/svg%3E" />
-    <title>Jitter · curl 测试台与定时调用</title>
+    <title>Jitter · curl 试跑与定时调用</title>
     <style>
       :root {
         --bg: #f5f6f8;
@@ -602,9 +602,51 @@
         border-top: 1px solid var(--border);
         background: #fafbfc;
       }
+      /* 新建 / 编辑表单：请求 → 时间 → 更多设置，三步扫读。 */
+      .form-section { display: flex; flex-direction: column; gap: 12px; border-top: 1px dashed var(--border); padding-top: 14px; }
+      .form-section:first-of-type { border-top: 0; padding-top: 0; }
+      .form-section-head { display: flex; gap: 10px; align-items: flex-start; }
+      .form-section-head .step {
+        flex: none;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .form-section-head h3 { margin: 0; font-size: 14px; }
+      .form-section-head p { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
+      .advanced-block { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+      .advanced-block > summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        cursor: pointer;
+        list-style: none;
+      }
+      .advanced-block > summary::-webkit-details-marker { display: none; }
+      .advanced-block > summary::before {
+        content: "▸";
+        color: var(--muted);
+        margin-right: 6px;
+        transition: transform 0.12s ease;
+      }
+      .advanced-block[open] > summary::before { transform: rotate(90deg); }
+      .advanced-title { font-size: 12.5px; font-weight: 650; color: #38445a; }
+      .advanced-note { margin-left: auto; font-size: 12px; color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62%; }
+      .advanced-body { border-top: 1px solid var(--border); padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+      .syntax-help > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+      .syntax-help p { margin: 8px 0 0; }
       @media (max-width: 900px) {
         .layout { grid-template-columns: 1fr; padding: 14px 12px 40px; }
-        .topbar { padding: 12px 14px; }
+        .topbar { padding: 12px 14px; flex-wrap: wrap; }
+        .tagline { display: none; }
         #status-line { text-align: left; }
         .log-list { max-height: none; }
       }
@@ -625,7 +667,7 @@
         <span id="metrics-strip" class="metrics-strip" hidden></span>
         <button id="open-metrics" class="btn btn-sm" type="button">统计</button>
         <button id="open-settings" class="btn btn-sm" type="button">设置</button>
-        <button id="open-test-global" class="btn btn-primary btn-sm" type="button">测试台</button>
+        <button id="open-test-global" class="btn btn-sm" type="button">试跑 curl</button>
         <div id="status-line" aria-live="polite">就绪</div>
       </div>
     </header>
@@ -642,7 +684,7 @@
             <button id="refresh-tasks" class="btn btn-quiet" type="button">刷新</button>
           </div>
           <div id="task-list" class="task-list"></div>
-          <div id="tasks-empty" class="empty">还没有任务。先在测试台把 curl 跑通，再选调度方式保存即可。</div>
+          <div id="tasks-empty" class="empty">还没有任务。把 curl 粘到下方，点「先试跑」确认能通，再选择执行时间保存。</div>
         </div>
 
         <div class="panel">
@@ -651,24 +693,82 @@
             <button id="cancel-edit" class="btn btn-quiet" type="button" hidden>取消编辑</button>
           </div>
           <form id="create-form" class="form" novalidate>
-            <div class="field">
-              <label for="name">任务名称</label>
-              <input id="name" name="name" type="text" placeholder="例如：每日签到" maxlength="200" autocomplete="off" />
-            </div>
-
-            <div class="field">
-              <span class="field-label">执行方式</span>
-              <div class="segmented" role="group" aria-label="执行方式">
-                <label><input type="radio" name="schedule_kind" value="daily" checked />定时执行</label>
-                <label><input type="radio" name="schedule_kind" value="interval" />循环执行</label>
+            <section class="form-section">
+              <div class="form-section-head">
+                <span class="step">1</span>
+                <div>
+                  <h3>粘贴请求</h3>
+                  <p>把 curl 粘进来。不确定能不能跑通？先点「先试跑」，不会写执行记录。</p>
+                </div>
               </div>
-            </div>
+
+              <div class="field">
+                <label for="name">任务名称（必填）</label>
+                <input id="name" name="name" type="text" placeholder="例如：每日签到" maxlength="200" autocomplete="off" />
+              </div>
+
+              <div class="segmented" role="group" aria-label="请求填写方式">
+                <label><input type="radio" name="mode" value="curl" checked />curl 文本</label>
+                <label><input type="radio" name="mode" value="structured" />表单字段</label>
+              </div>
+
+              <div id="curl-wrap" class="field">
+                <div class="field-label-row">
+                  <label for="curl">curl 命令（必填）</label>
+                  <button id="open-test-curl" class="btn btn-quiet btn-sm" type="button">先试跑</button>
+                </div>
+                <textarea id="curl" placeholder="curl -X POST 'https://example.com/api' -H 'Content-Type: application/json' -d '{&quot;ok&quot;:true}'"></textarea>
+              </div>
+
+              <div id="structured-wrap" class="field" hidden>
+                <label for="url">URL（必填）</label>
+                <input id="url" type="text" placeholder="https://example.com/api" autocomplete="off" />
+                <div class="grid-2" style="margin-top: 8px">
+                  <div class="field">
+                    <label for="method">Method</label>
+                    <select id="method">
+                      <option>GET</option>
+                      <option>POST</option>
+                      <option>PUT</option>
+                      <option>PATCH</option>
+                      <option>DELETE</option>
+                      <option>HEAD</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="headers">Headers（每行一个）</label>
+                    <textarea id="headers" placeholder="Content-Type: application/json&#10;Authorization: Bearer …"></textarea>
+                  </div>
+                </div>
+                <div class="field" style="margin-top: 8px">
+                  <label for="body">Body</label>
+                  <textarea id="body" placeholder='{"hello":"world"}'></textarea>
+                </div>
+              </div>
+            </section>
+
+            <section class="form-section">
+              <div class="form-section-head">
+                <span class="step">2</span>
+                <div>
+                  <h3>什么时候执行</h3>
+                  <p>每天一次（可在时间段内随机），或者每隔一段时间重复。</p>
+                </div>
+              </div>
+
+              <div class="field">
+                <span class="field-label">执行方式</span>
+                <div class="segmented" role="group" aria-label="执行方式">
+                  <label><input type="radio" name="schedule_kind" value="daily" checked />每天一次（推荐）</label>
+                  <label><input type="radio" name="schedule_kind" value="interval" />每隔一段时间</label>
+                </div>
+              </div>
 
             <div id="schedule-daily">
               <div class="segmented" role="group" aria-label="定时方式" style="margin-bottom: 10px">
-                <label><input type="radio" name="daily_mode" value="range" checked />时间范围</label>
-                <label><input type="radio" name="daily_mode" value="exact" />精确时间</label>
-                <label><input type="radio" name="daily_mode" value="jitter" />精确 + 抖动</label>
+                <label><input type="radio" name="daily_mode" value="range" checked />时间段内随机</label>
+                <label><input type="radio" name="daily_mode" value="exact" />固定时间</label>
+                <label><input type="radio" name="daily_mode" value="jitter" />固定时间 + 浮动</label>
               </div>
 
               <div class="grid-2" id="daily-range-fields">
@@ -692,7 +792,7 @@
                 <input id="jitter-minutes" type="number" min="0" max="60" step="1" value="5" />
               </div>
 
-              <p class="hint" id="daily-hint">每天在窗口内随机挑一个时刻执行一次；结束早于开始视为跨午夜窗口（例如 23:50–00:10），按开始日计一次。</p>
+                <p class="hint" id="daily-hint">每天在开始~结束之间随机选一个时刻执行一次；结束早于开始表示跨午夜（例如 23:50–00:10），按开始那天计一次。</p>
             </div>
 
             <div id="schedule-interval" hidden>
@@ -719,7 +819,7 @@
                 <label for="interval-jitter">随机抖动（秒，可选）</label>
                 <input id="interval-jitter" type="number" min="0" step="1" value="0" />
               </div>
-              <p class="hint">循环执行：每隔 N 秒 / 分钟 / 小时 / 天执行一次。第一次执行时间留空 = 从现在开始算；填了就从那个时刻起对齐（例如「从 09:00 开始，每 2 小时」→ 11:00、13:00…）。抖动会给每次再加 0–N 秒随机偏移。</p>
+              <p class="hint">每隔一段时间：每隔 N 秒 / 分钟 / 小时 / 天执行一次。第一次执行时间留空 = 从现在开始算；填了就从那个时刻起对齐（例如「从 09:00 开始，每 2 小时」→ 11:00、13:00…）。抖动会给每次再加 0–N 秒随机偏移。</p>
             </div>
 
             <div id="schedule-preview" class="schedule-preview" hidden>
@@ -735,123 +835,108 @@
               <code>jitter.config.json</code> 里设置 <code>requestTimeoutMs</code>（毫秒，建议 30000）。
             </p>
 
-            <div class="segmented" role="group" aria-label="请求填写方式">
-              <label><input type="radio" name="mode" value="curl" checked />curl 文本</label>
-              <label><input type="radio" name="mode" value="structured" />表单字段</label>
-            </div>
+            </section>
 
-            <div id="curl-wrap" class="field">
-              <div class="field-label-row">
-                <label for="curl">curl 命令</label>
-                <button id="open-test-curl" class="btn btn-quiet btn-sm" type="button">测试台</button>
-              </div>
-              <textarea id="curl" placeholder="curl -X POST 'https://example.com/api' -H 'Content-Type: application/json' -d '{&quot;ok&quot;:true}'"></textarea>
-            </div>
-
-            <div id="structured-wrap" class="field" hidden>
-              <label for="url">URL</label>
-              <input id="url" type="text" placeholder="https://example.com/api" autocomplete="off" />
-              <div class="grid-2" style="margin-top: 8px">
-                <div class="field">
-                  <label for="method">Method</label>
-                  <select id="method">
-                    <option>GET</option>
-                    <option>POST</option>
-                    <option>PUT</option>
-                    <option>PATCH</option>
-                    <option>DELETE</option>
-                    <option>HEAD</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label for="headers">Headers（每行一个）</label>
-                  <textarea id="headers" placeholder="Content-Type: application/json&#10;Authorization: Bearer …"></textarea>
+            <section class="form-section">
+              <div class="form-section-head">
+                <span class="step">3</span>
+                <div>
+                  <h3>更多设置（可选）</h3>
+                  <p>成功怎么判定、要不要发通知、只在插电或公司网络等条件下执行。保持默认即可。</p>
                 </div>
               </div>
-              <div class="field" style="margin-top: 8px">
-                <label for="body">Body</label>
-                <textarea id="body" placeholder='{"hello":"world"}'></textarea>
-              </div>
-            </div>
 
-            <div class="notify-block">
-              <span class="field-label">成功条件（决定是否「命中」，不发通知也会记录）</span>
-              <div class="grid-2">
-                <div class="field">
-                  <label for="expect-status">期望状态码（可选）</label>
-                  <input id="expect-status" type="number" min="100" max="599" placeholder="例如 200" />
-                </div>
-                <div class="field">
-                  <label for="expect-expr">条件表达式（可选，类 JS）</label>
-                  <textarea id="expect-expr" rows="2" placeholder='例如 data.result.remindtype=0'></textarea>
-                </div>
-              </div>
-              <div class="field">
-                <label for="expect-body">期望响应体（可选，完全相等）</label>
-                <textarea id="expect-body" rows="2" placeholder='例如 {"code":0}'></textarea>
-              </div>
-              <p class="hint">三项都不填时，任意 2xx 视为命中；填写后需全部满足才算命中。条件表达式从 JSON 响应体按路径安全取值，例如 <code>data.result.remindtype=0</code>、<code>data.error.code!=null</code>、<code>ok=true &amp;&amp; $status=200</code>；支持 <code>=</code>/<code>==</code>/<code>!=</code>/<code>&gt;</code>/<code>&lt;</code>、<code>&amp;&amp;</code>/<code>||</code>/<code>!</code>、三元与 <code>$status</code>。<code>"0"</code> 与 <code>0</code> 用 <code>=</code> 比较时相等；路径取不到则条件不成立，不会报错。只填表达式时不隐含 2xx 限制，需要限制状态码请写进表达式，如 <code>$status&gt;=200 &amp;&amp; $status&lt;300 &amp;&amp; ...</code>。响应体按最多 <span id="body-limit">100</span> KiB 比较；超过上限会追加 [truncated]，此时条件表达式视为不匹配。</p>
-            </div>
-
-            <div class="notify-block">
-              <label class="check"><input id="notify-enabled" type="checkbox" />命中后发送通知 curl</label>
-              <div id="notify-fields" class="field" hidden>
-                <label for="notify-curl">通知 curl</label>
-                <textarea id="notify-curl" placeholder="curl -X POST 'https://notify.example/hook' -H 'Content-Type: application/json' -d '{&quot;text&quot;:&quot;签到成功&quot;}'"></textarea>
-                <p class="hint">只有命中上面的成功条件才会发送；通知失败只写它自己的记录，不影响任务。</p>
-              </div>
-            </div>
-
-            <div class="notify-block">
-              <label class="check"><input id="precheck-enabled" type="checkbox" />执行前先判断（不满足则跳过本次）</label>
-              <div id="precheck-fields" hidden>
-                <div class="field">
-                  <span class="field-label">允许执行的星期（不选 = 每天）</span>
-                  <div class="weekday-row" id="precheck-weekdays">
-                    <label><input type="checkbox" value="1" />一</label>
-                    <label><input type="checkbox" value="2" />二</label>
-                    <label><input type="checkbox" value="3" />三</label>
-                    <label><input type="checkbox" value="4" />四</label>
-                    <label><input type="checkbox" value="5" />五</label>
-                    <label><input type="checkbox" value="6" />六</label>
-                    <label><input type="checkbox" value="0" />日</label>
-                  </div>
-                </div>
-                <div class="grid-2">
-                  <div class="field">
-                    <label for="precheck-time-start">执行时段开始（可选）</label>
-                    <input id="precheck-time-start" type="time" step="60" />
+              <details id="expect-block" class="advanced-block">
+                <summary>
+                  <span class="advanced-title">成功条件</span>
+                  <span class="advanced-note" id="expect-summary">默认：任意 2xx 视为成功</span>
+                </summary>
+                <div class="advanced-body">
+                  <div class="grid-2">
+                    <div class="field">
+                      <label for="expect-status">期望状态码（可选）</label>
+                      <input id="expect-status" type="number" min="100" max="599" placeholder="例如 200" />
+                    </div>
+                    <div class="field">
+                      <label for="expect-expr">条件表达式（可选）</label>
+                      <textarea id="expect-expr" rows="2" placeholder="例如 data.result.remindtype=0"></textarea>
+                    </div>
                   </div>
                   <div class="field">
-                    <label for="precheck-time-end">执行时段结束（可选）</label>
-                    <input id="precheck-time-end" type="time" step="60" />
+                    <label for="expect-body">期望响应体（可选，完全相等）</label>
+                    <textarea id="expect-body" rows="2" placeholder='例如 {"code":0}'></textarea>
                   </div>
+                  <p class="hint">三项都不填 = 任意 2xx 视为成功；填了则需全部满足。只填表达式时不会额外限制 2xx。</p>
+                  <details class="syntax-help">
+                    <summary>表达式怎么写？</summary>
+                    <p class="hint">
+                      从 JSON 响应体按路径取值，例如 <code>data.result.remindtype=0</code>、<code>data.error.code!=null</code>、<code>ok=true &amp;&amp; $status=200</code>。支持 <code>=</code>/<code>==</code>/<code>!=</code>/<code>&gt;</code>/<code>&lt;</code>、<code>&amp;&amp;</code>/<code>||</code>/<code>!</code>、三元与 <code>$status</code>；<code>"0"</code> 与 <code>0</code> 用 <code>=</code> 比较时相等，路径取不到按不成立处理。响应体最多比较 <span id="body-limit">100</span> KiB，超出会视为不匹配。
+                    </p>
+                  </details>
                 </div>
-                <div class="field">
-                  <label class="check"><input id="precheck-require-ac" type="checkbox" />只在接通电源（AC）时执行</label>
+              </details>
+
+              <div class="notify-block">
+                <label class="check"><input id="notify-enabled" type="checkbox" />成功时发送通知（可选）</label>
+                <div id="notify-fields" class="field" hidden>
+                  <label for="notify-curl">通知 curl</label>
+                  <textarea id="notify-curl" placeholder="curl -X POST 'https://notify.example/hook' -H 'Content-Type: application/json' -d '{&quot;text&quot;:&quot;签到成功&quot;}'"></textarea>
+                  <p class="hint">只有判定成功才发送；通知失败只记录它自己的结果，不影响任务。</p>
                 </div>
-                <div class="field">
-                  <label for="precheck-ip-pattern">只在本地 IP 匹配时执行（可选）</label>
-                  <input id="precheck-ip-pattern" type="text" placeholder="例如 10.1.* 或 192.168.*,10.*" />
-                  <p class="hint" id="precheck-env-hint"></p>
-                </div>
-                <div class="field">
-                  <label for="precheck-curl">前置判断 curl（可选）</label>
-                  <textarea id="precheck-curl" placeholder="curl -X GET 'https://example.com/status' -H 'Authorization: Bearer …'"></textarea>
-                </div>
-                <div class="grid-2">
-                  <div class="field">
-                    <label for="precheck-status">前置期望状态码（可选）</label>
-                    <input id="precheck-status" type="number" min="100" max="599" placeholder="例如 200" />
-                  </div>
-                  <div class="field">
-                    <label for="precheck-expr">前置条件表达式（可选）</label>
-                    <textarea id="precheck-expr" rows="2" placeholder="例如 data.pending=0"></textarea>
-                  </div>
-                </div>
-                <p class="hint">到达执行时间后先判断：星期、时段、电源、本机 IP 不满足就直接跳过（不发任何请求）；配了前置 curl 时再发请求，按状态码/表达式判定。全部满足才发主请求，否则本次跳过并在记录里写明原因。这些条件只约束定时自动执行，页面「立即执行」不受限制。所有本地条件与前置 curl 至少配一项；本机 IP 里的 <code>*</code> 匹配任意数字或点，多组用逗号分隔；时段结束早于开始视为跨午夜。</p>
               </div>
-            </div>
+
+              <div class="notify-block">
+                <label class="check"><input id="precheck-enabled" type="checkbox" />只在满足条件时执行（可选）</label>
+                <div id="precheck-fields" hidden>
+                  <p class="hint">到达执行时间先判断，不满足就跳过本次；只约束定时执行，页面「立即执行」不受限。</p>
+                  <div class="field">
+                    <span class="field-label">允许执行的星期（不选 = 每天）</span>
+                    <div class="weekday-row" id="precheck-weekdays">
+                      <label><input type="checkbox" value="1" />一</label>
+                      <label><input type="checkbox" value="2" />二</label>
+                      <label><input type="checkbox" value="3" />三</label>
+                      <label><input type="checkbox" value="4" />四</label>
+                      <label><input type="checkbox" value="5" />五</label>
+                      <label><input type="checkbox" value="6" />六</label>
+                      <label><input type="checkbox" value="0" />日</label>
+                    </div>
+                  </div>
+                  <div class="grid-2">
+                    <div class="field">
+                      <label for="precheck-time-start">执行时段开始（可选）</label>
+                      <input id="precheck-time-start" type="time" step="60" />
+                    </div>
+                    <div class="field">
+                      <label for="precheck-time-end">执行时段结束（可选）</label>
+                      <input id="precheck-time-end" type="time" step="60" />
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label class="check"><input id="precheck-require-ac" type="checkbox" />只在接通电源（AC）时执行</label>
+                  </div>
+                  <div class="field">
+                    <label for="precheck-ip-pattern">只在本地 IP 匹配时执行（可选）</label>
+                    <input id="precheck-ip-pattern" type="text" placeholder="例如 10.1.* 或 192.168.*,10.*" />
+                    <p class="hint" id="precheck-env-hint"></p>
+                  </div>
+                  <div class="field">
+                    <label for="precheck-curl">条件检查 curl（可选）</label>
+                    <textarea id="precheck-curl" placeholder="curl -X GET 'https://example.com/status' -H 'Authorization: Bearer …'"></textarea>
+                  </div>
+                  <div class="grid-2">
+                    <div class="field">
+                      <label for="precheck-status">前置期望状态码（可选）</label>
+                      <input id="precheck-status" type="number" min="100" max="599" placeholder="例如 200" />
+                    </div>
+                    <div class="field">
+                      <label for="precheck-expr">前置条件表达式（可选）</label>
+                      <textarea id="precheck-expr" rows="2" placeholder="例如 data.pending=0"></textarea>
+                    </div>
+                  </div>
+                  <p class="hint">以上条件与前置 curl 至少配一项。本机 IP 里的 <code>*</code> 匹配任意数字或点，多组用逗号分隔；时段结束早于开始视为跨午夜。跳过原因会写进执行记录。</p>
+                </div>
+              </div>
+            </section>
 
             <div id="form-error" class="form-error" role="alert" hidden></div>
             <button id="submit" class="btn btn-primary" type="submit">创建任务</button>
@@ -1002,7 +1087,7 @@
             <input id="skip-tls-verify" type="checkbox" checked />
             <span>默认跳过 TLS 证书校验（自签证书的内网 / 打卡系统需要；任务 curl 里的 -k 仍然有效）</span>
           </label>
-          <p class="hint">对主请求、前置判断和通知全部生效。关闭后，只有任务里显式带 -k / --insecure 才跳过校验。</p>
+          <p class="hint">对主请求、条件检查和通知全部生效。关闭后，只有任务里显式带 -k / --insecure 才跳过校验。</p>
         </section>
 
         <section class="settings-block">
@@ -1078,21 +1163,21 @@
 
     <dialog id="test-dialog" class="cleanup-dialog test-dialog" aria-labelledby="test-title">
       <div class="cleanup-head">
-        <h2 id="test-title">测试台</h2>
+        <h2 id="test-title">试跑 curl</h2>
         <button id="test-close" class="btn btn-quiet" type="button">关闭</button>
       </div>
 
       <div class="cleanup-body">
-        <p class="hint">
-          按正式执行的顺序跑一遍：解析 curl → 本地条件 → 前置判断 → 主请求 → 成功条件 → 通知。测试不写执行记录；通知默认只演练，不会真正发出。
-        </p>
+          <p class="hint">
+            按正式执行的顺序跑一遍：解析 curl → 执行条件 → 主请求 → 成功判定 → 通知。测试不写执行记录；通知默认只演练，不会真正发出。
+          </p>
 
         <div class="field">
-          <label for="test-curl">① 主请求 curl</label>
+          <label for="test-curl">主请求 curl</label>
           <textarea id="test-curl" class="test-curl-input" placeholder="curl -X GET 'https://example.com/api' -H 'Accept: application/json'"></textarea>
         </div>
 
-        <label class="check"><input id="test-precheck-enabled" type="checkbox" />② 先执行判断（不满足则本次不执行）</label>
+        <label class="check"><input id="test-precheck-enabled" type="checkbox" />执行条件（不满足则本次不执行）</label>
         <div id="test-precheck-fields" class="test-subblock" hidden>
           <div class="field">
             <span class="field-label">允许执行的星期（不选 = 每天）</span>
@@ -1125,7 +1210,7 @@
             <p class="hint" id="test-precheck-env-hint"></p>
           </div>
           <div class="field">
-            <label for="test-precheck-curl">前置判断 curl（可选）</label>
+            <label for="test-precheck-curl">条件检查 curl（可选）</label>
             <textarea id="test-precheck-curl" class="test-curl-input" placeholder="curl -X GET 'https://example.com/status'"></textarea>
           </div>
           <div class="grid-2">
@@ -1141,7 +1226,7 @@
         </div>
 
         <div class="test-subblock">
-          <span class="field-label">③ 成功条件（决定是否命中、是否发通知）</span>
+          <span class="field-label">成功条件（决定是否成功、是否发通知）</span>
           <div class="grid-2">
             <div class="field">
               <label for="test-expect-status">期望状态码</label>
@@ -1158,7 +1243,7 @@
           </div>
         </div>
 
-        <label class="check"><input id="test-notify-enabled" type="checkbox" />④ 命中后发送通知</label>
+        <label class="check"><input id="test-notify-enabled" type="checkbox" />成功时发送通知</label>
         <div id="test-notify-fields" class="test-subblock" hidden>
           <div class="field">
             <label for="test-notify-curl">通知 curl</label>

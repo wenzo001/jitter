@@ -122,7 +122,7 @@ fn build_request(prefix: &str, input: &Json) -> Result<RequestSpec, String> {
     if url.is_empty() {
         return Err(match prefix {
             "" => "请粘贴 curl 命令".to_string(),
-            "precheck" => "请填写前置判断 curl".to_string(),
+            "precheck" => "请填写条件检查 curl".to_string(),
             _ => "请填写通知 curl".to_string(),
         });
     }
@@ -472,7 +472,7 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
             Err(message) => {
                 steps.push(failure_step(
                     "precheck",
-                    "前置判断",
+                    "条件检查",
                     message.clone(),
                     guard_started,
                 ));
@@ -494,7 +494,7 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         summary.status = guard_response.status;
         steps.push(TestStep {
             key: "precheck".to_string(),
-            title: "前置判断".to_string(),
+            title: "条件检查".to_string(),
             status: if verdict.passed { "ok" } else { "fail" }.to_string(),
             detail: verdict.reason.clone(),
             duration_ms: Some((executor::now_ms() - guard_started).max(0)),

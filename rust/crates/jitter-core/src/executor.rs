@@ -108,26 +108,26 @@ pub fn evaluate_precheck(input: &PrecheckInput<'_>) -> PrecheckVerdict {
     if input.aborted {
         return PrecheckVerdict {
             passed: false,
-            reason: "前置判断请求被中断".to_string(),
+            reason: "条件检查请求被中断".to_string(),
         };
     }
     if let Some(error) = input.error {
         return PrecheckVerdict {
             passed: false,
-            reason: format!("前置判断请求失败：{error}"),
+            reason: format!("条件检查请求失败：{error}"),
         };
     }
     let Some(status) = input.status else {
         return PrecheckVerdict {
             passed: false,
-            reason: "前置判断请求没有拿到响应".to_string(),
+            reason: "条件检查请求没有拿到响应".to_string(),
         };
     };
     if let Some(expect) = input.expect_status {
         if status != expect {
             return PrecheckVerdict {
                 passed: false,
-                reason: format!("前置判断返回 HTTP {status}，期望 {expect}"),
+                reason: format!("条件检查返回 HTTP {status}，期望 {expect}"),
             };
         }
     }
@@ -135,7 +135,7 @@ pub fn evaluate_precheck(input: &PrecheckInput<'_>) -> PrecheckVerdict {
         if input.truncated {
             return PrecheckVerdict {
                 passed: false,
-                reason: "前置判断的响应体超过上限被截断，条件表达式无法判断".to_string(),
+                reason: "条件检查的响应体超过上限被截断，条件表达式无法判断".to_string(),
             };
         }
         let json: Json = input
@@ -161,12 +161,12 @@ pub fn evaluate_precheck(input: &PrecheckInput<'_>) -> PrecheckVerdict {
     if input.expect_status.is_none() && !(200..300).contains(&status) {
         return PrecheckVerdict {
             passed: false,
-            reason: format!("前置判断返回 HTTP {status}（未配置条件时要求 2xx）"),
+            reason: format!("条件检查返回 HTTP {status}（未配置条件时要求 2xx）"),
         };
     }
     PrecheckVerdict {
         passed: true,
-        reason: format!("前置判断通过（HTTP {status}）"),
+        reason: format!("条件检查通过（HTTP {status}）"),
     }
 }
 

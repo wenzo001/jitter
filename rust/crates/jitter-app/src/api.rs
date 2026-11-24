@@ -390,7 +390,7 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         }
     }
     let precheck_expect_status = if precheck_enabled {
-        parse_expect_status(object.get("precheck_expect_status"), "前置判断的期望状态码")?
+        parse_expect_status(object.get("precheck_expect_status"), "条件检查的期望状态码")?
     } else {
         None
     };
@@ -412,14 +412,14 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         let has_host = precheck_require_ac || precheck_ip_pattern.is_some();
         if !has_local && !has_host && precheck_request.is_none() {
             return Err(
-                "启用执行前判断时，至少配置本地条件（星期 / 时段 / 电源 / 本机 IP）或前置判断 curl 之一"
+                "启用执行条件时，至少配置本地条件（星期 / 时段 / 电源 / 本机 IP）或条件检查 curl 之一"
                     .to_string(),
             );
         }
         if precheck_request.is_none()
             && (precheck_expect_status.is_some() || precheck_expr.is_some())
         {
-            return Err("配置了前置状态码或表达式时，必须填写前置判断 curl".to_string());
+            return Err("配置了条件状态码或表达式时，必须填写条件检查 curl".to_string());
         }
     }
 
