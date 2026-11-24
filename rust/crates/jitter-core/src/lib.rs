@@ -8,6 +8,7 @@ pub mod config;
 pub mod db;
 pub mod executor;
 pub mod guard;
+pub mod holiday;
 pub mod host;
 pub mod metrics;
 pub mod curl_parser;

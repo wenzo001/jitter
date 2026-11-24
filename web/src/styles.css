@@ -717,6 +717,26 @@ body {
   flex: none;
 }
 
+/* ---------- 节假日数据 ---------- */
+.holiday-years {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.holiday-year-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.holiday-year {
+  font-weight: 650;
+  min-width: 56px;
+}
+
 .field {
   margin-bottom: 12px;
 }

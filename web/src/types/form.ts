@@ -8,6 +8,8 @@ export interface ConditionModel {
   timeEnd: string
   requireAc: boolean
   ipPattern: string
+  /** 工作日 / 休息日条件：'' 表示不限制。 */
+  dayType: '' | 'workday' | 'offday'
   curl: string
   expectStatus: string
   expr: string
@@ -50,6 +52,7 @@ export function emptyCondition(): ConditionModel {
     timeEnd: '',
     requireAc: false,
     ipPattern: '',
+    dayType: '',
     curl: '',
     expectStatus: '',
     expr: '',
@@ -68,6 +71,7 @@ export function conditionFromTask(task: Task): ConditionModel {
     timeEnd: task.precheck_time_end ?? '',
     requireAc: task.precheck_require_ac === 1,
     ipPattern: task.precheck_ip_pattern ?? '',
+    dayType: task.precheck_day_type === 'workday' || task.precheck_day_type === 'offday' ? task.precheck_day_type : '',
     curl: precheckCurlOf(task),
     expectStatus:
       task.precheck_expect_status === null || task.precheck_expect_status === undefined

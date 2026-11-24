@@ -266,6 +266,7 @@ onMounted(async () => {
   }
   await app.loadSystem()
   void app.refreshMetrics()
+  void app.loadHoliday()
   startTimers()
   document.addEventListener('visibilitychange', onVisible)
 })

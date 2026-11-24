@@ -42,6 +42,9 @@ const backupBusy = ref(false)
 const uploadBusy = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 
+const holidayRefreshing = ref(false)
+const holidayErrors = ref<string[]>([])
+
 const updateInfo = ref<UpdateInfo | null>(null)
 const updateProgress = ref<UpdateProgress | null>(null)
 const updateBusy = ref(false)
@@ -81,8 +84,9 @@ watch(
     updateChecked.value = false
     updateError.value = ''
     updateBusy.value = false
+    holidayErrors.value = []
     tab.value = 'general'
-    await Promise.all([app.loadSystem(), loadSettings(), loadBackups()])
+    await Promise.all([app.loadSystem(), app.loadHoliday(), loadSettings(), loadBackups()])
   },
 )
 
@@ -159,6 +163,20 @@ async function toggleAutostart(value: boolean) {
     await app.loadSystem()
   } finally {
     autostartBusy.value = false
+  }
+}
+
+/* ---------------- 节假日数据 ---------------- */
+
+async function refreshHoliday() {
+  holidayRefreshing.value = true
+  holidayErrors.value = []
+  try {
+    const status = await app.refreshHoliday()
+    if (status?.errors?.length) holidayErrors.value = status.errors
+    else app.setStatus(status?.refreshed?.length ? '节假日数据已更新' : '节假日数据没有变化')
+  } finally {
+    holidayRefreshing.value = false
   }
 }
 
@@ -469,6 +487,40 @@ function openCleanup() {
               @change="toggleAutostart($event as boolean)"
             />
           </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title">节假日数据</div>
+          <p class="field-hint" style="margin-top: 0">
+            来自 holiday-cn（中国法定节假日，含调休上班日），供「仅工作日 / 仅休息日」执行条件使用。
+            每次启动静默更新，每月 1 号自动刷新；拉取范围是去年、今年、明年。
+          </p>
+          <div v-if="app.holiday?.years?.length" class="holiday-years">
+            <div v-for="entry in app.holiday.years" :key="entry.year" class="holiday-year-row">
+              <span class="holiday-year">{{ entry.year }} 年</span>
+              <span class="muted">{{ entry.dayCount }} 天 · 更新于 {{ formatTime(entry.fetchedAt) }}</span>
+              <a-tag v-if="entry.year === new Date().getFullYear()" color="blue">今年</a-tag>
+            </div>
+          </div>
+          <div v-else class="muted" style="font-size: 12.5px; padding: 6px 0">
+            还没有节假日数据：任务里的「仅工作日 / 仅休息日」条件会被跳过。点下面按钮拉取。
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px">
+            <a-button size="small" :loading="holidayRefreshing" @click="refreshHoliday">
+              立即拉取（去年 / 今年 / 明年）
+            </a-button>
+            <a-tag :color="app.holiday?.hasCurrentYear ? 'success' : 'warning'">
+              {{ app.holiday?.hasCurrentYear ? '今年数据可用' : '今年数据缺失' }}
+            </a-tag>
+          </div>
+          <a-alert
+            v-for="(error, index) in holidayErrors"
+            :key="index"
+            type="warning"
+            show-icon
+            :message="error"
+            style="margin-top: 8px"
+          />
         </div>
 
         <div class="settings-section">

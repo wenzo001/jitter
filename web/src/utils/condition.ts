@@ -69,6 +69,14 @@ export function conditionRows(task: Task): ConditionRow[] {
     })
   }
 
+  if (task.precheck_day_type === 'workday' || task.precheck_day_type === 'offday') {
+    rows.push({
+      key: 'dayType',
+      label: '执行日期',
+      value: task.precheck_day_type === 'workday' ? '仅工作日（按法定节假日，含调休）' : '仅休息日（按法定节假日，含调休）',
+    })
+  }
+
   const curl = precheckCurlOf(task)
   if (curl) {
     rows.push({ key: 'curl', label: '条件检查', value: curlSummary(curl), mono: true })

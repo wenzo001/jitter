@@ -1,8 +1,8 @@
 use chrono::{Local, NaiveDate, TimeZone};
 use jitter_core::guard::{
     evaluate_host_guard, evaluate_local_guard, has_host_conditions, has_local_conditions,
-    ip_matches_any, ip_matches_pattern, local_guard_of, parse_ip_pattern, parse_time_range,
-    parse_weekdays, HostGuardConfig, LocalGuardConfig,
+    ip_matches_any, ip_matches_pattern, local_guard_of, parse_day_type, parse_ip_pattern,
+    parse_time_range, parse_weekdays, DayType, HostGuardConfig, LocalGuardConfig,
 };
 use serde_json::json;
 
@@ -25,6 +25,7 @@ fn guard_with(
         weekdays,
         time_start: time_start.map(str::to_string),
         time_end: time_end.map(str::to_string),
+        day_type: None,
     }
 }
 
@@ -89,7 +90,7 @@ fn time_range_accepts_a_cross_midnight_range() {
 
 #[test]
 fn local_guard_of_reads_a_valid_configuration() {
-    let config = local_guard_of(Some("1,3,5"), Some("09:00"), Some("18:00"));
+    let config = local_guard_of(Some("1,3,5"), Some("09:00"), Some("18:00"), None);
     assert_eq!(config.weekdays, Some(vec![1, 3, 5]));
     assert_eq!(config.time_start.as_deref(), Some("09:00"));
     assert_eq!(config.time_end.as_deref(), Some("18:00"));
@@ -97,12 +98,41 @@ fn local_guard_of_reads_a_valid_configuration() {
 
 #[test]
 fn local_guard_of_treats_junk_as_no_restriction() {
-    let config = local_guard_of(Some("x,9"), Some("bad"), Some("18:00"));
+    let config = local_guard_of(Some("x,9"), Some("bad"), Some("18:00"), None);
     assert_eq!(config, LocalGuardConfig::default());
     assert_eq!(
-        local_guard_of(None, None, None),
+        local_guard_of(None, None, None, None),
         LocalGuardConfig::default()
     );
+}
+
+#[test]
+fn parse_day_type_accepts_only_known_values() {
+    assert_eq!(parse_day_type(Some(&json!("workday"))).expect("ok"), Some(DayType::Workday));
+    assert_eq!(parse_day_type(Some(&json!("offday"))).expect("ok"), Some(DayType::Offday));
+    assert_eq!(parse_day_type(Some(&json!(""))).expect("ok"), None);
+    assert_eq!(parse_day_type(Some(&json!(null))).expect("ok"), None);
+    assert!(parse_day_type(Some(&json!("holiday"))).is_err());
+}
+
+/// 测试注入：把某年固定为指定的放假 / 调休数据，写进数据库供判断懒加载。
+/// 数据库是进程级单例：写入端与其它测试串行（用同一把锁）。
+static DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_mock_year(year: i32, days: &[(&str, bool)]) {
+    let _guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = std::env::temp_dir().join(format!("jitter-guard-holiday-{year}"));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("app.db").to_string_lossy().to_string();
+    let raw = serde_json::json!({
+        "year": year,
+        "days": days.iter()
+            .map(|(date, is_off)| serde_json::json!({"date": date, "isOffDay": is_off}))
+            .collect::<Vec<_>>(),
+    })
+    .to_string();
+    let _ = jitter_core::db::init_db(Some(&path));
+    jitter_core::db::upsert_holiday_year(year, &raw, 0, days.len() as i64).expect("upsert");
 }
 
 #[test]
@@ -168,6 +198,57 @@ fn both_conditions_must_pass() {
     assert!(evaluate_local_guard(&config, at(2026, 1, 5, 10, 0)).passed);
     assert!(!evaluate_local_guard(&config, at(2026, 1, 5, 20, 0)).passed);
     assert!(!evaluate_local_guard(&config, at(2026, 1, 6, 10, 0)).passed);
+}
+
+#[test]
+fn workday_condition_blocks_listed_holidays() {
+    // 2026-05-01（周五）在 mock 数据里是放假的法定节假日。
+    with_mock_year(2026, &[("2026-05-01", true)]);
+    let workday_only = LocalGuardConfig {
+        day_type: Some(DayType::Workday),
+        ..guard()
+    };
+    let blocked = evaluate_local_guard(&workday_only, at(2026, 5, 1, 10, 0));
+    assert!(!blocked.passed);
+    assert!(blocked.reason.contains("休息日"));
+    // 5 月 4 日（周一）不在数据里：默认工作日，放行。
+    assert!(evaluate_local_guard(&workday_only, at(2026, 5, 4, 10, 0)).passed);
+}
+
+#[test]
+fn offday_condition_blocks_regular_workdays() {
+    // 2027-06-05（周六）在 mock 数据里是放假的休息日。
+    with_mock_year(2027, &[("2027-06-05", true)]);
+    let offday_only = LocalGuardConfig {
+        day_type: Some(DayType::Offday),
+        ..guard()
+    };
+    assert!(evaluate_local_guard(&offday_only, at(2027, 6, 5, 10, 0)).passed);
+    // 6 月 4 日（周五）是普通工作日，不满足「仅休息日」。
+    let blocked = evaluate_local_guard(&offday_only, at(2027, 6, 4, 10, 0));
+    assert!(!blocked.passed);
+    assert!(blocked.reason.contains("工作日"));
+}
+
+#[test]
+fn missing_holiday_data_skips_the_day_type_condition() {
+    // 2099 年没有任何数据：无法判断时跳过该条件（视为通过）并在原因中说明。
+    let workday_only = LocalGuardConfig {
+        day_type: Some(DayType::Workday),
+        ..guard()
+    };
+    let verdict = evaluate_local_guard(&workday_only, at(2099, 3, 10, 10, 0));
+    assert!(verdict.passed);
+    assert!(verdict.reason.contains("已跳过"));
+}
+
+#[test]
+fn day_type_counts_as_a_local_condition() {
+    let config = LocalGuardConfig {
+        day_type: Some(DayType::Workday),
+        ..guard()
+    };
+    assert!(has_local_conditions(&config));
 }
 
 #[test]

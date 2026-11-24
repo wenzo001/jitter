@@ -1,9 +1,16 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { getConfig, getEnvironment, getSystemInfo } from '@/api/system'
+import {
+  getConfig,
+  getEnvironment,
+  getHolidayStatus,
+  getSystemInfo,
+  refreshHolidayStatus,
+} from '@/api/system'
 import { getMetrics } from '@/api/metrics'
 import type {
   AppConfig,
+  HolidayStatus,
   HostEnvironment,
   MetricsReport,
   SystemInfo,
@@ -60,6 +67,8 @@ export const useAppStore = defineStore('app', () => {
   const system = ref<SystemInfo | null>(null)
   const metrics = ref<MetricsReport | null>(null)
   const environment = ref<HostEnvironment | null>(null)
+  /** 节假日数据状态：决定「工作日 / 休息日」条件是否可选。 */
+  const holiday = ref<HolidayStatus | null>(null)
 
   /** 顶栏状态行：短暂成功提示或持续错误提示。 */
   const status = ref({ text: '就绪', error: false })
@@ -117,6 +126,25 @@ export const useAppStore = defineStore('app', () => {
     return environment.value
   }
 
+  async function loadHoliday(): Promise<HolidayStatus | null> {
+    try {
+      holiday.value = await getHolidayStatus()
+    } catch {
+      holiday.value = null
+    }
+    return holiday.value
+  }
+
+  /** 手动拉取节假日数据（设置页按钮）。失败静默返回 null。 */
+  async function refreshHoliday(): Promise<HolidayStatus | null> {
+    try {
+      holiday.value = await refreshHolidayStatus()
+    } catch {
+      return null
+    }
+    return holiday.value
+  }
+
   /** 页面加载时收尾「升级中/已完成」的记录。 */
   function settleUpgradeBanner(): void {
     const pending = readPending()
@@ -149,6 +177,7 @@ export const useAppStore = defineStore('app', () => {
     system,
     metrics,
     environment,
+    holiday,
     status,
     banner,
     version,
@@ -157,6 +186,8 @@ export const useAppStore = defineStore('app', () => {
     loadSystem,
     refreshMetrics,
     loadEnvironment,
+    loadHoliday,
+    refreshHoliday,
     settleUpgradeBanner,
     dismissBanner,
     sameVersion,

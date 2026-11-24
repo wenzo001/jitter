@@ -681,6 +681,7 @@ pub async fn execute_task_run(
             task.precheck_weekdays.as_deref(),
             task.precheck_time_start.as_deref(),
             task.precheck_time_end.as_deref(),
+            task.precheck_day_type.as_deref(),
         );
         let verdict = evaluate_local_guard(&guard_config, now_ms());
         if !verdict.passed {

@@ -370,10 +370,15 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         Ok(value) => value,
         Err(error) => return assert_input_failed(steps, summary, started_at, error.0),
     };
+    let day_type = match guard::parse_day_type(input.get("precheck_day_type")) {
+        Ok(value) => value,
+        Err(error) => return assert_input_failed(steps, summary, started_at, error.0),
+    };
     let local_config = LocalGuardConfig {
         weekdays,
         time_start: time_range.as_ref().map(|(start, _)| start.clone()),
         time_end: time_range.as_ref().map(|(_, end)| end.clone()),
+        day_type,
     };
     let require_ac = input
         .get("precheck_require_ac")
@@ -403,7 +408,8 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         && !has_guard_curl
     {
         let message =
-            "已启用执行前判断，但没有配置本地条件、电源 / 本机 IP 条件或前置 curl".to_string();
+            "已启用执行前判断，但没有配置本地条件、电源 / 本机 IP 条件或前置 curl"
+                .to_string();
         steps.push(failure_step(
             "precheck",
             "执行前判断",

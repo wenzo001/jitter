@@ -145,6 +145,7 @@ function buildPayload(): Record<string, unknown> | null {
     if (cond.curl.trim()) payload.precheck_curl = cond.curl.trim()
     if (cond.ipPattern.trim()) payload.precheck_ip_pattern = cond.ipPattern.trim()
     if (cond.requireAc) payload.precheck_require_ac = true
+    if (cond.dayType) payload.precheck_day_type = cond.dayType
     const rawStatus = cond.expectStatus.trim()
     const expr = cond.expr.trim()
     if (!cond.curl.trim() && (rawStatus || expr)) {
@@ -165,6 +166,7 @@ function buildPayload(): Record<string, unknown> | null {
       Boolean(cond.timeStart) ||
       cond.requireAc ||
       Boolean(cond.ipPattern.trim()) ||
+      Boolean(cond.dayType) ||
       Boolean(cond.curl.trim())
     if (!hasAny) {
       error.value = '启用执行条件时，至少配置星期、时段、电源、本机 IP 或前置 curl 之一'

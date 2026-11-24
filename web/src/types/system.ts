@@ -36,6 +36,20 @@ export interface HostEnvironment {
   preventSleepOnAc: boolean
 }
 
+export interface HolidayYearMeta {
+  year: number
+  dayCount: number
+  fetchedAt: number
+}
+
+export interface HolidayStatus {
+  years: HolidayYearMeta[]
+  /** 当年是否有节假日数据：决定「工作日 / 休息日」选项是否可选。 */
+  hasCurrentYear: boolean
+  refreshed?: number[]
+  errors?: string[]
+}
+
 export interface BackupEntry {
   name: string
   size: number

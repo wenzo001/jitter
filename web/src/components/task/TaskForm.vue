@@ -81,6 +81,9 @@ const expectSummary = computed(() => {
 
 const envText = computed(() => describeHostEnvironment(app.environment))
 
+/** 节假日数据就绪：当年数据存在，「仅工作日 / 仅休息日」选项才可选。 */
+const holidayReady = computed(() => app.holiday?.hasCurrentYear === true)
+
 const timeoutWarning = computed(() => {
   const timeout = Number(app.config.requestTimeoutMs)
   return !(Number.isFinite(timeout) && timeout > 0)
@@ -381,9 +384,10 @@ function validateConditions(cond: TaskFormModel['conditions'], result: FormError
     hasTime ||
     cond.requireAc ||
     Boolean(cond.ipPattern.trim()) ||
+    Boolean(cond.dayType) ||
     Boolean(curl)
   if (!hasAny) {
-    result.condAny = '启用执行条件时，至少配置星期、时段、电源、本机 IP 或前置 curl 之一'
+    result.condAny = '启用执行条件时，至少配置星期、时段、工作日、电源、本机 IP 或前置 curl 之一'
   }
 }
 
@@ -438,6 +442,7 @@ function buildPayload(): TaskPayload {
     if (cond.curl.trim()) payload.precheck_curl = cond.curl.trim()
     if (cond.ipPattern.trim()) payload.precheck_ip_pattern = cond.ipPattern.trim()
     if (cond.requireAc) payload.precheck_require_ac = true
+    if (cond.dayType) payload.precheck_day_type = cond.dayType
     const status = cond.expectStatus.trim()
     if (status) payload.precheck_expect_status = Number(status)
     if (cond.expr.trim()) payload.precheck_expr = cond.expr.trim()
@@ -876,6 +881,7 @@ defineExpose({ loadTask, resetIfEditing, isDirty: dirty, applyTestConfig: applyT
           v-if="precheckOn"
           v-model="model.conditions"
           :env-text="envText"
+          :holiday-ready="holidayReady"
           :errors="{
             timeStart: errors.condTime ?? '',
             timeEnd: errors.condTime ?? '',

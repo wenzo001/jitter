@@ -150,7 +150,8 @@ fn windows_system_proxy() -> Option<String> {
 }
 
 /// 环境代理失败时依次回退：Windows 系统代理 → 直连（对齐 TS 版 withProxyFallback）。
-async fn get_with_proxy_fallback(url: &str, timeout: Duration, accept: &str) -> Result<reqwest::Response, String> {
+/// 升级检查与节假日数据拉取共用这条链路。
+pub async fn get_with_proxy_fallback(url: &str, timeout: Duration, accept: &str) -> Result<reqwest::Response, String> {
     let send = |client: Result<reqwest::Client, String>| async move {
         let client = client?;
         let mut request = client.get(url).header("User-Agent", "Jitter");

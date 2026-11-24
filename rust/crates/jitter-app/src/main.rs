@@ -223,6 +223,9 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!("已恢复 {recovered} 个 active 任务");
     scheduler::spawn_startup_runs();
 
+    // 启动时静默刷新节假日数据（去年 / 今年 / 明年；失败不做任何提示）。
+    tokio::spawn(jitter_core::holiday::refresh_years_silent());
+
     // HTTP 服务。
     let app = api::build_router();
     let host = config.host.clone();

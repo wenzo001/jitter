@@ -7,6 +7,8 @@ const props = defineProps<{
   modelValue: ConditionModel
   envText?: string
   errors?: Record<string, string>
+  /** 节假日数据就绪：否则「工作日 / 休息日」选项禁用。 */
+  holidayReady?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -77,6 +79,26 @@ function timeValue(value: unknown): string {
       >
         只在接通电源（AC）时执行
       </a-checkbox>
+    </div>
+
+    <div class="field">
+      <label class="field-label">执行日期类型</label>
+      <a-radio-group
+        :value="modelValue.dayType"
+        :disabled="!holidayReady"
+        @update:value="patch('dayType', ($event as '' | 'workday' | 'offday') ?? '')"
+      >
+        <a-radio value="">不限</a-radio>
+        <a-radio value="workday">仅工作日</a-radio>
+        <a-radio value="offday">仅休息日</a-radio>
+      </a-radio-group>
+      <p v-if="!holidayReady" class="field-hint warn" style="margin-top: 4px">
+        节假日数据未就绪，暂时无法按工作日 / 休息日判断；可在「设置 → 节假日数据」里手动拉取。
+        判断当天数据缺失时，该条件会被跳过。
+      </p>
+      <p v-else-if="modelValue.dayType" class="field-hint" style="margin-top: 4px">
+        依据中国法定节假日数据（含调休上班日）判断；数据每年更新，失败时跳过该条件。
+      </p>
     </div>
 
     <div class="field">

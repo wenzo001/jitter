@@ -1,5 +1,5 @@
 import { request, postJson } from './client'
-import type { AppConfig, CleanupPreview, CleanupResult, HostEnvironment, Settings, SystemInfo } from '@/types/system'
+import type { AppConfig, CleanupPreview, CleanupResult, HolidayStatus, HostEnvironment, Settings, SystemInfo } from '@/types/system'
 
 export function getConfig(): Promise<AppConfig> {
   return request('/api/config')
@@ -19,6 +19,15 @@ export function getSystemInfo(): Promise<SystemInfo> {
 
 export function getEnvironment(): Promise<HostEnvironment> {
   return request('/api/system/environment', { timeoutMs: 5_000 })
+}
+
+export function getHolidayStatus(): Promise<HolidayStatus> {
+  return request('/api/system/holiday', { timeoutMs: 8_000 })
+}
+
+/** 手动拉取节假日数据（去年 / 今年 / 明年三年，成功的覆盖本地）。 */
+export function refreshHolidayStatus(): Promise<HolidayStatus> {
+  return postJson('/api/system/holiday/refresh', {}, 90_000)
 }
 
 export function setAutostart(enabled: boolean): Promise<{ ok: boolean; autostart: boolean }> {

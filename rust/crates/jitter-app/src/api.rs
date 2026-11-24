@@ -410,14 +410,23 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
     } else {
         None
     };
+    let precheck_day_type = if precheck_enabled {
+        jitter_core::guard::parse_day_type(object.get("precheck_day_type"))
+            .map_err(|error| error.0)?
+            .map(|value| value.as_str().to_string())
+    } else {
+        None
+    };
     let run_on_startup = to_boolean(object.get("run_on_startup"));
 
     if precheck_enabled {
-        let has_local = precheck_weekdays.is_some() || precheck_time.is_some();
+        let has_local = precheck_weekdays.is_some()
+            || precheck_time.is_some()
+            || precheck_day_type.is_some();
         let has_host = precheck_require_ac || precheck_ip_pattern.is_some();
         if !has_local && !has_host && precheck_request.is_none() {
             return Err(
-                "启用执行条件时，至少配置本地条件（星期 / 时段 / 电源 / 本机 IP）或条件检查 curl 之一"
+                "启用执行条件时，至少配置本地条件（星期 / 时段 / 工作日 / 电源 / 本机 IP）或条件检查 curl 之一"
                     .to_string(),
             );
         }
@@ -455,6 +464,7 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         precheck_time_end: precheck_time.as_ref().map(|(_, end)| end.clone()),
         precheck_require_ac,
         precheck_ip_pattern,
+        precheck_day_type,
         run_on_startup,
     })
 }
@@ -962,6 +972,27 @@ async fn system_environment() -> Response {
         "onAcPower": environment.on_ac_power,
         "localIps": environment.local_ips,
         "preventSleepOnAc": db::get_prevent_sleep_on_ac(),
+    }))
+    .into_response()
+}
+
+/// 已缓存的节假日年份（设置页可视化 + 表单判断「工作日 / 休息日」选项是否可用）。
+async fn system_holiday() -> Response {
+    AxumJson(json!({
+        "years": jitter_core::holiday::list_years(),
+        "hasCurrentYear": jitter_core::holiday::has_current_year_data(executor::now_ms()),
+    }))
+    .into_response()
+}
+
+/// 手动拉取节假日数据（去年 / 今年 / 明年三年，成功的覆盖本地）。
+async fn system_holiday_refresh() -> Response {
+    let (refreshed, errors) = jitter_core::holiday::refresh_years().await;
+    AxumJson(json!({
+        "years": jitter_core::holiday::list_years(),
+        "hasCurrentYear": jitter_core::holiday::has_current_year_data(executor::now_ms()),
+        "refreshed": refreshed,
+        "errors": errors,
     }))
     .into_response()
 }
@@ -1517,6 +1548,8 @@ pub fn build_router() -> Router {
         .route("/api/test-runs/:id", get(test_run_detail))
         .route("/api/system", get(system_info))
         .route("/api/system/environment", get(system_environment))
+        .route("/api/system/holiday", get(system_holiday))
+        .route("/api/system/holiday/refresh", post(system_holiday_refresh))
         .route("/api/system/autostart", post(set_autostart_handler))
         .route("/api/quit", post(quit))
         .route("/api/backup/list", get(backup_list))

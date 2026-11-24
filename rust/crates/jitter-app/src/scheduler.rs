@@ -421,4 +421,9 @@ async fn sweep_once() {
     if let Ok(days) = jitter_core::db::get_effective_retention_days(config.log_retention_days) {
         let _ = jitter_core::db::prune_logs(now, days, config.log_max_rows_per_task);
     }
+
+    // 每月 1 号静默刷新节假日数据（内部有节流；失败不做任何提示）。
+    if jitter_core::holiday::refresh_if_monthly_due(now) {
+        tokio::spawn(jitter_core::holiday::refresh_years_silent());
+    }
 }

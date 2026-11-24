@@ -133,6 +133,13 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS holiday_years (
+  year       INTEGER PRIMARY KEY,
+  days       TEXT NOT NULL,
+  fetched_at INTEGER NOT NULL,
+  day_count  INTEGER NOT NULL
+);
 "#;
 
 // ---------------------------------------------------------------------------
@@ -184,6 +191,8 @@ pub struct TaskRow {
     pub precheck_time_end: Option<String>,
     pub precheck_require_ac: i64,
     pub precheck_ip_pattern: Option<String>,
+    /// 工作日 / 休息日条件：`workday` / `offday`；NULL 表示不限制。
+    pub precheck_day_type: Option<String>,
     pub run_on_startup: i64,
     pub expect_status: Option<i64>,
     pub expect_body: Option<String>,
@@ -235,6 +244,7 @@ fn map_task(row: &Row<'_>) -> rusqlite::Result<TaskRow> {
         precheck_time_end: row.get("precheck_time_end")?,
         precheck_require_ac: row.get("precheck_require_ac")?,
         precheck_ip_pattern: row.get("precheck_ip_pattern")?,
+        precheck_day_type: row.get("precheck_day_type")?,
         run_on_startup: row.get("run_on_startup")?,
         expect_status: row.get("expect_status")?,
         expect_body: row.get("expect_body")?,
@@ -378,6 +388,8 @@ pub struct NewTaskInput {
     pub precheck_time_end: Option<String>,
     pub precheck_require_ac: bool,
     pub precheck_ip_pattern: Option<String>,
+    /// `workday`（仅工作日）/ `offday`（仅休息日）；None 表示不限制。
+    pub precheck_day_type: Option<String>,
     /// Jitter 启动后自动执行一次（单任务配置，默认关闭）。
     pub run_on_startup: bool,
 }
@@ -391,6 +403,7 @@ struct TaskColumns {
     weekdays: Option<String>,
     require_ac: bool,
     ip_pattern: Option<String>,
+    day_type: Option<String>,
 }
 
 fn task_columns(input: &NewTaskInput) -> TaskColumns {
@@ -411,7 +424,8 @@ fn task_columns(input: &NewTaskInput) -> TaskColumns {
         .map(|days| !days.is_empty())
         .unwrap_or(false)
         || input.precheck_time_start.is_some()
-        || input.precheck_time_end.is_some();
+        || input.precheck_time_end.is_some()
+        || input.precheck_day_type.is_some();
     let host_guard = input.precheck_require_ac
         || input
             .precheck_ip_pattern
@@ -440,6 +454,13 @@ fn task_columns(input: &NewTaskInput) -> TaskColumns {
     } else {
         None
     };
+    let day_type = if guard_enabled {
+        input.precheck_day_type.clone().filter(|value| {
+            value == "workday" || value == "offday"
+        })
+    } else {
+        None
+    };
     TaskColumns {
         notify_enabled,
         notify,
@@ -448,6 +469,7 @@ fn task_columns(input: &NewTaskInput) -> TaskColumns {
         weekdays,
         require_ac: guard_enabled && input.precheck_require_ac,
         ip_pattern,
+        day_type,
     }
 }
 
@@ -761,6 +783,7 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column(conn, "tasks", "precheck_ip_pattern", "TEXT")?;
+    ensure_column(conn, "tasks", "precheck_day_type", "TEXT")?;
     ensure_column(
         conn,
         "tasks",
@@ -855,11 +878,11 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
               precheck_enabled, precheck_curl_command, precheck_url, precheck_method, precheck_headers,
               precheck_body, precheck_options, precheck_expect_status, precheck_expr,
               precheck_weekdays, precheck_time_start, precheck_time_end,
-              precheck_require_ac, precheck_ip_pattern,
+              precheck_require_ac, precheck_ip_pattern, precheck_day_type,
               expect_status, expect_body, expect_expr, run_on_startup
             ) VALUES (
               ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-              ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47
+              ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47,?48
             )",
             params![
                 id,
@@ -907,6 +930,7 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
                 if columns.guard_enabled { input.precheck_time_end.clone() } else { None },
                 if columns.require_ac { 1 } else { 0 },
                 columns.ip_pattern,
+                columns.day_type,
                 input.expect_status,
                 input.expect_body,
                 input.expect_expr,
@@ -940,10 +964,10 @@ pub fn update_task_config(
               precheck_headers = ?26, precheck_body = ?27, precheck_options = ?28,
               precheck_expect_status = ?29, precheck_expr = ?30,
               precheck_weekdays = ?31, precheck_time_start = ?32, precheck_time_end = ?33,
-              precheck_require_ac = ?34, precheck_ip_pattern = ?35,
-              expect_status = ?36, expect_body = ?37, expect_expr = ?38,
-              run_on_startup = ?39, updated_at = ?40
-             WHERE id = ?41",
+              precheck_require_ac = ?34, precheck_ip_pattern = ?35, precheck_day_type = ?36,
+              expect_status = ?37, expect_body = ?38, expect_expr = ?39,
+              run_on_startup = ?40, updated_at = ?41
+             WHERE id = ?42",
             params![
                 input.name,
                 input.curl_command,
@@ -982,6 +1006,7 @@ pub fn update_task_config(
                 if columns.guard_enabled { input.precheck_time_end.clone() } else { None },
                 if columns.require_ac { 1 } else { 0 },
                 columns.ip_pattern,
+                columns.day_type,
                 input.expect_status,
                 input.expect_body,
                 input.expect_expr,
@@ -1282,6 +1307,53 @@ pub fn get_journal_mode() -> Result<String, DbError> {
     with_db(|conn, _| {
         let value: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
         Ok(value)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 节假日数据（holiday-cn）：按年缓存
+// ---------------------------------------------------------------------------
+
+/// 写入 / 覆盖某一年的节假日数据。
+pub fn upsert_holiday_year(
+    year: i32,
+    days_json: &str,
+    fetched_at: i64,
+    day_count: i64,
+) -> Result<(), DbError> {
+    with_db(|conn, _| {
+        conn.execute(
+            "INSERT INTO holiday_years (year, days, fetched_at, day_count)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(year) DO UPDATE SET days = ?2, fetched_at = ?3, day_count = ?4",
+            params![year, days_json, fetched_at, day_count],
+        )?;
+        Ok(())
+    })
+}
+
+/// 全部已缓存的年份（设置页展示与启动回填缓存）。
+pub fn list_holiday_years() -> Result<Vec<(i32, String, i64)>, DbError> {
+    with_db(|conn, _| {
+        let mut statement = conn
+            .prepare("SELECT year, days, fetched_at FROM holiday_years ORDER BY year")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)? as i32, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows.filter_map(|result| result.ok()).collect())
+    })
+}
+
+/// 某一年已缓存的节假日 JSON（判断时按年懒加载进内存缓存）。
+pub fn get_holiday_year_days(year: i32) -> Result<Option<String>, DbError> {
+    with_db(|conn, _| {
+        let mut statement =
+            conn.prepare("SELECT days FROM holiday_years WHERE year = ?1")?;
+        let mut rows = statement.query_map(params![year], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
     })
 }
 

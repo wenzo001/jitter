@@ -45,6 +45,8 @@ export interface Task {
   precheck_time_end: string | null
   precheck_require_ac: number
   precheck_ip_pattern: string | null
+  /** 工作日 / 休息日条件：workday / offday；null 表示不限制。 */
+  precheck_day_type: 'workday' | 'offday' | null
   run_on_startup: number
   expect_status: number | null
   expect_body: string | null
@@ -83,6 +85,8 @@ export interface TaskPayload {
   precheck_curl?: string
   precheck_ip_pattern?: string
   precheck_require_ac?: boolean
+  /** 工作日 / 休息日条件（法定节假日数据判断）。 */
+  precheck_day_type?: 'workday' | 'offday'
   precheck_expect_status?: number
   precheck_expr?: string
 }

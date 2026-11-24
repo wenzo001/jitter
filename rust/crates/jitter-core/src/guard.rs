@@ -125,6 +125,51 @@ pub struct LocalGuardConfig {
     pub weekdays: Option<Vec<i64>>,
     pub time_start: Option<String>,
     pub time_end: Option<String>,
+    /// 工作日 / 休息日条件（法定节假日数据判断）。
+    pub day_type: Option<DayType>,
+}
+
+/// 「仅工作日」/「仅休息日」条件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DayType {
+    Workday,
+    Offday,
+}
+
+impl DayType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DayType::Workday => "workday",
+            DayType::Offday => "offday",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DayType::Workday => "工作日",
+            DayType::Offday => "休息日",
+        }
+    }
+}
+
+/// 解析工作日 / 休息日条件：`"workday"` / `"offday"`；空表示「不限制」。
+pub fn parse_day_type(value: Option<&Json>) -> Result<Option<DayType>, GuardError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let text = match value {
+        Json::Null => return Ok(None),
+        Json::String(text) => text.trim(),
+        _ => return err("工作日 / 休息日条件必须是字符串"),
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text {
+        "workday" => Ok(Some(DayType::Workday)),
+        "offday" => Ok(Some(DayType::Offday)),
+        _ => err("工作日 / 休息日条件只能是 workday 或 offday"),
+    }
 }
 
 /// 从存储行宽松读取本地条件。
@@ -132,6 +177,7 @@ pub fn local_guard_of(
     weekdays: Option<&str>,
     time_start: Option<&str>,
     time_end: Option<&str>,
+    day_type: Option<&str>,
 ) -> LocalGuardConfig {
     let mut days: Option<Vec<i64>> = None;
     if let Some(raw) = weekdays {
@@ -157,10 +203,16 @@ pub fn local_guard_of(
         .map(str::to_string);
     let valid_range = matches!((&start, &end), (Some(start), Some(end))
         if is_hhmm(start) && is_hhmm(end) && start != end);
+    let day_type = match day_type {
+        Some("workday") => Some(DayType::Workday),
+        Some("offday") => Some(DayType::Offday),
+        _ => None,
+    };
     LocalGuardConfig {
         weekdays: days,
         time_start: if valid_range { start } else { None },
         time_end: if valid_range { end } else { None },
+        day_type,
     }
 }
 
@@ -170,6 +222,7 @@ pub fn has_local_conditions(config: &LocalGuardConfig) -> bool {
         .as_ref()
         .map_or(false, |days| !days.is_empty()))
         || (config.time_start.is_some() && config.time_end.is_some())
+        || config.day_type.is_some()
 }
 
 fn describe_weekdays(days: &[i64]) -> String {
@@ -236,6 +289,31 @@ pub fn evaluate_local_guard(config: &LocalGuardConfig, now: i64) -> GuardVerdict
         }
     }
 
+    // 工作日 / 休息日条件：依据法定节假日数据（节假日放假 / 调休上班）。
+    // 当年数据缺失时无法判断，按产品语义跳过该条件（视为通过）并在原因中说明。
+    let mut day_type_skipped = false;
+    if let Some(day_type) = config.day_type {
+        match crate::holiday::is_off_day(now) {
+            Some(is_off) => {
+                let actual = if is_off { DayType::Offday } else { DayType::Workday };
+                if actual != day_type {
+                    return GuardVerdict {
+                        passed: false,
+                        reason: format!(
+                            "今天是{}（{}），不满足「仅{}执行」条件",
+                            WEEKDAY_LABELS[weekday as usize],
+                            actual.label(),
+                            day_type.label()
+                        ),
+                    };
+                }
+            }
+            None => {
+                day_type_skipped = true;
+            }
+        }
+    }
+
     let mut parts: Vec<String> = vec![format!("今天{} {clock}", WEEKDAY_LABELS[weekday as usize])];
     if let (Some(start), Some(end)) = (&config.time_start, &config.time_end) {
         parts.push(format!("时段 {start}–{end}"));
@@ -243,6 +321,16 @@ pub fn evaluate_local_guard(config: &LocalGuardConfig, now: i64) -> GuardVerdict
     if let Some(days) = &config.weekdays {
         if !days.is_empty() {
             parts.push(format!("允许 {}", describe_weekdays(days)));
+        }
+    }
+    if let Some(day_type) = config.day_type {
+        if day_type_skipped {
+            parts.push(format!(
+                "「仅{}执行」因节假日数据未就绪已跳过",
+                day_type.label()
+            ));
+        } else {
+            parts.push(format!("仅{}", day_type.label()));
         }
     }
     if parts.len() == 1 {
