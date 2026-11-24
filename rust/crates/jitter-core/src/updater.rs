@@ -385,14 +385,21 @@ fn install(new_binary: &std::path::Path) -> Result<(), String> {
     set_progress("installing", 100, "正在替换程序文件…");
 
     // Windows 允许给运行中的 exe 改名（但不允许覆盖/删除）：
-    // 旧程序改名 .old → 新文件就位 → 直接拉起新进程。
-    // 全程不需要 cmd 辅助脚本（不会弹控制台窗口），失败可回滚。
+    // 先把新文件完整拷到同目录的 .new，再用两次 rename 完成交换。
+    // 不能「先改名旧文件再拷贝新文件」——中途崩溃/断电会留下
+    // 程序文件缺失，下次开机自启就会弹「Windows 找不到文件」。
+    let staged = PathBuf::from(format!("{}.new", current.to_string_lossy()));
+    if let Err(error) = fs::copy(new_binary, &staged) {
+        let _ = fs::remove_file(&staged);
+        return Err(format!("准备新程序文件失败：{error}"));
+    }
     let backup = PathBuf::from(format!("{}.old", current.to_string_lossy()));
     let _ = fs::remove_file(&backup); // 上次升级的残留；被锁住就忽略
     fs::rename(&current, &backup).map_err(|error| format!("无法重命名当前程序（可能被占用）：{error}"))?;
-    if let Err(error) = fs::copy(new_binary, &current) {
+    if let Err(error) = fs::rename(&staged, &current) {
         // 回滚：把旧程序改回去，让当前进程继续可用。
         let _ = fs::rename(&backup, &current);
+        let _ = fs::remove_file(&staged);
         return Err(format!("替换程序文件失败：{error}"));
     }
 

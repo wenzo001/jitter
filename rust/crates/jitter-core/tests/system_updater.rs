@@ -18,9 +18,15 @@ fn windows_autostart_entry_writes_startup_cmd() {
     assert!(posix(&entry.path)
         .contains("Microsoft/Windows/Start Menu/Programs/Startup/Jitter.cmd"));
     assert!(entry.content.contains("@echo off"));
+    // 中文系统控制台默认 GBK：先切 UTF-8，否则中文路径解析失败。
+    assert!(entry.content.contains("chcp 65001 >nul"));
+    // 开机时盘符可能未就绪：先等文件出现，再 start；找不到就安静退出。
+    assert!(entry.content.contains(r#"set "exe=C:\Apps\Jitter\jitter.exe""#));
+    assert!(entry.content.contains(r#"if exist "%exe%" goto run"#));
+    assert!(entry.content.contains(r#"exit /b 0"#));
     assert!(entry
         .content
-        .contains(r#"start "" /D "C:\Apps\Jitter" "C:\Apps\Jitter\jitter.exe" --background"#));
+        .contains(r#"start "" /D "C:\Apps\Jitter" "%exe%" --background"#));
 }
 
 #[test]

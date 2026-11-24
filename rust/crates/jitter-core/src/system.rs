@@ -127,8 +127,22 @@ pub fn build_autostart_entry(
             .join(format!("{APP_NAME}.cmd"));
         // Startup 目录会执行 .cmd；`start` 让进程脱离控制台窗口，
         // `/D` 把工作目录钉在程序所在目录。
+        // 两个坑都在开机阶段才暴露：
+        // 1. 文件是 UTF-8，而中文系统控制台默认 GBK(936)，中文路径会解析失败；
+        // 2. 目标盘（如 D:）可能还没挂载好，直接 start 会弹「找不到文件」。
+        // 所以先切 65001，再等最多约 30 秒；仍不存在就安静退出。
         let content = format!(
-            "@echo off\r\nstart \"\" /D \"{work_dir}\" \"{binary_path}\" --background\r\n"
+            "@echo off\r\n\
+chcp 65001 >nul\r\n\
+rem Wait for the drive/path to become ready at logon (up to ~30s).\r\n\
+set \"exe={binary_path}\"\r\n\
+for /L %%i in (1,1,15) do (\r\n\
+  if exist \"%exe%\" goto run\r\n\
+  ping -n 3 127.0.0.1 >nul\r\n\
+)\r\n\
+exit /b 0\r\n\
+:run\r\n\
+start \"\" /D \"{work_dir}\" \"%exe%\" --background\r\n"
         );
         return AutostartEntry { path, content };
     }

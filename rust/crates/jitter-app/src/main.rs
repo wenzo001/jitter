@@ -218,6 +218,15 @@ async fn run() -> anyhow::Result<()> {
     // 全局设置：接通电源时防止系统休眠（默认关闭）。
     jitter_core::host::set_prevent_sleep(jitter_core::db::get_prevent_sleep_on_ac());
 
+    // 开机自启条目按当前程序路径重写一次：旧版本生成的 .cmd 可能在
+    // 开机盘符未就绪时弹「找不到文件」，这里顺手升级成新版内容。
+    // 调试构建不碰（避免把开发机的自启条目指到 target/debug）。
+    if !cfg!(debug_assertions) && jitter_core::system::is_autostart_enabled() {
+        if let Err(error) = jitter_core::system::set_autostart(true) {
+            tracing::warn!("刷新开机自启条目失败: {error}");
+        }
+    }
+
     // 调度器。
     let recovered = scheduler::start().await?;
     tracing::info!("已恢复 {recovered} 个 active 任务");
