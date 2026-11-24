@@ -42,13 +42,18 @@ pub struct HolidayYear {
     pub days: Vec<HolidayDay>,
 }
 
-/// 设置页展示用的年度概览。
+/// 设置页展示用的年度概览（含明细，供弹窗查看）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HolidayYearMeta {
     pub year: i32,
-    pub day_count: i64,
+    /// 法定放假天数（`isOffDay = true` 的条目）。
+    pub off_days: i64,
+    /// 调休上班天数（`isOffDay = false` 的条目，通常落在周末）。
+    pub makeup_days: i64,
     pub fetched_at: i64,
+    /// 按日期升序排列的明细。
+    pub days: Vec<HolidayDay>,
 }
 
 // ---------------------------------------------------------------------------
@@ -243,17 +248,21 @@ pub fn has_current_year_data(now_ms: i64) -> bool {
         .unwrap_or(false)
 }
 
-/// 设置页展示：数据库里缓存了哪些年份。
+/// 设置页展示：数据库里缓存了哪些年份（含放假 / 调休统计与明细）。
 pub fn list_years() -> Vec<HolidayYearMeta> {
     crate::db::list_holiday_years()
         .unwrap_or_default()
         .into_iter()
-        .map(|(year, days, fetched_at)| HolidayYearMeta {
-            year,
-            day_count: parse_year(&days)
-                .map(|data| data.days.len() as i64)
-                .unwrap_or(0),
-            fetched_at,
+        .map(|(year, raw, fetched_at)| {
+            let mut days = parse_year(&raw).map(|data| data.days).unwrap_or_default();
+            days.sort_by(|a, b| a.date.cmp(&b.date));
+            HolidayYearMeta {
+                year,
+                off_days: days.iter().filter(|day| day.is_off_day).count() as i64,
+                makeup_days: days.iter().filter(|day| !day.is_off_day).count() as i64,
+                fetched_at,
+                days,
+            }
         })
         .collect()
 }

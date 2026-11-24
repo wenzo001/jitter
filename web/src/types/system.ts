@@ -36,10 +36,23 @@ export interface HostEnvironment {
   preventSleepOnAc: boolean
 }
 
+export interface HolidayDay {
+  name: string
+  /** YYYY-MM-DD */
+  date: string
+  /** true = 放假；false = 调休上班。 */
+  isOffDay: boolean
+}
+
 export interface HolidayYearMeta {
   year: number
-  dayCount: number
+  /** 法定放假天数。 */
+  offDays: number
+  /** 调休上班天数（通常落在周末）。 */
+  makeupDays: number
   fetchedAt: number
+  /** 按日期升序的明细。 */
+  days: HolidayDay[]
 }
 
 export interface HolidayStatus {

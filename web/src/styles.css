@@ -729,7 +729,48 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
   font-size: 12.5px;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+}
+
+.holiday-year-row:hover {
+  background: #f4f7fc;
+}
+
+.holiday-more {
+  margin-left: auto;
+  color: #2563eb;
+  font-size: 12px;
+}
+
+.holiday-detail-block + .holiday-detail-block {
+  margin-top: 16px;
+}
+
+.holiday-detail-title {
+  font-size: 13px;
+  font-weight: 650;
+  margin-bottom: 6px;
+}
+
+.holiday-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 12.5px;
+}
+
+.holiday-detail-date {
+  font-variant-numeric: tabular-nums;
+  min-width: 118px;
 }
 
 .holiday-year {

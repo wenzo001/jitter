@@ -50,3 +50,35 @@ fn rejects_missing_year_or_days() {
     assert!(parse_year_public(r#"{"year": 2026}"#).is_err());
     assert!(parse_year_public("not json").is_err());
 }
+
+/// 设置页统计口径：放假天数与调休上班天数分开算，明细按日期升序。
+#[test]
+fn list_years_splits_off_and_makeup_days() {
+    let dir = std::env::temp_dir().join("jitter-holiday-list-years");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("app.db").to_string_lossy().to_string();
+    jitter_core::db::init_db(Some(&path)).expect("init db");
+
+    // 故意乱序，验证读取时会按日期排序。
+    let raw = r#"{
+      "year": 2031,
+      "days": [
+        {"name": "调休上班", "date": "2031-01-04", "isOffDay": false},
+        {"name": "元旦", "date": "2031-01-02", "isOffDay": true},
+        {"name": "元旦", "date": "2031-01-03", "isOffDay": true}
+      ]
+    }"#;
+    jitter_core::db::upsert_holiday_year(2031, raw, 1234, 3).expect("upsert");
+
+    let years = jitter_core::holiday::list_years();
+    let entry = years.iter().find(|item| item.year == 2031).expect("2031");
+    assert_eq!(entry.off_days, 2);
+    assert_eq!(entry.makeup_days, 1);
+    assert_eq!(entry.days.len(), 3);
+    assert_eq!(entry.days[0].date, "2031-01-02");
+    assert_eq!(entry.days[1].date, "2031-01-03");
+    assert_eq!(entry.days[2].date, "2031-01-04");
+    assert!(!entry.days[2].is_off_day);
+}
+

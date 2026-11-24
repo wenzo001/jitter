@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { BackupEntry, Settings, UpdateInfo, UpdateProgress } from '@/types/system'
+import type { BackupEntry, HolidayDay, HolidayYearMeta, Settings, UpdateInfo, UpdateProgress } from '@/types/system'
 import { getSettings, updateSettings, quitApp, setAutostart } from '@/api/system'
 import {
   applyUpdate as applyUpdateApi,
@@ -44,6 +44,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 
 const holidayRefreshing = ref(false)
 const holidayErrors = ref<string[]>([])
+const holidayDetail = ref<HolidayYearMeta | null>(null)
 
 const updateInfo = ref<UpdateInfo | null>(null)
 const updateProgress = ref<UpdateProgress | null>(null)
@@ -178,6 +179,23 @@ async function refreshHoliday() {
   } finally {
     holidayRefreshing.value = false
   }
+}
+
+const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+/** `YYYY-MM-DD` → 周几（数据都是本地日期，用字符串解析避免时区偏差）。 */
+function weekdayOf(date: string): string {
+  const [year, month, day] = date.split('-').map(Number)
+  if (!year || !month || !day) return ''
+  return WEEKDAY_LABELS[new Date(year, month - 1, day).getDay()]
+}
+
+function offDaysOf(year: HolidayYearMeta): HolidayDay[] {
+  return year.days.filter((entry) => entry.isOffDay)
+}
+
+function makeupDaysOf(year: HolidayYearMeta): HolidayDay[] {
+  return year.days.filter((entry) => !entry.isOffDay)
 }
 
 /* ---------------- 备份 ---------------- */
@@ -496,11 +514,22 @@ function openCleanup() {
             每次启动静默更新，每月 1 号自动刷新；拉取范围是去年、今年、明年。
           </p>
           <div v-if="app.holiday?.years?.length" class="holiday-years">
-            <div v-for="entry in app.holiday.years" :key="entry.year" class="holiday-year-row">
+            <button
+              v-for="entry in app.holiday.years"
+              :key="entry.year"
+              type="button"
+              class="holiday-year-row"
+              :title="`查看 ${entry.year} 年的放假与调休明细`"
+              @click="holidayDetail = entry"
+            >
               <span class="holiday-year">{{ entry.year }} 年</span>
-              <span class="muted">{{ entry.dayCount }} 天 · 更新于 {{ formatTime(entry.fetchedAt) }}</span>
+              <span class="muted">
+                放假 {{ entry.offDays }} 天 · 调休上班 {{ entry.makeupDays }} 天 · 更新于
+                {{ formatTime(entry.fetchedAt) }}
+              </span>
               <a-tag v-if="entry.year === new Date().getFullYear()" color="blue">今年</a-tag>
-            </div>
+              <span class="holiday-more">查看明细</span>
+            </button>
           </div>
           <div v-else class="muted" style="font-size: 12.5px; padding: 6px 0">
             还没有节假日数据：任务里的「仅工作日 / 仅休息日」条件会被跳过。点下面按钮拉取。
@@ -658,5 +687,37 @@ function openCleanup() {
       :loading="confirmBusy"
       @confirm="runConfirm"
     />
+  </a-modal>
+
+  <a-modal
+    :open="Boolean(holidayDetail)"
+    :title="holidayDetail ? `${holidayDetail.year} 年放假与调休明细` : ''"
+    width="min(520px, 94vw)"
+    :footer="null"
+    @update:open="holidayDetail = null"
+  >
+    <template v-if="holidayDetail">
+      <div class="holiday-detail-block">
+        <div class="holiday-detail-title">
+          放假 {{ offDaysOf(holidayDetail).length }} 天
+        </div>
+        <div v-for="day in offDaysOf(holidayDetail)" :key="day.date" class="holiday-detail-row">
+          <span class="holiday-detail-date">{{ day.date }} {{ weekdayOf(day.date) }}</span>
+          <span class="muted">{{ day.name }}</span>
+        </div>
+      </div>
+      <div class="holiday-detail-block">
+        <div class="holiday-detail-title">
+          调休上班 {{ makeupDaysOf(holidayDetail).length }} 天（这些日子算工作日）
+        </div>
+        <div v-if="!makeupDaysOf(holidayDetail).length" class="muted" style="font-size: 12.5px">
+          这一年没有调休上班日。
+        </div>
+        <div v-for="day in makeupDaysOf(holidayDetail)" :key="day.date" class="holiday-detail-row">
+          <span class="holiday-detail-date">{{ day.date }} {{ weekdayOf(day.date) }}</span>
+          <span class="muted">{{ day.name || '调休上班' }}</span>
+        </div>
+      </div>
+    </template>
   </a-modal>
 </template>

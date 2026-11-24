@@ -323,3 +323,31 @@ fn host_guard_without_configuration_always_passes() {
     assert!(!has_host_conditions(&config));
     assert!(evaluate_host_guard(&config, None, &[]).passed);
 }
+
+/// 调休上班日通常落在周末：必须按工作日处理，这是「仅工作日」最容易错的点。
+#[test]
+fn makeup_workday_on_weekend_counts_as_workday() {
+    // 2030-01-01 是周二 → 01-05 周六（调休上班），01-06 周日（正常休息）。
+    with_mock_year(2030, &[("2030-01-05", false), ("2030-01-06", true)]);
+
+    let workday = LocalGuardConfig {
+        day_type: Some(DayType::Workday),
+        ..guard()
+    };
+    let offday = LocalGuardConfig {
+        day_type: Some(DayType::Offday),
+        ..guard()
+    };
+
+    // 周六但调休上班 → 满足「仅工作日」。
+    assert!(evaluate_local_guard(&workday, at(2030, 1, 5, 10, 0)).passed);
+    // 同一个周六不满足「仅休息日」。
+    let blocked = evaluate_local_guard(&offday, at(2030, 1, 5, 10, 0));
+    assert!(!blocked.passed);
+    assert!(blocked.reason.contains("工作日"));
+
+    // 周日不在调休列表 → 休息日。
+    assert!(evaluate_local_guard(&offday, at(2030, 1, 6, 10, 0)).passed);
+    assert!(!evaluate_local_guard(&workday, at(2030, 1, 6, 10, 0)).passed);
+}
+
