@@ -1047,6 +1047,18 @@ async function checkUpdate() {
 
 const UPGRADE_PENDING_KEY = "jitter-upgrade-pending";
 
+/** 版本比较必须去掉 v 前缀：更新接口给 "v1.0.11"，系统信息给 "1.0.11"。 */
+function sameVersion(a, b) {
+  const strip = (value) => String(value ?? "").trim().replace(/^v/i, "");
+  return strip(a) === strip(b);
+}
+
+function versionLabel(version) {
+  const text = String(version ?? "").trim();
+  if (!text) return "v?";
+  return text.startsWith("v") ? text : `v${text}`;
+}
+
 function readUpgradePending() {
   try {
     const raw = localStorage.getItem(UPGRADE_PENDING_KEY);
@@ -1084,19 +1096,19 @@ function settleUpgradeBanner() {
   const pending = readUpgradePending();
   const current = state.system?.version;
   if (!pending || !current) return;
-  if (pending.expected && current === pending.expected) {
+  if (pending.expected && sameVersion(current, pending.expected)) {
     showUpgradeBanner(
       "success",
-      `升级成功：已从 v${pending.from ?? "?"} 升级到 v${current}，页面数据已同步。`,
+      `升级成功：已从 ${versionLabel(pending.from)} 升级到 ${versionLabel(current)}，页面数据已同步。`,
     );
     // 保留记录，用户点「知道了」再清除。
     return;
   }
-  if (pending.expected && current !== pending.expected) {
+  if (pending.expected && !sameVersion(current, pending.expected)) {
     // 版本没变：升级没生效（或用户回滚），留下说明给用户，不再当成功。
     showUpgradeBanner(
       "error",
-      `升级未完成：当前仍是 v${current}（目标是 v${pending.expected}）。请在「设置 → 检查更新」里重试。`,
+      `升级未完成：当前仍是 ${versionLabel(current)}（目标是 ${versionLabel(pending.expected)}）。请在「设置 → 检查更新」里重试。`,
     );
   }
 }
@@ -1135,7 +1147,7 @@ async function waitForServerBack(previousVersion) {
       clearTimeout(timer);
       if (!response.ok) continue;
       const info = await response.json();
-      if (info?.version && info.version !== previousVersion) return info;
+      if (info?.version && !sameVersion(info.version, previousVersion)) return info;
       // 版本没变：旧进程可能还没退出，也可能升级没生效——多等几轮再下结论。
       if (attempt >= 9) return info;
     } catch {
@@ -1149,7 +1161,7 @@ async function waitForServerBack(previousVersion) {
 async function finishUpgradeSuccess(newVersion, previousVersion) {
   setUpgradeState("success", `升级成功：v${previousVersion} → v${newVersion}，页面数据已刷新。`);
   writeUpgradePending({ from: previousVersion, expected: newVersion, at: Date.now() });
-  showUpgradeBanner("success", `升级成功：已从 v${previousVersion} 升级到 v${newVersion}，页面数据已同步。`);
+  showUpgradeBanner("success", `升级成功：已从 ${versionLabel(previousVersion)} 升级到 ${versionLabel(newVersion)}，页面数据已同步。`);
   setStatus(`已升级到 v${newVersion}`);
   await loadSystemInfo();
   await loadTasks({ silent: true });
@@ -1173,7 +1185,7 @@ async function applyUpdate() {
   // 已经是目标版本：上次其实升级成功了（比如页面没感知到），直接收尾。
   try {
     const info = await api("/api/system", { signal: AbortSignal.timeout(3000) });
-    if (expected && info?.version === expected) {
+    if (expected && info?.version && sameVersion(info.version, expected)) {
       finishUpgradeSuccess(info.version, previousVersion);
       return;
     }
@@ -1214,7 +1226,7 @@ async function applyUpdate() {
     // 请求中断：多半是旧进程在替换后退出了。等新版本起来再判断。
     setUpgradeState("busy", "升级请求中断，正在等待服务恢复…");
     const back = await waitForServerBack(previousVersion);
-    if (back && (!expected || back.version === expected)) {
+    if (back && (!expected || sameVersion(back.version, expected))) {
       await finishUpgradeSuccess(back.version, previousVersion);
     } else if (back) {
       setUpgradeState("error", `服务已恢复，但版本仍是 ${back.version}（期望 ${expected ?? "新版本"}）。可能替换未生效，点「重试」重新下载安装。`);
@@ -1244,7 +1256,7 @@ async function applyUpdate() {
     setUpgradeState("error", "等待 60 秒仍未恢复。请检查托盘图标是否在运行、端口是否被占用；可点「重试」再次检测，或手动重新打开程序。");
     return;
   }
-  if (expected && back.version !== expected) {
+  if (expected && !sameVersion(back.version, expected)) {
     setUpgradeState("error", `服务已恢复，但版本仍是 ${back.version}（期望 ${expected}）。可能替换未生效，点「重试」或手动重新下载安装包。`);
     return;
   }
