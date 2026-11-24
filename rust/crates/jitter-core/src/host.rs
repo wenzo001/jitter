@@ -255,6 +255,12 @@ mod platform {
             return;
         };
         if keep {
+            // 抑制进程可能因缺少 D-Bus / systemd 立即退出：下一轮重新拉起。
+            if let Some(child) = slot.as_mut() {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    *slot = None;
+                }
+            }
             if slot.is_none() {
                 *slot = spawn_inhibitor();
             }

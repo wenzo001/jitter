@@ -268,7 +268,7 @@ pub struct HostGuardConfig {
     pub ip_pattern: Option<String>,
 }
 
-/// 解析「本机 IP」条件：允许数字、点与 `*`，多组用逗号或空格分隔。
+/// 解析「本机 IP」条件：允许数字、点与 `*`，多组只用逗号分隔。
 /// 空值表示不限制；返回统一成逗号分隔的规范化字符串。
 pub fn parse_ip_pattern(value: Option<&Json>) -> Result<Option<String>, GuardError> {
     let Some(value) = value else {
@@ -283,7 +283,9 @@ pub fn parse_ip_pattern(value: Option<&Json>) -> Result<Option<String>, GuardErr
         return Ok(None);
     }
     let mut patterns: Vec<String> = Vec::new();
-    for part in raw.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+    // 只用逗号分组：空白不是分隔符，避免「10.1. *」被拆成两个模式后意外匹配全部 IP。
+    for part in raw.split(',') {
+        let part = part.trim();
         if part.is_empty() {
             continue;
         }

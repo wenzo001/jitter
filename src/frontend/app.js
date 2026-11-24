@@ -1716,7 +1716,7 @@ function renderTaskCard(task) {
       h(
         "span",
         {},
-        task.precheck_enabled ? "执行前会先判断，不满足则跳过" : "无条件执行",
+        task.precheck_enabled ? "定时执行前会先判断，不满足则跳过（立即执行不受限）" : "无条件执行",
       ),
     ),
   );

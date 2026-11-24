@@ -180,6 +180,12 @@ fn ip_pattern_accepts_wildcards_and_multiple_groups() {
     assert_eq!(parse_ip_pattern(None).expect("ok"), None);
     assert!(parse_ip_pattern(Some(&json!("10.1.abc"))).is_err());
     assert!(parse_ip_pattern(Some(&json!("..."))).is_err());
+    // 空白不分组，避免 "10.1. *" 被拆成两个模式后匹配所有 IP。
+    assert!(parse_ip_pattern(Some(&json!("10.1. *"))).is_err());
+    assert_eq!(
+        parse_ip_pattern(Some(&json!("10.1.*,,192.168.*"))).expect("ok"),
+        Some("10.1.*,192.168.*".to_string())
+    );
 }
 
 #[test]
