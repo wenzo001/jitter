@@ -66,7 +66,6 @@ function openDetail(log: LogSummary) {
 }
 
 function kindLabel(kind: string): string {
-  if (kind === 'notify') return '通知'
   if (kind === 'missed') return '错过'
   if (kind === 'skipped') return '跳过'
   return '任务'
@@ -114,7 +113,7 @@ const emptyText = computed(() => {
     <div v-else class="log-list">
       <div v-for="log in logs.logs" :key="log.id" class="log-item" @click="openDetail(log)">
         <div class="log-head">
-          <a-tag :color="log.kind === 'notify' ? 'blue' : log.kind === 'missed' || log.kind === 'skipped' ? 'orange' : 'default'">
+          <a-tag :color="log.kind === 'missed' || log.kind === 'skipped' ? 'orange' : 'default'">
             {{ kindLabel(log.kind) }}
           </a-tag>
           <span>{{ formatTime(log.executed_at) }}</span>
@@ -123,8 +122,8 @@ const emptyText = computed(() => {
           <a-tag v-if="log.kind === 'task' && log.matched !== null" :color="log.matched ? 'success' : 'default'">
             {{ log.matched ? '成功' : '未成功' }}
           </a-tag>
-          <a-tag v-if="log.kind === 'notify' && log.parent_log_id !== null" color="default">
-            来自 #{{ log.parent_log_id }}
+          <a-tag v-if="log.notify" :color="log.notify.error ? 'error' : 'blue'" class="notify-tag">
+            {{ log.notify.error ? '通知失败' : '已通知' }}
           </a-tag>
           <a-tag v-if="log.run_source === 'manual'" color="default">手动</a-tag>
           <a-tag v-if="log.run_source === 'startup'" color="default">开机</a-tag>
@@ -134,6 +133,9 @@ const emptyText = computed(() => {
           {{ log.request_method }} {{ log.request_url }}
         </div>
         <div v-if="log.error" class="log-error">{{ log.error }}</div>
+        <div v-else-if="log.notify && log.notify.error" class="log-error">
+          通知失败：{{ log.notify.error }}
+        </div>
       </div>
     </div>
 

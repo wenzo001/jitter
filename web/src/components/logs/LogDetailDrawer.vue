@@ -45,6 +45,10 @@ watch(
 function summaryOf(log: LogSummary): string {
   return `${log.request_method ?? ''} ${log.request_url ?? ''}`.trim()
 }
+
+function notifySummary(notify: LogSummary): string {
+  return `${notify.request_method ?? ''} ${notify.request_url ?? ''}`.trim()
+}
 </script>
 
 <template>
@@ -74,6 +78,25 @@ function summaryOf(log: LogSummary): string {
         <h4>错误</h4>
         <pre style="color: var(--err)">{{ detail.error }}</pre>
       </div>
+      <template v-if="detail.notify">
+        <a-divider style="margin: 4px 0 14px">{{ detail.notify.error ? '通知（失败）' : '通知（已发送）' }}</a-divider>
+        <div v-if="notifySummary(detail.notify)" class="detail-block">
+          <h4>通知请求</h4>
+          <pre>{{ notifySummary(detail.notify) }}</pre>
+        </div>
+        <div v-if="detail.notify.error" class="detail-block">
+          <h4>通知错误</h4>
+          <pre style="color: var(--err)">{{ detail.notify.error }}</pre>
+        </div>
+        <div v-if="detail.notify.response_status !== null" class="detail-block">
+          <h4>通知响应</h4>
+          <pre>{{ detail.notify.response_status }} · {{ detail.notify.duration_ms ?? 0 }} ms</pre>
+        </div>
+        <div v-if="detail.notify.response_body !== null && detail.notify.response_body !== undefined" class="detail-block">
+          <h4>通知响应体</h4>
+          <pre>{{ detail.notify.response_body === '' ? '（空）' : prettyJson(detail.notify.response_body) }}</pre>
+        </div>
+      </template>
       <div v-if="detail.request_headers" class="detail-block">
         <h4>请求头</h4>
         <pre>{{ prettyJson(detail.request_headers) }}</pre>

@@ -1199,15 +1199,16 @@ pub fn list_log_summaries(
     with_db(|conn, _| {
         let select = format!("SELECT {LOG_SUMMARY_COLUMNS} FROM logs");
         let order = " ORDER BY executed_at DESC, id DESC LIMIT";
+        // 通知行不单独出现在列表里：作为父任务行的附属数据由 API 聚合返回。
         let (sql, parameters): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (before, since) {
-            (None, None) => (format!("{select} WHERE task_id = ?1{order} ?2"), vec![Box::new(task_id.to_string()), Box::new(limit)]),
+            (None, None) => (format!("{select} WHERE task_id = ?1 AND kind != 'notify'{order} ?2"), vec![Box::new(task_id.to_string()), Box::new(limit)]),
             (None, Some(since)) => (
-                format!("{select} WHERE task_id = ?1 AND executed_at >= ?2{order} ?3"),
+                format!("{select} WHERE task_id = ?1 AND kind != 'notify' AND executed_at >= ?2{order} ?3"),
                 vec![Box::new(task_id.to_string()), Box::new(since), Box::new(limit)],
             ),
             (Some(cursor), None) => (
                 format!(
-                    "{select} WHERE task_id = ?1 AND (executed_at < ?2 OR (executed_at = ?3 AND id < ?4)){order} ?5"
+                    "{select} WHERE task_id = ?1 AND kind != 'notify' AND (executed_at < ?2 OR (executed_at = ?3 AND id < ?4)){order} ?5"
                 ),
                 vec![
                     Box::new(task_id.to_string()),
@@ -1219,7 +1220,7 @@ pub fn list_log_summaries(
             ),
             (Some(cursor), Some(since)) => (
                 format!(
-                    "{select} WHERE task_id = ?1 AND (executed_at < ?2 OR (executed_at = ?3 AND id < ?4)) AND executed_at >= ?5{order} ?6"
+                    "{select} WHERE task_id = ?1 AND kind != 'notify' AND (executed_at < ?2 OR (executed_at = ?3 AND id < ?4)) AND executed_at >= ?5{order} ?6"
                 ),
                 vec![
                     Box::new(task_id.to_string()),
@@ -1234,6 +1235,46 @@ pub fn list_log_summaries(
         let mut statement = conn.prepare(&sql)?;
         let rows = statement.query_map(rusqlite::params_from_iter(parameters), map_log_summary)?;
         Ok(rows.filter_map(|result| result.ok()).collect())
+    })
+}
+
+/// 列表页附属通知：按 parent_log_id 批量取 notify 行摘要。
+pub fn list_notify_summaries(parent_ids: &[i64]) -> Result<Vec<LogSummary>, DbError> {
+    let ids: Vec<i64> = parent_ids
+        .iter()
+        .filter(|id| **id > 0)
+        .copied()
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    with_db(|conn, _| {
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT {LOG_SUMMARY_COLUMNS} FROM logs WHERE kind = 'notify' AND parent_log_id IN ({placeholders})"
+        );
+        let parameters: Vec<Box<dyn rusqlite::ToSql>> = ids
+            .iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(parameters), map_log_summary)?;
+        Ok(rows.filter_map(|result| result.ok()).collect())
+    })
+}
+
+/// 详情页附属通知：某次执行对应的通知完整行（1:1，取最新）。
+pub fn get_notify_by_parent(parent_id: i64) -> Result<Option<LogRow>, DbError> {
+    with_db(|conn, _| {
+        let sql = format!(
+            "SELECT {LOG_FULL_COLUMNS} FROM logs WHERE kind = 'notify' AND parent_log_id = ?1 ORDER BY executed_at DESC, id DESC LIMIT 1"
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = statement.query_map(params![parent_id], map_log)?;
+        match rows.next() {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
     })
 }
 

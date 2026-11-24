@@ -10,8 +10,10 @@ import {
   getLogCleanupPreview,
   getTask,
   getTestRun,
+  getNotifyByParent,
   insertTestRun,
   listLogSummaries,
+  listNotifySummaries,
   listTasks,
   listTestRuns,
   reorderTasks,
@@ -925,7 +927,17 @@ export const app = new Elysia()
     const rows = listLogSummaries(params.id, limit + 1, before, since);
     const hasMore = rows.length > limit;
     const logs = hasMore ? rows.slice(0, limit) : rows;
-    return { logs, has_more: hasMore, retention_days: retentionDays };
+    // A success notification belongs to the execution that triggered it:
+    // attach it to the parent row instead of listing it separately.
+    const notifies = listNotifySummaries(logs.map((log) => log.id));
+    const notifyByParent = new Map(
+      notifies.map((notify) => [notify.parent_log_id, notify]),
+    );
+    return {
+      logs: logs.map((log) => ({ ...log, notify: notifyByParent.get(log.id) ?? null })),
+      has_more: hasMore,
+      retention_days: retentionDays,
+    };
   })
   .get("/api/logs/cleanup/preview", () => getLogCleanupPreview())
   .post("/api/logs/cleanup", ({ body, set }) => {
@@ -994,5 +1006,7 @@ export const app = new Elysia()
       set.status = 404;
       return { error: "日志不存在" };
     }
-    return { log };
+    // The attached notification rides along with its execution detail.
+    const notify = log.kind === "notify" ? null : getNotifyByParent(id);
+    return { log: { ...log, notify } };
   });

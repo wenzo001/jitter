@@ -103,6 +103,9 @@ export interface LogSummary {
   parent_log_id: number | null
   matched: number | null
   run_source: 'scheduled' | 'manual' | 'startup' | null
+  /** 附属通知：API 聚合到父任务行，通知本身不再单独成行。列表给摘要，详情给完整行。 */
+  notify?: LogSummary &
+    Partial<Pick<LogDetail, 'request_headers' | 'request_body' | 'response_headers' | 'response_body'>>
 }
 
 export interface LogDetail extends LogSummary {

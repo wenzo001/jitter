@@ -828,8 +828,30 @@ async fn list_logs(
             if has_more {
                 rows.truncate(limit as usize);
             }
+            // 通知是任务执行的附属数据：并入父行返回，不再单独成行。
+            let parent_ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+            let notify_rows = db::list_notify_summaries(&parent_ids).unwrap_or_default();
+            let logs: Vec<Json> = rows
+                .iter()
+                .map(|row| {
+                    let mut value =
+                        serde_json::to_value(row).unwrap_or(Json::Null);
+                    if let Some(object) = value.as_object_mut() {
+                        if let Some(notify) = notify_rows
+                            .iter()
+                            .find(|entry| entry.parent_log_id == Some(row.id))
+                        {
+                            object.insert(
+                                "notify".into(),
+                                serde_json::to_value(notify).unwrap_or(Json::Null),
+                            );
+                        }
+                    }
+                    value
+                })
+                .collect();
             AxumJson(
-                json!({ "logs": rows, "has_more": has_more, "retention_days": retention_days }),
+                json!({ "logs": logs, "has_more": has_more, "retention_days": retention_days }),
             )
             .into_response()
         }
@@ -842,7 +864,21 @@ async fn get_log_detail(Path(id): Path<String>) -> Response {
         return bad_request("日志 id 必须是数字");
     };
     match db::get_log(log_id) {
-        Ok(Some(log)) => AxumJson(json!({ "log": log })).into_response(),
+        Ok(Some(log)) => {
+            // 通知随它的执行详情一起返回；通知行本身不附带。
+            let mut value = serde_json::to_value(&log).unwrap_or(Json::Null);
+            if log.kind != "notify" {
+                if let Ok(Some(notify)) = db::get_notify_by_parent(log.id) {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "notify".into(),
+                            serde_json::to_value(&notify).unwrap_or(Json::Null),
+                        );
+                    }
+                }
+            }
+            AxumJson(json!({ "log": value })).into_response()
+        }
         Ok(None) => not_found(),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
     }

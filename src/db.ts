@@ -410,12 +410,14 @@ export function initDb(path?: string): Database {
        LIMIT ?`,
     ),
     // The list view deliberately leaves the bodies out: one page of 50 rows
-    // with 100 KiB bodies each would move ~10 MB on every poll.
+    // with 100 KiB bodies each would move ~10 MB on every poll. Notify rows
+    // are excluded here: they ride along on their parent task row (the API
+    // attaches them as `notify`), so the list stays one line per execution.
     listLogSummaries: db.query(
       `SELECT id, task_id, executed_at, request_url, request_method,
               response_status, duration_ms, error, aborted, kind,
               parent_log_id, matched
-         FROM logs WHERE task_id = ?
+         FROM logs WHERE task_id = ? AND kind != 'notify'
         ORDER BY executed_at DESC, id DESC
         LIMIT ?`,
     ),
@@ -424,7 +426,7 @@ export function initDb(path?: string): Database {
               response_status, duration_ms, error, aborted, kind,
               parent_log_id, matched
          FROM logs
-        WHERE task_id = ?
+        WHERE task_id = ? AND kind != 'notify'
           AND (executed_at < ? OR (executed_at = ? AND id < ?))
         ORDER BY executed_at DESC, id DESC
         LIMIT ?`,
@@ -435,7 +437,7 @@ export function initDb(path?: string): Database {
               response_status, duration_ms, error, aborted, kind,
               parent_log_id, matched
          FROM logs
-        WHERE task_id = ? AND executed_at >= ?
+        WHERE task_id = ? AND kind != 'notify' AND executed_at >= ?
         ORDER BY executed_at DESC, id DESC
         LIMIT ?`,
     ),
@@ -444,7 +446,7 @@ export function initDb(path?: string): Database {
               response_status, duration_ms, error, aborted, kind,
               parent_log_id, matched
          FROM logs
-        WHERE task_id = ?
+        WHERE task_id = ? AND kind != 'notify'
           AND (executed_at < ? OR (executed_at = ? AND id < ?))
           AND executed_at >= ?
         ORDER BY executed_at DESC, id DESC
@@ -817,6 +819,36 @@ export function listLogSummaries(
             limit,
           );
   return rows as LogSummary[];
+}
+
+/**
+ * The notify rows that belong to the given task-run rows. The list API
+ * attaches each one to its parent as `notify` so the timeline stays one line
+ * per execution — a success notification is not a separate event.
+ */
+export function listNotifySummaries(parentIds: number[]): LogSummary[] {
+  const ids = [...new Set(parentIds.filter((id) => Number.isInteger(id) && id > 0))];
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = getDatabase()
+    .query(
+      `SELECT id, task_id, executed_at, request_url, request_method,
+              response_status, duration_ms, error, aborted, kind,
+              parent_log_id, matched
+         FROM logs
+        WHERE kind = 'notify' AND parent_log_id IN (${placeholders})`,
+    )
+    .all(...ids);
+  return rows as LogSummary[];
+}
+
+/** Full notify row for one task-run id (1:1; keep the newest if several). */
+export function getNotifyByParent(parentId: number): LogRow | null {
+  const row = getDatabase()
+    .query("SELECT * FROM logs WHERE kind = 'notify' AND parent_log_id = ?")
+    .all(parentId) as LogRow[];
+  if (row.length === 0) return null;
+  return row.reduce((latest, entry) => (entry.executed_at > latest.executed_at ? entry : latest));
 }
 
 export function getJournalMode(): string {
