@@ -112,7 +112,7 @@ function onDragStart(event: DragEvent) {
           title="拖动排序；也可聚焦后按 ↑ / ↓"
           aria-label="拖动调整任务顺序"
           @click.stop
-          @dragstart.stop="onDragStart"
+          @dragstart="onDragStart"
           @keydown.up.prevent.stop="emit('move', task, -1)"
           @keydown.down.prevent.stop="emit('move', task, 1)"
         >

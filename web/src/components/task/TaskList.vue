@@ -27,7 +27,10 @@ const dragId = ref<string | null>(null)
 const overId = ref<string | null>(null)
 
 function onDragStart(event: DragEvent) {
-  dragId.value = event.dataTransfer?.getData('text/plain') || null
+  // 拖动由卡片里的把手发起；.task-slot 上带 data-task-id，
+  // 这样不依赖 dragstart 阶段能否读到 dataTransfer。
+  const slot = (event.target as HTMLElement | null)?.closest('.task-slot') as HTMLElement | null
+  dragId.value = slot?.dataset.taskId || event.dataTransfer?.getData('text/plain') || null
 }
 
 function onDragOver(event: DragEvent, task: Task) {
@@ -85,6 +88,7 @@ function moveBy(task: Task, delta: number) {
     <div
       v-for="task in tasks"
       :key="task.id"
+      :data-task-id="task.id"
       :class="{ 'is-drop': overId === task.id && dragId !== task.id }"
       class="task-slot"
       @dragstart="onDragStart"
