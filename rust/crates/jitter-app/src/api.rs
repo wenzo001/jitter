@@ -699,14 +699,20 @@ async fn config() -> Response {
 async fn get_settings() -> Response {
     let config = get_active_config();
     let retention = db::get_effective_retention_days(config.log_retention_days).unwrap_or(30);
-    AxumJson(json!({ "logRetentionDays": retention, "logMaxRowsPerTask": config.log_max_rows_per_task }))
-        .into_response()
+    AxumJson(json!({
+        "logRetentionDays": retention,
+        "logMaxRowsPerTask": config.log_max_rows_per_task,
+        "skipTlsVerify": db::get_skip_tls_verify(),
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
 struct SettingsBody {
     #[serde(rename = "logRetentionDays")]
     log_retention_days: Option<i64>,
+    #[serde(rename = "skipTlsVerify")]
+    skip_tls_verify: Option<bool>,
 }
 
 async fn update_settings(AxumJson(body): AxumJson<SettingsBody>) -> Response {
@@ -715,6 +721,12 @@ async fn update_settings(AxumJson(body): AxumJson<SettingsBody>) -> Response {
             return bad_request("保留天数必须是 0–3650");
         }
         if let Err(error) = db::set_setting(db::LOG_RETENTION_SETTING, Some(&days.to_string())) {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0);
+        }
+    }
+    if let Some(skip) = body.skip_tls_verify {
+        let value = if skip { "1" } else { "0" };
+        if let Err(error) = db::set_setting(db::SKIP_TLS_VERIFY_SETTING, Some(value)) {
             return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0);
         }
     }

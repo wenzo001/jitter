@@ -14,6 +14,8 @@ use serde_json::{Map as JsonMap, Value as Json};
 use crate::types::{LogKind, RedirectMode, TaskStatus};
 
 pub const LOG_RETENTION_SETTING: &str = "logRetentionDays";
+/// 全局「默认跳过 TLS 证书校验」开关；缺省视为开启（打卡系统多为自签证书）。
+pub const SKIP_TLS_VERIFY_SETTING: &str = "skipTlsVerify";
 
 /// 一轮保留清理最多删多少行：无上限的 DELETE 会把服务冻住，积压分批消化。
 pub const PRUNE_BATCH_ROWS: i64 = 5000;
@@ -1407,6 +1409,14 @@ pub fn set_setting(key: &str, value: Option<&str>) -> Result<(), DbError> {
 }
 
 /// 实际生效的保留窗口：界面设置优先于配置文件默认值。
+/// 是否默认跳过 TLS 证书校验（未设置时视为开启）。
+pub fn get_skip_tls_verify() -> bool {
+    match get_setting(SKIP_TLS_VERIFY_SETTING) {
+        Ok(Some(value)) => value.trim() != "0",
+        _ => true,
+    }
+}
+
 pub fn get_effective_retention_days(default_days: i64) -> Result<i64, DbError> {
     if let Some(raw) = get_setting(LOG_RETENTION_SETTING)? {
         if let Ok(parsed) = raw.parse::<i64>() {

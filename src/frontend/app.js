@@ -85,6 +85,7 @@ const els = {
   swUpdateProgress: document.getElementById("sw-update-progress"),
   swApplyUpdate: document.getElementById("sw-apply-update"),
   appVersion: document.getElementById("app-version"),
+  skipTlsVerify: document.getElementById("skip-tls-verify"),
   swUpdateRetry: document.getElementById("sw-update-retry"),
   backupCreate: document.getElementById("backup-create"),
   backupImport: document.getElementById("backup-import"),
@@ -1358,7 +1359,30 @@ async function openSettings() {
   els.swUpdateProgress.textContent = "";
   await loadSystemInfo();
   await syncRetentionControl();
+  await loadRequestSettings();
   await loadBackups();
+}
+
+/** 「默认跳过 TLS 校验」开关：读当前生效值（默认开启）。 */
+async function loadRequestSettings() {
+  try {
+    const settings = await api("/api/settings", { signal: AbortSignal.timeout(5_000) });
+    if (els.skipTlsVerify) els.skipTlsVerify.checked = settings?.skipTlsVerify !== false;
+  } catch {
+    // 读不到就保持界面默认（勾选）。
+  }
+}
+
+async function saveSkipTlsVerify(checked) {
+  try {
+    await api("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({ skipTlsVerify: checked }),
+    });
+    setStatus(checked ? "已开启：默认跳过 TLS 证书校验" : "已关闭默认跳过（仅 -k 生效）");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
 }
 
 function renderTaskCard(task) {
@@ -3358,6 +3382,9 @@ function bindEvents() {
   });
   els.swApplyUpdate.addEventListener("click", () => void applyUpdate());
   els.swUpdateRetry.addEventListener("click", () => void applyUpdate());
+  if (els.skipTlsVerify) {
+    els.skipTlsVerify.addEventListener("change", () => void saveSkipTlsVerify(els.skipTlsVerify.checked));
+  }
   els.swQuit.addEventListener("click", () => void quitApp());
   els.backupCreate.addEventListener("click", () => void createBackupSnapshot());
   els.backupImport.addEventListener("click", pickBackupFile);

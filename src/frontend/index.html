@@ -971,6 +971,15 @@
         </section>
 
         <section class="settings-block">
+          <h3>请求安全</h3>
+          <label class="row" style="gap: 8px; align-items: center">
+            <input id="skip-tls-verify" type="checkbox" checked />
+            <span>默认跳过 TLS 证书校验（自签证书的内网 / 打卡系统需要；任务 curl 里的 -k 仍然有效）</span>
+          </label>
+          <p class="hint">对主请求、前置判断和通知全部生效。关闭后，只有任务里显式带 -k / --insecure 才跳过校验。</p>
+        </section>
+
+        <section class="settings-block">
           <h3>日志保留</h3>
           <div class="row" style="gap: 8px">
             <select id="retention-days-2">

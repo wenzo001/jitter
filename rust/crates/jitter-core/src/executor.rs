@@ -167,15 +167,6 @@ pub fn evaluate_precheck(input: &PrecheckInput<'_>) -> PrecheckVerdict {
     }
 }
 
-fn is_connection_reset_error(error: &reqwest::Error) -> bool {
-    let text = error.to_string().to_lowercase();
-    text.contains("connection reset")
-        || text.contains("econnreset")
-        || text.contains("connection closed")
-        || text.contains("socket closed")
-        || text.contains("incomplete message")
-}
-
 fn looks_like_timeout(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("timed out") || lower.contains("timeout") || lower.contains("etimedout")
@@ -288,14 +279,15 @@ fn error_text(error: &dyn std::error::Error) -> String {
     message
 }
 
-fn build_client(options: &RequestOptions) -> Result<reqwest::Client, String> {
+fn build_client(options: &RequestOptions, default_insecure: bool) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder();
     if matches!(options.redirect, Some(crate::types::RedirectMode::Manual)) {
         builder = builder.redirect(reqwest::redirect::Policy::none());
     } else {
         builder = builder.redirect(reqwest::redirect::Policy::limited(10));
     }
-    if matches!(options.insecure, Some(true)) {
+    // 任务级 -k 优先；未指定时跟随全局「默认跳过 TLS 校验」设置（默认开）。
+    if options.insecure.unwrap_or(default_insecure) {
         builder = builder.danger_accept_invalid_certs(true);
     }
     if let Some(proxy) = &options.proxy {
@@ -327,6 +319,7 @@ async fn perform_request(
     options: &RequestOptions,
     default_timeout_ms: i64,
     body_limit: usize,
+    default_insecure: bool,
 ) -> RequestResult {
     let started = Instant::now();
     let mut status: Option<i64> = None;
@@ -368,7 +361,7 @@ async fn perform_request(
         truncated = false;
         aborted = false;
 
-        let client = match build_client(options) {
+        let client = match build_client(options, default_insecure) {
             Ok(client) => client,
             Err(message) => {
                 caught = Some(message);
@@ -532,6 +525,7 @@ pub async fn execute_test_request(request: &crate::types::RequestSpec) -> TestRe
         options.timeout_ms = Some(TEST_REQUEST_TIMEOUT_MS);
     }
     let headers_text: String = Json::Object(request.headers.clone()).to_string();
+    let default_insecure = crate::db::get_skip_tls_verify();
     let result = perform_request(
         &request.url,
         &request.method,
@@ -541,6 +535,7 @@ pub async fn execute_test_request(request: &crate::types::RequestSpec) -> TestRe
         &options,
         config.request_timeout_ms,
         config.log_body_limit_bytes,
+        default_insecure,
     )
     .await;
 
@@ -698,6 +693,7 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source
 
     let main_options = parse_request_options(task.request_options.as_deref());
     let main_executed_at = now_ms();
+    let default_insecure = crate::db::get_skip_tls_verify();
     let main = perform_request(
         &task.request_url,
         &task.request_method,
@@ -707,6 +703,7 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source
         &main_options,
         config.request_timeout_ms,
         config.log_body_limit_bytes,
+        default_insecure,
     )
     .await;
 
@@ -760,6 +757,7 @@ pub async fn execute_task_run(task: &TaskRow, cancel: &CancellationToken, source
             &notify_options,
             config.request_timeout_ms,
             config.log_body_limit_bytes,
+            crate::db::get_skip_tls_verify(),
         )
         .await;
         let notify_body = match notify.status {
@@ -822,6 +820,7 @@ async fn run_precheck(task: &TaskRow, cancel: &CancellationToken, config: &AppCo
         &parse_request_options(task.precheck_options.as_deref()),
         config.request_timeout_ms,
         config.log_body_limit_bytes,
+        crate::db::get_skip_tls_verify(),
     )
     .await;
     let verdict = evaluate_precheck(&PrecheckInput {

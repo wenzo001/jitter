@@ -49,6 +49,31 @@ fn apply_env_overrides(config: &mut jitter_core::config::AppConfig) {
     }
 }
 
+
+/// 删除一天前的 `jitter-update-*` 临时目录（尽力而为，失败忽略）。
+fn cleanup_stale_update_dirs() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let one_day = std::time::Duration::from_secs(24 * 60 * 60);
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("jitter-update-") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .map(|age| age > one_day)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 单实例：重复启动只会打开已有实例的页面，绝不再起第二个调度器。
 // ---------------------------------------------------------------------------
@@ -174,6 +199,9 @@ async fn run() -> anyhow::Result<()> {
     if let Some(exe) = jitter_core::system::get_binary_path() {
         let _ = std::fs::remove_file(format!("{}.old", exe.to_string_lossy()));
     }
+
+    // 清理超过一天的升级下载临时目录（每次升级约 2MB，不清理会慢慢堆积）。
+    cleanup_stale_update_dirs();
 
     // 单实例：已有一个在跑时，只打开它的页面然后退出（避免两个调度器
     // 同时跑同一套任务）。测试等特殊场景可用 JITTER_ALLOW_MULTI_INSTANCE=1 跳过。
