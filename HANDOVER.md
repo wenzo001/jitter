@@ -30,12 +30,12 @@
 | 入口 | `src/index.ts` | `rust/crates/jitter-app/src/main.rs` |
 | 运行时 | Bun + Elysia | axum + tokio |
 | 数据库 | `bun:sqlite` | `rusqlite`（bundled SQLite） |
-| 前端 | `src/frontend/*` | **同一份文件，`include_str!` 嵌入** |
+| 前端 | `web/`（Vue 3 + antdv-next） | **同一份构建产物：Bun 读 `web/dist`，Rust `include_dir!` 嵌入** |
 | 产物 | `dist/jitter.exe` **111MB** | debug 13MB（release 预计 8–10MB） |
 | 测试 | `bun test` → **360 项** | `cargo test` → **198 项** |
 | 状态 | 功能完整，可直接用 | 核心跑通，缺桌面集成与发布 |
 
-**关键约定：前端零改动。** Rust 版实现同一套 API（同路径、同状态码、同 JSON 字段），所以 `src/frontend/` 是两个版本共用的。
+**关键约定：前端零改动。** 前端是独立的 `web/`（Vue 3 + TypeScript + antdv-next + Vite），两个后端共用同一套 API（同路径、同状态码、同 JSON 字段）与同一份 `web/dist` 构建产物。
 
 ---
 
@@ -58,7 +58,10 @@ src/                      TypeScript 版
 ├── updater.ts            GitHub Releases 检查与自替换
 ├── backup.ts / restore.ts 数据库备份 / 导出 / 导入 / 恢复
 ├── proxy.ts              环境代理失效自动回退
-└── frontend/             网页（两个版本共用）
+└── types.ts
+
+web/                      Vue 3 + TypeScript + antdv-next + Vite（两个版本共用）
+└── src/{App.vue,components,stores,api,types,utils}
 
 rust/
 ├── crates/jitter-core/   纯逻辑库（可单测，不依赖 HTTP 框架）
@@ -223,7 +226,7 @@ Rust 的 `db` 与 `config` 都是全局单例。**涉及它们的测试必须整
 
 ### 其它
 
-- `include_str!` 路径按**文件所在目录**相对：`jitter-app/src/main.rs` 到 `src/frontend` 是 `../../../../src/frontend/`
+- Rust 嵌入前端用 `include_dir!("$CARGO_MANIFEST_DIR/../../../web/dist")`，`build.rs` 会检查 `web/dist/index.html` 是否存在；改完前端必须 `bun run build` 再 `cargo build`（否则嵌入的是旧产物）
 - Bun 在本机非交互 shell 下 `node`/`npm` 可能找不到，跑 bun 前 `export PATH=...:<bun 目录>`
 - 本机 bash 的 `cd` 钩子会打印一条 fnm 报错并返回非零码：**`cd X && cmd` 会被短路成失败**，必须写 `cd X; cmd`；cargo 全路径 `/c/Users/lhcz-fu/.cargo/bin/cargo.exe`
 - `(... &)` 起的后台进程会随 shell 退出而死，跨调用要用工具的后台任务
@@ -236,12 +239,12 @@ Rust 的 `db` 与 `config` 都是全局单例。**涉及它们的测试必须整
 
 ## 十、改动时的红线
 
-1. **不要动 `src/frontend/` 的 API 契约**（路径、字段名、状态码）；改动前先看 Rust 版 `api.rs` 是否同步
+1. **不要动 API 契约**（路径、字段名、状态码）；改前端时同步检查 Rust 版 `api.rs` 与 `web/src/api/*`
 2. **不要改 SQLite schema 而不加迁移**：只能 `ensure_column` 追加，不能改/删已有列
 3. **改调度语义必须同时跑两边测试**：`bun test` 与 `cargo test -p jitter-core`
 4. **改上传/恢复/清理这类破坏性接口**，先手动跑一遍"备份 → 改数据 → 恢复"回路
 5. 提交前：`bun run typecheck && bun test`，Rust 侧 `cargo test -p jitter-core --jobs 1`
-6. **持锁不要再锁**：`scheduler::state()` 与 `db` 的全局 Mutex 都不可重入——任何"锁内调用另一个会拿锁的函数"都会自死锁（v1.0.0 之前 `finish_run` 和 `get_log_cleanup_preview` 各有一处，症状是接口无响应挂起）。前端是 ES module：**同名顶层函数重复声明是 SyntaxError，整个 app.js 不会执行**（症状是页面纯静态、无任何 /api 请求），改前端后务必在浏览器里真实打开一次页面。
+6. **持锁不要再锁**：`scheduler::state()` 与 `db` 的全局 Mutex 都不可重入——任何"锁内调用另一个会拿锁的函数"都会自死锁（v1.0.0 之前 `finish_run` 和 `get_log_cleanup_preview` 各有一处，症状是接口无响应挂起）。前端是 Vue 工程：改完必须 `bun run typecheck && bun run build`，Rust 侧再 `cargo build` 重新嵌入，最后在浏览器里真实打开一次页面。
 
 ---
 

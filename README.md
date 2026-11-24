@@ -4,12 +4,17 @@
 
 ## 两种实现：Rust（发布物）与 TypeScript（参考实现）
 
-本项目有两条代码线，共用同一套前端（`src/frontend/`）与同一套 API 契约：
+本项目有两条代码线，共用同一套 API 契约；前端是独立的 Vue 3 + antdv-next 工程（`web/`）：
 
 - **Rust 版（`rust/`）是发布物**：axum + tokio + rusqlite，单文件原生二进制（debug 13MB / release 约 8–10MB），Windows 版带托盘图标，支持开机自启、网页端数据库备份 / 导入 / 恢复、以及从 GitHub Releases 自动升级。**从 [Releases](https://github.com/wenzo001/jitter/releases) 下载 `jitter-windows-x64.zip`（或对应平台资产）解压运行即可。**
 - **TypeScript 版（`src/`）是参考实现**：Bun + Elysia，功能完整并保持 360 项测试作为行为基准，Rust 版按它逐模块对齐（当前 198+ 项测试）。日常开发两边的测试都要跑：`bun test` 与 `cargo test -p jitter-core`。
 
 ```bash
+# 前端（两个版本共用同一份构建产物）
+cd web
+bun install
+bun run build          # 产出 web/dist，Rust / Bun 从磁盘或嵌入资源提供
+
 # Rust 版（发布物）
 cd rust
 cargo run -p jitter-app
@@ -43,7 +48,7 @@ Jitter 的主线是「测试 curl」和「定时调用 curl」：
 | 数据库 | `bun:sqlite`，`PRAGMA journal_mode = WAL` |
 | 调度 | 任务级 `setTimeout`（唯一权威计划）+ 每分钟一次的兜底巡检（补回丢失的 timer）；计划由 `src/schedule.ts` 计算 |
 | HTTP 执行 | `fetch` + `AbortController` |
-| 前端 | 原生 HTML/CSS/JS，无构建链；Bun HTML import 自动打包 `app.js` |
+| 前端 | Vue 3 + TypeScript + antdv-next + Vite（`web/`）；Rust 通过 `include_dir!` 嵌入 `web/dist`，Bun 从磁盘读取 |
 
 ## 启动
 
@@ -51,8 +56,11 @@ Jitter 的主线是「测试 curl」和「定时调用 curl」：
 
 ```bash
 bun install
+cd web && bun install && bun run build && cd ..
 bun run src/index.ts
 ```
+
+> 前端必须先构建一次（`web/dist`）。Rust 版在 `cargo build` 时也会检查该目录并嵌入，缺失会直接报错并提示构建命令。
 
 控制台会打印实际访问地址、监听地址、数据库、使用的配置文件和恢复的任务数。默认读取项目根目录的 `jitter.config.json`；端口被占用时会自动尝试下一个端口（见下文“配置”）。
 
@@ -638,9 +646,16 @@ src/
 ├── curl-parser.ts    # shell 风格 tokenizer + 宽 curl 参数映射
 ├── types.ts
 ├── *.test.ts         # bun test
-└── frontend/
-    ├── index.html
-    └── app.js
+└── types.ts
+web/                  # Vue 3 + TypeScript + antdv-next + Vite
+├── src/
+│   ├── App.vue       # 顶栏 + 任务 / 表单 / 日志布局 + 轮询
+│   ├── components/   # 任务卡、表单、日志、试跑、设置、备份、清理、统计
+│   ├── stores/       # Pinia：任务 / 日志 / 应用配置与状态
+│   ├── api/          # typed fetch 客户端
+│   ├── types/        # 与 Rust API 对齐的类型
+│   └── utils/        # 格式化、调度描述、条件文案、curl 反序列化
+└── dist/             # bun run build 产物（gitignore，构建时嵌入 Rust）
 ```
 
 ## 验收对照

@@ -7,11 +7,15 @@ use crate::scheduler;
 use axum::body::Bytes;
 use axum::extract::{Path, Query};
 use axum::http::{header, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json as AxumJson, Router};
+use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 use serde_json::{json, Value as Json};
+
+/// 前端构建产物（web/dist），编译时嵌入单文件二进制。
+static WEB_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../../web/dist");
 
 use jitter_core::types::JsonMap;
 
@@ -1188,21 +1192,34 @@ async fn health() -> Response {
     AxumJson(json!({ "ok": true, "now": executor::now_ms() })).into_response()
 }
 
-/// 首页（嵌入的前端）。
-async fn index() -> Html<&'static str> {
-    Html(crate::INDEX_HTML)
-}
-
-/// 前端脚本。
-async fn app_js() -> Response {
+/// 首页与静态资源：从嵌入的 web/dist 读取。
+fn static_file(path: &str, immutable: bool) -> Response {
+    let Some(file) = WEB_DIST.get_file(path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let cache = if immutable {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
     (
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        crate::APP_JS,
+        [
+            (header::CONTENT_TYPE, mime.as_ref()),
+            (header::CACHE_CONTROL, cache),
+        ],
+        file.contents(),
     )
         .into_response()
+}
+
+async fn index() -> Response {
+    static_file("index.html", false)
+}
+
+/// Vite 生成的带哈希资源：可长期缓存。
+async fn asset(Path(path): Path<String>) -> Response {
+    static_file(&format!("assets/{path}"), true)
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,7 +1454,7 @@ fn rand_thread() -> impl FnMut() -> f64 {
 pub fn build_router() -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/app.js", get(app_js))
+        .route("/assets/*path", get(asset))
         .route("/api/health", get(health))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/reorder", post(reorder_tasks))

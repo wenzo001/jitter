@@ -15,10 +15,6 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-/// 前端 HTML/JS（与 TypeScript 版共用同一份文件，构建时嵌入）。
-pub const INDEX_HTML: &str = include_str!("../../../../src/frontend/index.html");
-pub const APP_JS: &str = include_str!("../../../../src/frontend/app.js");
-
 pub static ACTUAL_PORT: AtomicU16 = AtomicU16::new(0);
 
 /// 退出信号：网页「退出应用」按钮与托盘菜单共用一条关停路径。

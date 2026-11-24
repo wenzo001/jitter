@@ -15,8 +15,10 @@ tokio-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-tokio.workspace = true
+tokio = { workspace = true }
 axum.workspace = true
+include_dir.workspace = true
+mime_guess.workspace = true
 
 [[bin]]
 name = "jitter"

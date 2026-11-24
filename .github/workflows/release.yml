@@ -21,9 +21,29 @@ jobs:
       - run: bun install
       - run: bun test
 
+  frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        working-directory: web
+        run: bun run typecheck
+      - name: Build
+        working-directory: web
+        run: bun run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: web/dist
+
   build:
     name: Build ${{ matrix.platform }}-${{ matrix.arch }}
-    needs: test
+    needs: [test, frontend]
     strategy:
       fail-fast: false
       matrix:
@@ -57,6 +77,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

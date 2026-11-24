@@ -1,4 +1,4 @@
-import indexHtml from "./frontend/index.html";
+import { join } from "node:path";
 import { app } from "./api";
 import { getActiveConfig, loadConfig, setActiveConfig, type AppConfig } from "./config";
 import { closeDb, getAutoVacuumMode, initDb } from "./db";
@@ -12,6 +12,28 @@ export interface ServerOptions {
   port?: number;
   hostname?: string;
   configPath?: string;
+}
+
+/** Vue 前端构建产物目录（`web/dist`）；缺失时返回 503 而不是静默 404。 */
+const DIST_DIR = join(import.meta.dir, "..", "web", "dist");
+
+async function serveStatic(pathname: string): Promise<Response> {
+  const relative = pathname === "/" ? "index.html" : decodeURIComponent(pathname.slice(1));
+  if (relative.includes("..")) return new Response("Not Found", { status: 404 });
+  const file = Bun.file(join(DIST_DIR, relative));
+  if (!(await file.exists())) {
+    return new Response("前端尚未构建：请先在 web/ 目录运行 `bun run build`", {
+      status: 503,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+  return new Response(file, {
+    headers: {
+      "Cache-Control": relative.startsWith("assets/")
+        ? "public, max-age=31536000, immutable"
+        : "no-cache",
+    },
+  });
 }
 
 export function startServer(options: ServerOptions = {}): ReturnType<typeof Bun.serve> {
@@ -44,10 +66,13 @@ export function startServer(options: ServerOptions = {}): ReturnType<typeof Bun.
           Bun.serve({
             hostname: config.host,
             port,
-            routes: {
-              "/": indexHtml,
+            fetch: async (request) => {
+              const { pathname } = new URL(request.url);
+              if (pathname === "/" || pathname.startsWith("/assets/")) {
+                return serveStatic(pathname);
+              }
+              return app.fetch(request);
             },
-            fetch: (request) => app.fetch(request),
             error(error) {
               console.error("[jitter] Bun.serve 错误", error);
               return new Response("Internal Server Error", { status: 500 });
