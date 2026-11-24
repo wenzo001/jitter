@@ -248,6 +248,9 @@ pub fn evaluate_local_guard(config: &LocalGuardConfig, now: i64) -> GuardVerdict
     let minutes = (datetime.hour() * 60 + datetime.minute()) as i64;
     let clock = format!("{:02}:{:02}", datetime.hour(), datetime.minute());
     let mut weekday = datetime.weekday().num_days_from_sunday() as i64;
+    // 跨午夜窗口用「窗口开始那天」做日期类判断（用户语义：
+    // 22:00 开始的那次执行，即使实际在 0 点后跑，也按前一天算）。
+    let mut day_anchor = now;
 
     if let (Some(start), Some(end)) = (&config.time_start, &config.time_end) {
         let start_minutes = to_minutes(start);
@@ -262,6 +265,7 @@ pub fn evaluate_local_guard(config: &LocalGuardConfig, now: i64) -> GuardVerdict
             // 22:00–02:00 的 00:30 仍属于昨天的实例。
             in_range = true;
             weekday = (weekday + 6) % 7;
+            day_anchor = (datetime - chrono::Duration::days(1)).timestamp_millis();
         }
         if !in_range {
             let suffix = if cross_midnight {
@@ -293,7 +297,7 @@ pub fn evaluate_local_guard(config: &LocalGuardConfig, now: i64) -> GuardVerdict
     // 当年数据缺失时无法判断，按产品语义跳过该条件（视为通过）并在原因中说明。
     let mut day_type_skipped = false;
     if let Some(day_type) = config.day_type {
-        match crate::holiday::is_off_day(now) {
+        match crate::holiday::is_off_day(day_anchor) {
             Some(is_off) => {
                 let actual = if is_off { DayType::Offday } else { DayType::Workday };
                 if actual != day_type {

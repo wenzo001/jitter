@@ -351,3 +351,32 @@ fn makeup_workday_on_weekend_counts_as_workday() {
     assert!(!evaluate_local_guard(&workday, at(2030, 1, 6, 10, 0)).passed);
 }
 
+/// 跨午夜窗口按「开始那天」判断工作日/休息日：0 点后仍算前一天。
+#[test]
+fn cross_midnight_window_uses_start_day_for_day_type() {
+    // 2032-01-02 是周五（工作日），2032-01-03 是周六（休息日）。
+    // 用独立的年份，避免和上面 mock 的 2030 数据互相污染缓存。
+    with_mock_year(2032, &[]);
+
+    let workday = LocalGuardConfig {
+        time_start: Some("22:00".into()),
+        time_end: Some("02:00".into()),
+        day_type: Some(DayType::Workday),
+        ..guard()
+    };
+    let offday = LocalGuardConfig {
+        time_start: Some("22:00".into()),
+        time_end: Some("02:00".into()),
+        day_type: Some(DayType::Offday),
+        ..guard()
+    };
+
+    // 周六 00:30 仍属于周五 22:00 开出的窗口 → 按周五（工作日）判定。
+    assert!(evaluate_local_guard(&workday, at(2032, 1, 3, 0, 30)).passed);
+    assert!(!evaluate_local_guard(&offday, at(2032, 1, 3, 0, 30)).passed);
+
+    // 周六 23:00 是周六自己的窗口 → 休息日。
+    assert!(!evaluate_local_guard(&workday, at(2032, 1, 3, 23, 0)).passed);
+    assert!(evaluate_local_guard(&offday, at(2032, 1, 3, 23, 0)).passed);
+}
+
