@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-25 · v2.1.9 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-25 · v2.1.10 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,8 +14,8 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.9（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.9>。
-工作区改动都已提交在 `main` 上，发布走 `v*` 标签。
+**当前版本：v2.1.10（发布中）**，上一版 Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.9>。
+发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
 ---
@@ -136,6 +136,32 @@ vue-i18n 消息语法把 `|` 当复数分隔符。文案里写逻辑或 `||` 会
 **修法**：读完先算出"完整字符前缀"，残缺的那几个字节留给下一段（`next_offset` 只算完整部分）。
 **防回归**：`logging.rs` 的 `utf8_prefix_keeps_only_complete_characters`。
 
+### 4.14 dayjs 默认是英文，vue-i18n 切中文不会带上它
+dayjs 的语言包**要单独注册**，而且注册 ≠ 切换：`import 'dayjs/locale/zh-cn'` 只是把语言包装进去，
+还得 `dayjs.locale('zh-cn')` 才会真的用它。
+本项目只注册语言包、不改全局 locale（`web/src/i18n.ts`），因为界面语言由 vue-i18n 管，
+dayjs 只在「日历弹窗」里被用到（antd 的 `a-calendar` 会按 locale 自己设 dayjs 的语言，
+所以英文界面下日历仍然是英文月份）。
+**症状**：界面全中文，但日历里的月份是 `Jan Feb Mar`、星期是 `Su Mo Tu`。
+**防回归**：改日历或日期格式化时，确认 `zh-cn` 语言包还在 `i18n.ts` 的 import 里。
+
+### 4.15 antdv-next 的 `a-dropdown` 不支持 `#overlay` 插槽
+写 `<template #overlay>` 会被 vue-tsc 报 `Property 'overlay' does not exist`。
+**正确写法**：`:menu="menuProps"` + 在 menu 上挂 `onClick` 分发（参考 `App.vue` 的 `moreMenu`）。
+antdv-next 的 `Menu` 也没有 `selectedKeys` prop，想标出「当前语言」只能在 label 里自己加 `✓`。
+
+### 4.16 自动化脚本里匹配 antd 按钮要先去空格
+antd 会把两个中文字之间自动插一个空格（「更多」渲染成 `更 多」）。
+脚本里按文本找按钮时用 `textContent.replace(/\s/g, '')` 再比。
+另外 **Dropdown / Modal 的触发器必须用真实 `page.mouse.click(x, y)`**，`el.click()` 或 `dispatchEvent` 不会打开
+（普通按钮用 `el.click()` 倒是能触发 Vue 的 `@click`）。
+
+### 4.17 日历的星期表头默认右对齐
+antd 的 `th` 是 `text-align: end`，而 `fullCellRender` 里我们把日期数字放在格子左边，
+两者不对齐，看起来就是「周几往右歪」。
+**修法**：`CalendarDialog.vue` 里 `.cal-panel :deep(.ant-picker-content th) { text-align: left; padding: 0 6px 4px 7px; }`，
+内边距跟 `.cal-cell`（1px 边框 + 6px padding）对上。
+
 ---
 
 ## 五、构建与测试
@@ -189,7 +215,30 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 
 ## 六、本轮已经做完的事（可以直接接手）
 
-**后端健壮性**
+### 6.0 v2.1.10：界面精简与信息分层（电脑端优先）
+
+本轮只动前端（`web/src/**`），Rust 代码一行没改（只有 `Cargo.toml` 的版本号跟着 bump）。目标是「电脑端体验优先，最多兼容平板端」。
+
+| 改动 | 落点 |
+| --- | --- |
+| 中文下日历月份/星期不再是英文 | `web/src/i18n.ts` 注册 `dayjs/locale/zh-cn` |
+| 任务卡「上次执行」压成一行（结果 tag + 「几小时前」），其余进 title 提示 | `components/task/TaskCard.vue`（新增 `lastRunTitle`） |
+| 调休上班日按工作日标注：主标签「工作」+ 副标签「调休 · 节日名」，图例「工作日」计数含调休 | `components/dialogs/CalendarDialog.vue`（`cellLabel` / `cellNote` / `summary`） |
+| 详情抽屉里通知详情挪到**最下面**，独立成「通知详情」分区 | `components/logs/LogDetailDrawer.vue`（`notify-section`） |
+| JSON 用 `vue-json-pretty` 渲染成可折叠的树（键名/类型分色），不是 JSON 就退回纯文本 | `components/common/JsonViewer.vue`（新增），用在详情抽屉和测试台 |
+| 日历星期表头跟日期列对齐（antd 默认右对齐，看着是歪的） | `components/dialogs/CalendarDialog.vue`（`:deep(.ant-picker-content th)`） |
+| 顶栏只留品牌 + 状态位 + 时钟 + 指标 + 「试跑 curl」+「更多」，次要入口和语言切换收进下拉 | `App.vue`（`moreMenu` / `onMoreClick`） |
+| 宽屏铺满（去掉 1500px 上限），执行记录把请求 URL 并进首行 | `styles.css`（`.page` / `.topbar-inner` / `.layout` / `.log-request`）、`components/logs/LogsPanel.vue` |
+
+**设计约定**（改之前先读，免得改回去）：
+- **调休上班日是工作日**，服务端 `holiday` 数据里的 `dayType: 'makeup'` 落在周末但性质是上班，
+  所以 UI 的「工作日」计数必须包含它；不要为了「计数加起来等于天数」而把它从工作日里减掉。
+- 任务卡的「上次执行」只保留一行；准确时刻、触发来源、HTTP 状态码、耗时统一进 `title` 提示，
+  **信息不删，只是不常驻显示**。
+- 通知详情固定排在抽屉**最末尾**，且与任务执行记录视觉分区，不要再插回中间。
+- 顶栏用 `a-dropdown` 的 `:menu` prop（**不是 `#overlay` 插槽**，见 4.15），菜单项走 `onClick` 分发。
+
+### 6.1 v2.1.9 及更早：后端健壮性
 - panic 兜底：`panic = "unwind"` + `main.rs` 的 panic hook 落盘 + 启动失败弹 `MessageBoxW`。
 - `/api/health` 扩展：version / uptimeMs / dbOk / dbPath / logDir / lastError。
 - 错误响应带 `hint` 字段，前端能直接显示「下一步该做什么」。
@@ -205,8 +254,8 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 - `App.vue`：后台无响应横幅（重新检测 / 查看运行日志）、主界面错误边界包裹。
 
 **国际化 / 依赖**
-- vue-i18n 11 接入，678 条文案中英各一份，`MessageSchema = typeof zhCN` 保证 key 一致。
-- 顶栏 `a-segmented` 切换语言，立即生效 + localStorage 持久化 + 同步 `<html lang>`，antdv-next locale 同步。
+- vue-i18n 11 接入，684 条文案中英各一份，`MessageSchema = typeof zhCN` 保证 key 一致。
+- 顶栏语言切换走「更多」下拉菜单（`a-dropdown` 的 `:menu` prop），立即生效 + localStorage 持久化 + 同步 `<html lang>`，antdv-next locale 同步。
 - **后端返回的动态数据不翻译**（任务名、schedule_description、日志内容、后端错误文本），这是有意约定。
 - vueuse 14 接入：剪贴板、localStorage、定时器、可见性都用 vueuse，不再手写。
 - RUST_LOG 回到标准 `tracing_subscriber::EnvFilter`（自写 LogFilter 已删）。
@@ -230,35 +279,32 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 
 ## 七之二、本轮最终状态（已实测）
 
-**测试**
+**测试（2026-11-25 实测）**
 
 | 项目 | 结果 |
 | --- | --- |
-| `cargo test -p jitter-core --jobs 1` | **241 项全绿** |
+| `cargo test --workspace --jobs 1` | **core 250 项 + app 2 项全绿** |
 | `cargo check --workspace --all-targets --jobs 1` | **0 warning / 0 error** |
 | `bun run typecheck` | 退出码 0 |
-| `bun run test` | **5 文件 / 57 用例全绿** |
+| `bun run test` | **6 文件 / 65 用例全绿** |
 | 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn |
 
 **发布体积（2026-11-25 实测）**
 
 | 项 | 大小 |
 | --- | --- |
-| `rust/target/release/jitter.exe` | **7,584,256 B（7.23 MB）** |
-| zip（deflate-6） | **3,169,860 B（3.02 MB）**，CI 的 `zip -9` 还会再小一点 |
-| `web/dist/assets/index-*.js` | 1,687,282 B（gzip 465 KB） |
-| `web/dist/assets/index-*.css` | 20,944 B |
+| `rust/target/release/jitter.exe` | **7,597,056 B（7.25 MB）** |
+| `web/dist/assets/index-*.js` | ≈1,690 kB（gzip ≈467 KB） |
 
-> 对比本轮开工前（7,446,528 B / zip 3.07 MB）：**整体更小了**。
-> 拆解：i18n 让前端 +135 KB 原始体积，但压缩率高，zip 反而小了；
-> 标准 `EnvFilter` 比自写 `LogFilter` 大约 265 KB（3.7%），换来标准 `RUST_LOG` 语义
-> （级别 + 目标前缀 + span），按「能用开源就用开源，体积不受影响就用开源」保留。
+> v2.1.10 只动前端，exe 体积与上一版基本持平。
 > release profile 已是 `opt-level="z" + lto + codegen-units=1 + strip=true`，没有进一步空间。
 
-**界面实测结论**
-- 顶栏在窄窗口下是「第一行品牌 + 时钟 / 第二行整排按钮」两段式，不再从按钮中间断开。
-- 左右两块面板等高填满，各自内部滚动，不再一边留白。
-- 执行记录面板头：标题 + 副信息归一段，按钮整组换行，不会只掉下一个「刷新」。
+**界面实测结论（v2.1.10）**
+- 顶栏单行：品牌 + 版本、状态位、时钟、指标、「试跑 curl」、「更多」；次要入口与语言切换都在「更多」下拉里。
+- 1920 宽屏下左右两栏铺满可用宽度，右侧执行记录不再只剩半屏。
+- 任务卡「上次执行」单行（结果 tag + 「几小时前」），完整信息在悬停提示里。
+- 日历中文下月份/星期正常（`Jan/Sun` → `1月/一`）；调休上班日显示「工作」+「调休 · 节日名」，图例「工作日」计数已含调休。
+- 详情抽屉里「通知详情」在最末尾独立分区，请求/响应各块顺序不变。
 
 
 ---
