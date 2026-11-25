@@ -14,7 +14,8 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.9。** 工作区改动都已提交在 `main` 上，发布走 `v*` 标签。
+**当前版本：v2.1.9（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.9>。
+工作区改动都已提交在 `main` 上，发布走 `v*` 标签。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
 ---
