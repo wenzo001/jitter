@@ -762,6 +762,7 @@ pub async fn execute_task_run(
 
         let host_config = HostGuardConfig {
             require_ac_power: task.precheck_require_ac == 1,
+            require_network: task.precheck_require_network == 1,
             ip_pattern: task.precheck_ip_pattern.clone(),
         };
         if has_host_conditions(&host_config) {
@@ -770,6 +771,7 @@ pub async fn execute_task_run(
                 &host_config,
                 environment.on_ac_power,
                 &environment.local_ips,
+                &environment.networks,
             );
             if !verdict.passed {
                 let main_log_id = record_skip(task, &verdict.reason, None, source);

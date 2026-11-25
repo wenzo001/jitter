@@ -353,10 +353,12 @@ pub fn evaluate_local_guard(config: &LocalGuardConfig, now: i64) -> GuardVerdict
 // 电源 / 本机 IP 条件
 // ---------------------------------------------------------------------------
 
-/// 存储行里的环境条件：只有接通电源才执行、只有本机 IP 匹配才执行。
+/// 存储行里的环境条件：只有接通电源才执行、只有连着网络才执行、只有本机 IP 匹配才执行。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HostGuardConfig {
     pub require_ac_power: bool,
+    /// 必须已连接网络（WiFi 或网线）。
+    pub require_network: bool,
     pub ip_pattern: Option<String>,
 }
 
@@ -438,17 +440,22 @@ pub fn ip_matches_any(ip: &str, patterns: &str) -> bool {
 
 pub fn has_host_conditions(config: &HostGuardConfig) -> bool {
     config.require_ac_power
+        || config.require_network
         || config
             .ip_pattern
             .as_ref()
             .map_or(false, |pattern| !pattern.is_empty())
 }
 
-/// 判断电源 / 本机 IP 条件。`on_ac_power` 为 `None` 表示无法判断。
+/// 判断电源 / 网络 / 本机 IP 条件。`on_ac_power` 为 `None` 表示无法判断。
+///
+/// **三个条件是「与」的关系**：任何一个不满足就直接判定不通过，
+/// 不会因为别的条件通过就放行。
 pub fn evaluate_host_guard(
     config: &HostGuardConfig,
     on_ac_power: Option<bool>,
     local_ips: &[String],
+    networks: &[crate::host::NetworkConnection],
 ) -> GuardVerdict {
     if config.require_ac_power {
         match on_ac_power {
@@ -468,9 +475,31 @@ pub fn evaluate_host_guard(
         }
     }
 
+    if config.require_network && networks.is_empty() {
+        return GuardVerdict {
+            passed: false,
+            reason: "当前未连接网络（WiFi / 网线）".to_string(),
+        };
+    }
+
     let mut parts: Vec<String> = Vec::new();
     if config.require_ac_power {
         parts.push("已接通电源".to_string());
+    }
+    if config.require_network {
+        let names = networks
+            .iter()
+            .map(|network| {
+                // 网卡名常常就是「以太网」这类通用名，跟类型重复时不再重复括号。
+                if network.name.is_empty() || network.name == network.kind.label() {
+                    network.kind.label().to_string()
+                } else {
+                    format!("{}（{}）", network.kind.label(), network.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        parts.push(format!("已连接网络 {names}"));
     }
     if let Some(pattern) = &config.ip_pattern {
         if !pattern.is_empty() {
@@ -499,7 +528,7 @@ pub fn evaluate_host_guard(
     if parts.is_empty() {
         return GuardVerdict {
             passed: true,
-            reason: "未设置电源 / 本机 IP 条件".to_string(),
+            reason: "未设置电源 / 网络 / 本机 IP 条件".to_string(),
         };
     }
     GuardVerdict {

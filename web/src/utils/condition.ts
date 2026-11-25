@@ -70,6 +70,14 @@ export function conditionRows(task: Task, t: TranslateFn = zhTranslate): Conditi
     rows.push({ key: 'ac', label: t('condition.labelPower'), value: t('condition.valueAc') })
   }
 
+  if (task.precheck_require_network === 1) {
+    rows.push({
+      key: 'network',
+      label: t('condition.labelNetwork'),
+      value: t('condition.valueNetwork'),
+    })
+  }
+
   if (task.precheck_ip_pattern) {
     rows.push({
       key: 'ip',

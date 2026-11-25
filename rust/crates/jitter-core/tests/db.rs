@@ -154,6 +154,37 @@ fn guard_is_only_enabled_with_a_real_condition() {
     close_db();
 }
 
+/// 「已连接网络」是独立的执行条件：只勾它也能启用执行条件，并能存进数据库。
+#[test]
+fn network_condition_round_trips() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = format!("{dir}\\app.db");
+    let _ = fs::remove_file(&path);
+    init_db(Some(&path)).expect("init");
+
+    let mut input = task_input("net");
+    input.precheck_enabled = true;
+    input.precheck_require_network = true;
+
+    let created = create_task(&input, "n1", 1000).expect("create");
+    assert_eq!(created.precheck_enabled, 1, "只勾网络条件也应启用执行条件");
+    assert_eq!(created.precheck_require_network, 1);
+
+    let loaded = get_task("n1").expect("read").expect("exists");
+    assert_eq!(loaded.precheck_require_network, 1);
+
+    input.precheck_require_network = false;
+    let updated = update_task_config("n1", &input, 2000)
+        .expect("update")
+        .expect("exists");
+    assert_eq!(updated.precheck_require_network, 0);
+    assert_eq!(updated.precheck_enabled, 0, "没有其它条件时执行条件随之关闭");
+
+    cleanup(&path);
+    close_db();
+}
+
 #[test]
 fn update_task_config_preserves_scheduling_state() {
     let dir = temp_dir();

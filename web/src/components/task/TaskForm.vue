@@ -8,7 +8,7 @@ import { useAppStore } from '@/stores/app'
 import { useTasksStore } from '@/stores/tasks'
 import { formatShortTime, formatClockSecond, hhmm } from '@/utils/format'
 import { headersTextToJson, requestToCurl } from '@/utils/curl'
-import { describeHostEnvironment } from '@/utils/environment'
+import { describeHostEnvironment, describeHostNetwork } from '@/utils/environment'
 import ConditionFields from './ConditionFields.vue'
 import TestBenchDialog from '@/components/dialogs/TestBenchDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -97,6 +97,7 @@ const expectSummary = computed(() => {
 })
 
 const envText = computed(() => describeHostEnvironment(app.environment, t))
+const networkText = computed(() => describeHostNetwork(app.environment, t))
 
 /** 节假日数据就绪：当年数据存在，「仅工作日 / 仅休息日」选项才可选。 */
 const holidayReady = computed(() => app.holiday?.hasCurrentYear === true)
@@ -116,6 +117,11 @@ watch(
   () => app.config.defaultWindowMinutes,
   () => applyDefaultWindow(),
 )
+
+// 打开「执行条件」时拉一次主机环境，提示当前电源 / 网络 / 本机 IP。
+watch(precheckOn, (on) => {
+  if (on) void app.loadEnvironment(true)
+})
 
 function applyDefaultWindow() {
   if (model.value.scheduleKind !== 'daily') return
@@ -410,6 +416,7 @@ function validateConditions(cond: TaskFormModel['conditions'], result: FormError
     cond.weekdays.length > 0 ||
     hasTime ||
     cond.requireAc ||
+    cond.requireNetwork ||
     Boolean(cond.ipPattern.trim()) ||
     Boolean(cond.dayType) ||
     Boolean(curl)
@@ -469,6 +476,7 @@ function buildPayload(): TaskPayload {
     if (cond.curl.trim()) payload.precheck_curl = cond.curl.trim()
     if (cond.ipPattern.trim()) payload.precheck_ip_pattern = cond.ipPattern.trim()
     if (cond.requireAc) payload.precheck_require_ac = true
+    if (cond.requireNetwork) payload.precheck_require_network = true
     if (cond.dayType) payload.precheck_day_type = cond.dayType
     const status = cond.expectStatus.trim()
     if (status) payload.precheck_expect_status = Number(status)
@@ -910,6 +918,7 @@ defineExpose({
           v-if="precheckOn"
           v-model="model.conditions"
           :env-text="envText"
+          :network-text="networkText"
           :holiday-ready="holidayReady"
           :errors="{
             timeStart: errors.condTime ?? '',

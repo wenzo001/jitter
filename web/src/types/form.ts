@@ -7,6 +7,8 @@ export interface ConditionModel {
   timeStart: string
   timeEnd: string
   requireAc: boolean
+  /** 必须已连接网络（WiFi 或网线）。 */
+  requireNetwork: boolean
   ipPattern: string
   /** 工作日 / 休息日条件：'' 表示不限制。 */
   dayType: '' | 'workday' | 'offday'
@@ -51,6 +53,7 @@ export function emptyCondition(): ConditionModel {
     timeStart: '',
     timeEnd: '',
     requireAc: false,
+    requireNetwork: false,
     ipPattern: '',
     dayType: '',
     curl: '',
@@ -70,6 +73,7 @@ export function conditionFromTask(task: Task): ConditionModel {
     timeStart: task.precheck_time_start ?? '',
     timeEnd: task.precheck_time_end ?? '',
     requireAc: task.precheck_require_ac === 1,
+    requireNetwork: task.precheck_require_network === 1,
     ipPattern: task.precheck_ip_pattern ?? '',
     dayType: task.precheck_day_type === 'workday' || task.precheck_day_type === 'offday' ? task.precheck_day_type : '',
     curl: precheckCurlOf(task),

@@ -73,6 +73,8 @@ export interface TestBenchPayload {
   precheck_curl?: string
   precheck_ip_pattern?: string
   precheck_require_ac?: boolean
+  /** 必须已连接网络（WiFi 或网线）才执行。 */
+  precheck_require_network?: boolean
   precheck_expect_status?: number
   precheck_expr?: string
   expect_status?: number

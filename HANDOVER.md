@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-25 · v2.1.12 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-25 · v2.1.13 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.12（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.12>。
+**当前版本：v2.1.13（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.13>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -176,6 +176,20 @@ antd 的 `th` 是 `text-align: end`，而 `fullCellRender` 里我们把日期数
 再 `import 'highlight.js/styles/github.css'` 取配色（包内没有独立 css 文件，主题在 `styles/` 目录）。
 主题类是 `.hljs-*`，跟组件 scoped 样式冲突时要用 `:deep()` 并把选择器写具体一点。
 
+### 4.20 判断「连着网」不能只看有没有 IPv4
+虚拟网卡（VMware / Hyper-V / vEthernet / WSL / Docker / 蓝牙 / VPN / 隧道）几乎总是带 IPv4 地址，
+只看「有没有地址」会让「已连接网络」这个条件**永远成立**，等于没加。
+**正确口径**：适配器 Up + 类型是物理网卡 + 拿到可用 IPv4（排除 `0.0.0.0` / `127.*` / `169.254.*`）+ 名字不含虚拟网卡关键字。
+Windows 上类型看 `IP_ADAPTER_ADDRESSES_LH::IfType`：6 = 以太网，71 = IEEE 802.11（WiFi）；
+**windows-sys 0.59 没有 `IF_TYPE_*` 常量**，得自己定义（`host.rs` 里的 `IF_TYPE_ETHERNET` / `IF_TYPE_IEEE80211`）。
+Linux 上类型看 `/sys/class/net/<name>/type`（1 = 以太网）和 `wireless` 目录；macOS 有线无线都叫 `en*`，只能判断「有没有连上」。
+
+### 4.21 执行条件之间是「与」，单个条件内部是「或」
+多个执行条件同时启用时必须**全部满足**才执行（后端 `evaluate_local_guard` / `evaluate_host_guard` / 前置 curl
+在 `executor.rs` 与 `testbench.rs` 里都是任一失败即 early return）。
+但**一个条件内部的多值是「或」**：星期多选、本机 IP 多模式、WiFi / 网线二选一都属于该条件自身的备选。
+前端文案也按这个口径写（`condition.conjunctionHint` / `condition.badgeNote`），不要改成含糊的「满足其一」。
+
 ---
 
 ## 五、构建与测试
@@ -228,6 +242,24 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 ---
 
 ## 六、本轮已经做完的事（可以直接接手）
+
+### 6.0.2 v2.1.13：新增执行条件「已连接网络」
+
+用户需求：执行条件里加一条「已连接网络」（连着 WiFi **或**插了网线都算），
+并明确所有执行条件之间是**「与」**——任意一个不满足就不执行。
+
+| 改动 | 落点 |
+| --- | --- |
+| 主机环境新增网络探测：列出已连接的物理网卡（WiFi / 有线），排除虚拟网卡 | `rust/crates/jitter-core/src/host.rs`（`NetworkKind` / `NetworkConnection` / `network_connections()`） |
+| 电源 / 网络 / 本机 IP 三个环境条件统一按「与」判定，网络不满足时跳过并写明原因 | `rust/crates/jitter-core/src/guard.rs`（`HostGuardConfig.require_network` / `evaluate_host_guard`） |
+| 数据库新增 `precheck_require_network` 列（只走迁移，不进 `CREATE TABLE`，与 `precheck_day_type` 一致） | `rust/crates/jitter-core/src/db.rs`（`ensure_column` / `TaskRow` / `NewTaskInput` / INSERT `?35` / UPDATE `?35`） |
+| API 解析 `precheck_require_network`；`/api/system/environment` 额外返回 `networks` | `rust/crates/jitter-app/src/api.rs` |
+| 调度执行与测试台都把当前网卡列表喂给条件判定 | `executor.rs` / `testbench.rs` |
+| 任务表单「执行条件」新增复选框「只在已连接网络时执行」，并写明条件之间是「与」 | `web/src/components/task/ConditionFields.vue` |
+| 任务卡条件摘要 / 明细新增「网络」一行；环境提示里显示当前网络 | `web/src/utils/condition.ts` / `web/src/utils/environment.ts` |
+| 中英文文案补齐（`condition.requireNetwork` / `condition.conjunctionHint` / `env.network*`） | `web/src/locales/zh-CN.ts` / `en-US.ts` |
+
+**约定**：网络条件算一个条件，它内部的「WiFi 或网线」是「或」；它和其它条件之间是「与」（见 4.21）。
 
 ### 6.0.1 v2.1.11：细节打磨（v2.1.10 发布后的反馈）
 
@@ -304,26 +336,25 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 
 ## 七之二、本轮最终状态（已实测）
 
-**测试（2026-11-25 实测）**
+**测试（2026-11-25 实测，v2.1.13）**
 
 | 项目 | 结果 |
 | --- | --- |
-| `cargo test --workspace --jobs 1` | **core 250 项 + app 2 项全绿** |
+| `cargo test --workspace --jobs 1` | **core 251 项 + app 2 项全绿** |
 | `cargo check --workspace --all-targets --jobs 1` | **0 warning / 0 error** |
 | `bun run typecheck` | 退出码 0 |
-| `bun run test` | **7 文件 / 72 用例全绿**（含 7 条新增的 CodeBlock 用例） |
-| 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn |
+| `bun run test` | **8 文件 / 79 用例全绿**（新增 `tests/condition.test.ts` 覆盖网络条件与环境提示） |
+| 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn；执行条件里能看到「只在已连接网络时执行」，下方提示当前网络 |
 
 **发布体积（2026-11-25 实测）**
 
 | 项 | 大小 |
 | --- | --- |
-| `rust/target/release/jitter.exe` | **7,691,264 B（7.33 MB）** |
-| `jitter-windows-x64.zip`（Release） | **3.16 MB** |
-| `web/dist/assets/index-*.js` | ≈1,740 kB（gzip ≈487 KB） |
+| `rust/target/release/jitter.exe` | **7,702,528 B（7.34 MB）** |
+| `web/dist/assets/index-*.js` | ≈1,743 kB（gzip ≈488 KB） |
 | `web/dist/assets/jetbrains-mono-latin-wght-normal.woff2` | 40.4 KB |
 
-> 相对 v2.1.10（7,621,632 B）多了约 70 KB：`highlight.js`（10 种语言）+ JetBrains Mono latin 子集。
+> 相对 v2.1.12（7,691,264 B）多了约 11 KB：网络探测代码 + 条件字段。
 > release profile 已是 `opt-level="z" + lto + codegen-units=1 + strip=true`，没有进一步空间。
 
 **界面实测结论（v2.1.10 / v2.1.11）**
@@ -336,6 +367,8 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 - 详情抽屉里「通知详情」在最末尾独立分区，请求/响应各块顺序不变。
 - JSON（请求头/请求体/响应头/响应体/通知响应体）走 `highlight.js`：JSON 缩进 2 空格 + 高亮，脚本按语言高亮，JetBrains Mono 等宽字体，长行折行。
 - 执行记录一行：任务 → 时间 → 耗时 → 触发方式 → 请求地址 → 状态标签（HTTP 状态 / 成功 / 已通知）→ 「详情 ›」。
+- 执行条件区新增「只在已连接网络时执行」复选框，下方实时显示当前网络（本机实测为「以太网」）；
+  底部固定一行「多个执行条件是「与」的关系：必须全部满足才执行，任意一个不满足就跳过本次。」。
 
 
 ---

@@ -7,6 +7,8 @@ import { WEEKDAYS } from '@/utils/condition'
 const props = defineProps<{
   modelValue: ConditionModel
   envText?: string
+  /** 当前网络（WiFi / 网线）提示：用于「已连接网络」条件下方。 */
+  networkText?: string
   errors?: Record<string, string>
   /** 节假日数据就绪：否则「工作日 / 休息日」选项禁用。 */
   holidayReady?: boolean
@@ -87,6 +89,19 @@ function timeValue(value: unknown): string {
     </div>
 
     <div class="field">
+      <a-checkbox
+        :checked="modelValue.requireNetwork"
+        @change="patch('requireNetwork', ($event.target as HTMLInputElement).checked)"
+      >
+        {{ $t('condition.requireNetwork') }}
+      </a-checkbox>
+      <p class="field-hint">
+        {{ $t('condition.requireNetworkHint') }}
+        <span v-if="networkText" class="muted">（{{ networkText }}）</span>
+      </p>
+    </div>
+
+    <div class="field">
       <label class="field-label">{{ $t('condition.dayType') }}</label>
       <a-radio-group
         :value="modelValue.dayType"
@@ -155,6 +170,9 @@ function timeValue(value: unknown): string {
     <div v-if="error('any')" class="field-error">{{ error('any') }}</div>
     <p class="field-hint" style="margin-top: 6px">
       {{ $t('condition.atLeastOne') }}
+    </p>
+    <p class="field-hint" style="margin-top: 4px">
+      {{ $t('condition.conjunctionHint') }}
     </p>
   </div>
 </template>

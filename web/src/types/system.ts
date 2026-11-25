@@ -30,9 +30,19 @@ export interface SystemInfo {
   port: number
 }
 
+/** 一个已连接的网络接口。 */
+export interface HostNetwork {
+  /** 接口名（Windows 是适配器名称，如「WLAN」「以太网」）。 */
+  name: string
+  /** wifi / ethernet / other。 */
+  kind: 'wifi' | 'ethernet' | 'other'
+}
+
 export interface HostEnvironment {
   onAcPower: boolean | null
   localIps: string[]
+  /** 当前已连接的物理网卡（WiFi / 有线）。 */
+  networks: HostNetwork[]
   preventSleepOnAc: boolean
 }
 

@@ -4,6 +4,7 @@ use jitter_core::guard::{
     ip_matches_any, ip_matches_pattern, local_guard_of, parse_day_type, parse_ip_pattern,
     parse_time_range, parse_weekdays, DayType, HostGuardConfig, LocalGuardConfig,
 };
+use jitter_core::host::{NetworkConnection, NetworkKind};
 use serde_json::json;
 
 /// 本地时间助手。
@@ -287,14 +288,15 @@ fn ip_wildcard_matches_digits_and_dots() {
 fn host_guard_requires_ac_power_when_configured() {
     let config = HostGuardConfig {
         require_ac_power: true,
+        require_network: false,
         ip_pattern: None,
     };
     assert!(has_host_conditions(&config));
-    assert!(evaluate_host_guard(&config, Some(true), &[]).passed);
-    let battery = evaluate_host_guard(&config, Some(false), &[]);
+    assert!(evaluate_host_guard(&config, Some(true), &[], &[]).passed);
+    let battery = evaluate_host_guard(&config, Some(false), &[], &[]);
     assert!(!battery.passed);
     assert!(battery.reason.contains("电池"));
-    let unknown = evaluate_host_guard(&config, None, &[]);
+    let unknown = evaluate_host_guard(&config, None, &[], &[]);
     assert!(!unknown.passed);
     assert!(unknown.reason.contains("无法获取电源状态"));
 }
@@ -303,18 +305,19 @@ fn host_guard_requires_ac_power_when_configured() {
 fn host_guard_checks_any_local_ip_against_pattern() {
     let config = HostGuardConfig {
         require_ac_power: false,
+        require_network: false,
         ip_pattern: Some("10.1.*".to_string()),
     };
     let ips = vec!["172.30.228.138".to_string(), "10.1.22.5".to_string()];
-    let verdict = evaluate_host_guard(&config, Some(true), &ips);
+    let verdict = evaluate_host_guard(&config, Some(true), &ips, &[]);
     assert!(verdict.passed);
     assert!(verdict.reason.contains("10.1.22.5"));
 
-    let blocked = evaluate_host_guard(&config, Some(true), &["192.168.1.2".to_string()]);
+    let blocked = evaluate_host_guard(&config, Some(true), &["192.168.1.2".to_string()], &[]);
     assert!(!blocked.passed);
     assert!(blocked.reason.contains("不匹配"));
 
-    let empty = evaluate_host_guard(&config, Some(true), &[]);
+    let empty = evaluate_host_guard(&config, Some(true), &[], &[]);
     assert!(!empty.passed);
     assert!(empty.reason.contains("未能读取本机 IP"));
 }
@@ -323,7 +326,79 @@ fn host_guard_checks_any_local_ip_against_pattern() {
 fn host_guard_without_configuration_always_passes() {
     let config = HostGuardConfig::default();
     assert!(!has_host_conditions(&config));
-    assert!(evaluate_host_guard(&config, None, &[]).passed);
+    assert!(evaluate_host_guard(&config, None, &[], &[]).passed);
+}
+
+/// 「已连接网络」：WiFi 或网线任一满足即可（条件内部是「或」）。
+#[test]
+fn host_guard_requires_network() {
+    let config = HostGuardConfig {
+        require_ac_power: false,
+        require_network: true,
+        ip_pattern: None,
+    };
+    assert!(has_host_conditions(&config));
+
+    // 没有可用网卡 → 不通过。
+    let offline = evaluate_host_guard(&config, Some(true), &[], &[]);
+    assert!(!offline.passed);
+    assert!(offline.reason.contains("未连接网络"));
+
+    // 连着 WiFi → 通过。
+    let wifi = vec![NetworkConnection {
+        name: "WLAN".to_string(),
+        kind: NetworkKind::Wifi,
+    }];
+    let verdict = evaluate_host_guard(&config, Some(true), &[], &wifi);
+    assert!(verdict.passed);
+    assert!(verdict.reason.contains("已连接网络"));
+    assert!(verdict.reason.contains("WiFi"));
+
+    // 插着网线 → 同样通过。
+    let ethernet = vec![NetworkConnection {
+        name: "以太网".to_string(),
+        kind: NetworkKind::Ethernet,
+    }];
+    let wired = evaluate_host_guard(&config, Some(true), &[], &ethernet);
+    assert!(wired.passed);
+    assert!(wired.reason.contains("以太网"));
+}
+
+/// 环境条件之间是「与」：电源、网络、本机 IP 任意一个不满足就不执行。
+#[test]
+fn host_guard_conditions_are_conjunctive() {
+    let config = HostGuardConfig {
+        require_ac_power: true,
+        require_network: true,
+        ip_pattern: Some("10.1.*".to_string()),
+    };
+    let wifi = vec![NetworkConnection {
+        name: "WLAN".to_string(),
+        kind: NetworkKind::Wifi,
+    }];
+    let ips = vec!["10.1.22.5".to_string()];
+
+    // 全部满足 → 通过。
+    let ok = evaluate_host_guard(&config, Some(true), &ips, &wifi);
+    assert!(ok.passed);
+    assert!(ok.reason.contains("已接通电源"));
+    assert!(ok.reason.contains("已连接网络"));
+    assert!(ok.reason.contains("本机 IP"));
+
+    // 电源不满足 → 不通过（哪怕网络和 IP 都对）。
+    let no_power = evaluate_host_guard(&config, Some(false), &ips, &wifi);
+    assert!(!no_power.passed);
+    assert!(no_power.reason.contains("电池"));
+
+    // 网络不满足 → 不通过（哪怕电源和 IP 都对）。
+    let no_network = evaluate_host_guard(&config, Some(true), &ips, &[]);
+    assert!(!no_network.passed);
+    assert!(no_network.reason.contains("未连接网络"));
+
+    // IP 不匹配 → 不通过（哪怕电源和网络都对）。
+    let bad_ip = evaluate_host_guard(&config, Some(true), &["192.168.1.2".to_string()], &wifi);
+    assert!(!bad_ip.passed);
+    assert!(bad_ip.reason.contains("不匹配"));
 }
 
 /// 调休上班日通常落在周末：必须按工作日处理，这是「仅工作日」最容易错的点。

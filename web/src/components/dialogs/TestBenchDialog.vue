@@ -7,7 +7,7 @@ import { emptyCondition } from '@/types/form'
 import { getTestRun, listTestRuns, runTestBench } from '@/api/testbench'
 import { useAppStore } from '@/stores/app'
 import { formatShortTime, formatTime } from '@/utils/format'
-import { describeHostEnvironment } from '@/utils/environment'
+import { describeHostEnvironment, describeHostNetwork } from '@/utils/environment'
 import ConditionFields from '@/components/task/ConditionFields.vue'
 import CodeBlock from '@/components/common/CodeBlock.vue'
 
@@ -81,6 +81,7 @@ function stepClass(status: string): string {
 }
 
 const envText = computed(() => describeHostEnvironment(app.environment, t))
+const networkText = computed(() => describeHostNetwork(app.environment, t))
 
 function openWith(config?: Partial<TestBenchConfig>) {
   curl.value = config?.curl ?? ''
@@ -157,6 +158,7 @@ function buildPayload(): Record<string, unknown> | null {
     if (cond.curl.trim()) payload.precheck_curl = cond.curl.trim()
     if (cond.ipPattern.trim()) payload.precheck_ip_pattern = cond.ipPattern.trim()
     if (cond.requireAc) payload.precheck_require_ac = true
+    if (cond.requireNetwork) payload.precheck_require_network = true
     if (cond.dayType) payload.precheck_day_type = cond.dayType
     const rawStatus = cond.expectStatus.trim()
     const expr = cond.expr.trim()
@@ -177,6 +179,7 @@ function buildPayload(): Record<string, unknown> | null {
       cond.weekdays.length > 0 ||
       Boolean(cond.timeStart) ||
       cond.requireAc ||
+      cond.requireNetwork ||
       Boolean(cond.ipPattern.trim()) ||
       Boolean(cond.dayType) ||
       Boolean(cond.curl.trim())
@@ -290,6 +293,7 @@ defineExpose({ openWith })
       v-if="precheckEnabled"
       v-model="conditions"
       :env-text="envText"
+      :network-text="networkText"
       style="margin-top: 10px"
     />
 

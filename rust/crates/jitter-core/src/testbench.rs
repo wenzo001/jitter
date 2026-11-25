@@ -384,12 +384,17 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         .get("precheck_require_ac")
         .map(is_truthy)
         .unwrap_or(false);
+    let require_network = input
+        .get("precheck_require_network")
+        .map(is_truthy)
+        .unwrap_or(false);
     let ip_pattern = match guard::parse_ip_pattern(input.get("precheck_ip_pattern")) {
         Ok(value) => value,
         Err(error) => return assert_input_failed(steps, summary, started_at, error.0),
     };
     let host_config = HostGuardConfig {
         require_ac_power: require_ac,
+        require_network,
         ip_pattern,
     };
 
@@ -408,7 +413,7 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
         && !has_guard_curl
     {
         let message =
-            "已启用执行前判断，但没有配置本地条件、电源 / 本机 IP 条件或前置 curl"
+            "已启用执行前判断，但没有配置本地条件、电源 / 网络 / 本机 IP 条件或前置 curl"
                 .to_string();
         steps.push(failure_step(
             "precheck",
@@ -449,10 +454,11 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
             &host_config,
             environment.on_ac_power,
             &environment.local_ips,
+            &environment.networks,
         );
         steps.push(TestStep {
             key: "env".to_string(),
-            title: "电源 / 本机 IP 条件".to_string(),
+            title: "电源 / 网络 / 本机 IP 条件".to_string(),
             status: if verdict.passed { "ok" } else { "fail" }.to_string(),
             detail: verdict.reason.clone(),
             duration_ms: Some((executor::now_ms() - host_started).max(0)),
@@ -464,7 +470,7 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
             summary.error = Some(verdict.reason);
             steps.push(skip_main_step(
                 &main,
-                "电源 / 本机 IP 条件不满足，本次不会发送主请求",
+                "电源 / 网络 / 本机 IP 条件不满足，本次不会发送主请求",
             ));
             summary.total_ms = (executor::now_ms() - started_at).max(0);
             return TestBenchResult { steps, summary };

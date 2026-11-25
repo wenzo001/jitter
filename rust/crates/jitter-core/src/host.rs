@@ -1,8 +1,8 @@
-//! 主机环境探测：AC 电源状态、本机 IPv4 地址与「防止系统休眠」。
+//! 主机环境探测：AC 电源状态、本机 IPv4 地址、网络连接状态与「防止系统休眠」。
 //!
 //! 电源与网卡信息只用于「执行条件」：某些打卡 / 内网 curl 必须在插电、
-//! 且连在公司网段时才执行。防休眠是全局设置：只有接通电源时才阻止系统
-//! 空闲休眠，电池供电时仍然交给系统省电。
+//! 连着网（WiFi 或网线）、且连在公司网段时才执行。防休眠是全局设置：
+//! 只有接通电源时才阻止系统空闲休眠，电池供电时仍然交给系统省电。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -12,12 +12,15 @@ pub struct HostEnvironment {
     /// `None` 表示无法判断（例如系统不提供电源信息）。
     pub on_ac_power: Option<bool>,
     pub local_ips: Vec<String>,
+    /// 当前已连接的网络接口（WiFi / 有线）。
+    pub networks: Vec<NetworkConnection>,
 }
 
 pub fn current_environment() -> HostEnvironment {
     HostEnvironment {
         on_ac_power: on_ac_power(),
         local_ips: local_ipv4_addresses(),
+        networks: network_connections(),
     }
 }
 
@@ -29,6 +32,56 @@ pub fn on_ac_power() -> Option<bool> {
 /// 本机全部非回环 IPv4 地址（已去重）。
 pub fn local_ipv4_addresses() -> Vec<String> {
     platform::local_ipv4_addresses()
+}
+
+// ---------------------------------------------------------------------------
+// 网络连接（WiFi / 网线）
+// ---------------------------------------------------------------------------
+
+/// 网络接口类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkKind {
+    /// 无线（WiFi）。
+    Wifi,
+    /// 有线（网线）。
+    Ethernet,
+    /// 其它（认不出具体类型的网卡）。
+    Other,
+}
+
+impl NetworkKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            NetworkKind::Wifi => "WiFi",
+            NetworkKind::Ethernet => "以太网",
+            NetworkKind::Other => "网络",
+        }
+    }
+
+    /// 稳定的英文标识（前端 / JSON 用）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NetworkKind::Wifi => "wifi",
+            NetworkKind::Ethernet => "ethernet",
+            NetworkKind::Other => "other",
+        }
+    }
+}
+
+/// 一个已连接的网络接口。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkConnection {
+    /// 接口名（Windows 是适配器名称，如「WLAN」「以太网」）。
+    pub name: String,
+    pub kind: NetworkKind,
+}
+
+/// 当前**已连接**的网络接口（WiFi 或有线）。
+///
+/// 只统计「已启用 + 拿到了地址 + 不是虚拟网卡 / 回环」的接口：
+/// 拔掉网线、关掉 WiFi 之后这里就会变空。
+pub fn network_connections() -> Vec<NetworkConnection> {
+    platform::network_connections()
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +129,16 @@ fn is_useful_ipv4(ip: &str) -> bool {
     ip != "0.0.0.0" && !ip.starts_with("127.") && !ip.starts_with("169.254.")
 }
 
+/// 虚拟网卡 / 隧道 / 回环：它们「有地址」不代表真的连着网，一律不算。
+fn is_virtual_adapter(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    const VIRTUAL_HINTS: [&str; 13] = [
+        "virtual", "vmware", "virtualbox", "hyper-v", "vethernet", "loopback", "tunnel", "tap-",
+        "wsl", "docker", "bluetooth", "vpn", "tailscale",
+    ];
+    VIRTUAL_HINTS.iter().any(|hint| lower.contains(hint))
+}
+
 // ---------------------------------------------------------------------------
 // Windows
 // ---------------------------------------------------------------------------
@@ -86,13 +149,17 @@ mod platform {
         GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
         GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
     };
-    use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_UNSPEC, SOCKADDR_IN};
     use windows_sys::Win32::System::Power::{
         GetSystemPowerStatus, SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
         SYSTEM_POWER_STATUS,
     };
 
     const ERROR_BUFFER_OVERFLOW: u32 = 111;
+    /// IANA 的接口类型：6 = 以太网，71 = IEEE 802.11（WiFi）。
+    const IF_TYPE_ETHERNET: u32 = 6;
+    const IF_TYPE_IEEE80211: u32 = 71;
 
     pub fn on_ac_power() -> Option<bool> {
         let mut status: SYSTEM_POWER_STATUS = unsafe { std::mem::zeroed() };
@@ -171,6 +238,109 @@ mod platform {
         };
         unsafe {
             SetThreadExecutionState(flags);
+        }
+    }
+
+    /// 已连接的有线 / 无线网卡。
+    ///
+    /// 判据：适配器处于 Up、接口类型是以太网或 WiFi、并且拿到了可用的 IPv4。
+    /// 虚拟网卡（VMware / Hyper-V / WSL…）按名字排除，否则它们会让条件永远成立。
+    pub fn network_connections() -> Vec<super::NetworkConnection> {
+        let mut out: Vec<super::NetworkConnection> = Vec::new();
+        let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+        let mut size: u32 = 15_000;
+        for _ in 0..3 {
+            let mut buffer: Vec<u8> = vec![0; size as usize];
+            let result = unsafe {
+                GetAdaptersAddresses(
+                    AF_UNSPEC as u32,
+                    flags,
+                    std::ptr::null(),
+                    buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+                    &mut size,
+                )
+            };
+            if result == 0 {
+                collect_connections(&buffer, &mut out);
+                break;
+            }
+            if result != ERROR_BUFFER_OVERFLOW {
+                break;
+            }
+        }
+        out
+    }
+
+    fn collect_connections(
+        buffer: &[u8],
+        out: &mut Vec<super::NetworkConnection>,
+    ) {
+        use super::NetworkKind;
+
+        let mut adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        while !adapter.is_null() {
+            let current = unsafe { &*adapter };
+            let if_type = current.IfType;
+            let name = wide_string(current.FriendlyName);
+            let up = current.OperStatus == IfOperStatusUp;
+            let physical = if_type == IF_TYPE_ETHERNET || if_type == IF_TYPE_IEEE80211;
+            if up && physical && has_usable_ipv4(current) && !super::is_virtual_adapter(&name) {
+                let kind = if if_type == IF_TYPE_IEEE80211 {
+                    NetworkKind::Wifi
+                } else {
+                    NetworkKind::Ethernet
+                };
+                let label = if name.is_empty() {
+                    kind.label().to_string()
+                } else {
+                    name
+                };
+                out.push(super::NetworkConnection { name: label, kind });
+            }
+            adapter = current.Next;
+        }
+    }
+
+    /// 适配器是否拿到了可用的 IPv4。
+    fn has_usable_ipv4(adapter: &IP_ADAPTER_ADDRESSES_LH) -> bool {
+        let mut unicast = adapter.FirstUnicastAddress;
+        while !unicast.is_null() {
+            let node = unsafe { &*unicast };
+            let socket = node.Address;
+            if !socket.lpSockaddr.is_null()
+                && socket.iSockaddrLength >= std::mem::size_of::<SOCKADDR_IN>() as i32
+            {
+                let address = unsafe { &*(socket.lpSockaddr as *const SOCKADDR_IN) };
+                if address.sin_family == AF_INET {
+                    let bytes = unsafe { address.sin_addr.S_un.S_un_b };
+                    let ip = format!(
+                        "{}.{}.{}.{}",
+                        bytes.s_b1, bytes.s_b2, bytes.s_b3, bytes.s_b4
+                    );
+                    if super::is_useful_ipv4(&ip) {
+                        return true;
+                    }
+                }
+            }
+            unicast = node.Next;
+        }
+        false
+    }
+
+    /// PWSTR → String（读到第一个 NUL 为止）。
+    fn wide_string(value: windows_sys::core::PWSTR) -> String {
+        if value.is_null() {
+            return String::new();
+        }
+        let mut len = 0usize;
+        unsafe {
+            while *value.add(len) != 0 {
+                len += 1;
+                if len > 512 {
+                    break;
+                }
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(value, len))
         }
     }
 }
@@ -270,6 +440,114 @@ mod platform {
         }
     }
 
+    /// 已连接的有线 / 无线网卡。
+    ///
+    /// 判据：接口拿到了可用的 IPv4、不是回环 / 虚拟网卡、且不是隧道。
+    /// Linux 上用 `/sys/class/net/<name>` 判断接口类型与是否 up；
+    /// macOS 上有线与无线都叫 `en*`，只能判断「有没有连上」。
+    pub fn network_connections() -> Vec<super::NetworkConnection> {
+        use super::NetworkKind;
+
+        let mut out: Vec<super::NetworkConnection> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        unsafe {
+            let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+            if libc::getifaddrs(&mut head) != 0 {
+                return out;
+            }
+            let mut cursor = head;
+            while !cursor.is_null() {
+                let entry = &*cursor;
+                if !entry.ifa_addr.is_null() && (*entry.ifa_addr).sa_family as i32 == libc::AF_INET
+                {
+                    let address = &*(entry.ifa_addr as *const libc::sockaddr_in);
+                    let ip =
+                        std::net::Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr)).to_string();
+                    if super::is_useful_ipv4(&ip) {
+                        let name = c_string(entry.ifa_name);
+                        if !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                }
+                cursor = entry.ifa_next;
+            }
+            libc::freeifaddrs(head);
+        }
+
+        for name in names {
+            if super::is_virtual_adapter(&name) || !interface_is_usable(&name) {
+                continue;
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // macOS 上有线和无线都是 en*，系统接口不暴露介质类型。
+                if !name.starts_with("en") {
+                    continue;
+                }
+                out.push(super::NetworkConnection {
+                    name,
+                    kind: NetworkKind::Other,
+                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let kind = if std::path::Path::new(&format!("/sys/class/net/{name}/wireless")).exists()
+                {
+                    NetworkKind::Wifi
+                } else if interface_is_ethernet(&name) {
+                    NetworkKind::Ethernet
+                } else {
+                    NetworkKind::Other
+                };
+                out.push(super::NetworkConnection { name, kind });
+            }
+        }
+        out
+    }
+
+    /// Linux：接口是否处于可用状态（operstate 不是 down）。
+    fn interface_is_usable(name: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = name;
+            true
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            match std::fs::read_to_string(format!("/sys/class/net/{name}/operstate")) {
+                Ok(text) => text.trim() != "down",
+                // 读不到（例如容器里没有 /sys/class/net）就当它可用。
+                Err(_) => true,
+            }
+        }
+    }
+
+    /// Linux：`/sys/class/net/<name>/type` 为 1 表示以太网。
+    fn interface_is_ethernet(name: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = name;
+            false
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            std::fs::read_to_string(format!("/sys/class/net/{name}/type"))
+                .map(|text| text.trim() == "1")
+                .unwrap_or(false)
+        }
+    }
+
+    /// C 字符串 → String。
+    fn c_string(value: *const libc::c_char) -> String {
+        if value.is_null() {
+            return String::new();
+        }
+        unsafe { std::ffi::CStr::from_ptr(value) }
+            .to_string_lossy()
+            .to_string()
+    }
+
     #[cfg(target_os = "macos")]
     fn spawn_inhibitor() -> Option<Child> {
         // -s：只在接通电源时阻止系统休眠；-i：阻止空闲休眠。
@@ -314,6 +592,10 @@ mod platform {
     }
 
     pub fn local_ipv4_addresses() -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn network_connections() -> Vec<super::NetworkConnection> {
         Vec::new()
     }
 

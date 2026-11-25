@@ -465,6 +465,8 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         None
     };
     let precheck_require_ac = precheck_enabled && to_boolean(object.get("precheck_require_ac"));
+    let precheck_require_network =
+        precheck_enabled && to_boolean(object.get("precheck_require_network"));
     let precheck_ip_pattern = if precheck_enabled {
         jitter_core::guard::parse_ip_pattern(object.get("precheck_ip_pattern"))
             .map_err(|error| error.0)?
@@ -484,10 +486,12 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         let has_local = precheck_weekdays.is_some()
             || precheck_time.is_some()
             || precheck_day_type.is_some();
-        let has_host = precheck_require_ac || precheck_ip_pattern.is_some();
+        let has_host = precheck_require_ac
+            || precheck_require_network
+            || precheck_ip_pattern.is_some();
         if !has_local && !has_host && precheck_request.is_none() {
             return Err(
-                "启用执行条件时，至少配置本地条件（星期 / 时段 / 工作日 / 电源 / 本机 IP）或条件检查 curl 之一"
+                "启用执行条件时，至少配置本地条件（星期 / 时段 / 工作日 / 电源 / 网络 / 本机 IP）或条件检查 curl 之一"
                     .to_string(),
             );
         }
@@ -524,6 +528,7 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         precheck_time_start: precheck_time.as_ref().map(|(start, _)| start.clone()),
         precheck_time_end: precheck_time.as_ref().map(|(_, end)| end.clone()),
         precheck_require_ac,
+        precheck_require_network,
         precheck_ip_pattern,
         precheck_day_type,
         run_on_startup,
@@ -1060,12 +1065,23 @@ async fn update_settings(AxumJson(body): AxumJson<SettingsBody>) -> Response {
     get_settings().await
 }
 
-/// 当前主机环境：电源状态与本机 IPv4，任务表单用它显示辅助提示。
+/// 当前主机环境：电源状态、网络连接与本机 IPv4，任务表单用它显示辅助提示。
 async fn system_environment() -> Response {
     let environment = jitter_core::host::current_environment();
+    let networks: Vec<Json> = environment
+        .networks
+        .iter()
+        .map(|network| {
+            json!({
+                "name": network.name,
+                "kind": network.kind.as_str(),
+            })
+        })
+        .collect();
     AxumJson(json!({
         "onAcPower": environment.on_ac_power,
         "localIps": environment.local_ips,
+        "networks": networks,
         "preventSleepOnAc": db::get_prevent_sleep_on_ac(),
     }))
     .into_response()

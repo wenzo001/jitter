@@ -62,6 +62,8 @@ export interface Task {
   precheck_time_start: string | null
   precheck_time_end: string | null
   precheck_require_ac: number
+  /** 必须已连接网络（WiFi 或网线）才执行；0 = 不限制。 */
+  precheck_require_network: number
   precheck_ip_pattern: string | null
   /** 工作日 / 休息日条件：workday / offday；null 表示不限制。 */
   precheck_day_type: 'workday' | 'offday' | null
@@ -105,6 +107,8 @@ export interface TaskPayload {
   precheck_curl?: string
   precheck_ip_pattern?: string
   precheck_require_ac?: boolean
+  /** 必须已连接网络（WiFi 或网线）才执行。 */
+  precheck_require_network?: boolean
   /** 工作日 / 休息日条件（法定节假日数据判断）。 */
   precheck_day_type?: 'workday' | 'offday'
   precheck_expect_status?: number

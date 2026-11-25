@@ -279,6 +279,9 @@ const enUS: MessageSchema = {
     timeHint:
       'An end earlier than the start means it crosses midnight; the start and the end must both be filled in and cannot be the same.',
     requireAc: 'Only run when plugged into AC power',
+    requireNetwork: 'Only run when a network is connected',
+    requireNetworkHint:
+      'Either a connected WiFi or a plugged-in network cable satisfies it; virtual adapters (VMware / Hyper-V / WSL / Docker, etc.) do not count.',
     dayType: 'Type of day',
     dayTypeAny: 'Any',
     dayTypeWorkday: 'Workdays only',
@@ -299,11 +302,13 @@ const enUS: MessageSchema = {
     exprPlaceholder: 'e.g. data.pending=0',
     atLeastOne:
       'Configure at least one of the conditions above; if you only set a status code or an expression you must also fill in the condition check curl.',
+    conjunctionHint:
+      'Several execution conditions are combined with AND: all of them must hold, and any single failure skips the run.',
     badgeTitle: 'Execution conditions',
     badgeSubtitle: 'Only constrains scheduled runs',
     badgeEmpty: 'Execution conditions are enabled but there are no restrictions: it runs every time.',
     badgeNote:
-      'When any condition is not met the run is skipped and the reason is written to the execution records. “Run now” on the page is not affected by these conditions.',
+      'Several conditions are combined with AND: the run only happens when all of them hold; if any one fails the run is skipped and the reason is written to the execution records. “Run now” on the page is not affected by these conditions.',
     invalidSchedule: 'Invalid schedule',
     disabled: 'Disabled',
     paused: 'Paused',
@@ -315,12 +320,14 @@ const enUS: MessageSchema = {
     labelWeekdays: 'Weekdays',
     labelTime: 'Time window',
     labelPower: 'Power',
+    labelNetwork: 'Network',
     labelIp: 'Local IP',
     labelDayType: 'Day type',
     labelCurl: 'Condition check',
     labelExpectStatus: 'Expected status code',
     labelExpr: 'Condition expression',
     valueAc: 'Only when plugged into AC power',
+    valueNetwork: 'Only when a network (WiFi or cable) is connected',
     valueWorkday: 'Workdays only (by statutory holidays, including make-up workdays)',
     valueOffday: 'Days off only (by statutory holidays, including make-up workdays)',
     summaryNone: 'No execution conditions',
@@ -356,7 +363,11 @@ const enUS: MessageSchema = {
     onBattery: 'on battery',
     unknown: 'power state unknown',
     ipsUnavailable: 'not available',
-    summary: 'Power: {power} · Local IPs: {ips}',
+    networkNone: 'not connected',
+    networkWifi: 'WiFi',
+    networkEthernet: 'Ethernet',
+    networkOther: 'Network',
+    summary: 'Power: {power} · Network: {network} · Local IPs: {ips}',
   },
   clock: {
     sunday: 'Sunday',
