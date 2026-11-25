@@ -232,35 +232,46 @@ fn _assert_json_merge(value: &Json) -> Result<AppConfig, ConfigError> {
 mod tests {
     use super::*;
 
+    /// 跨平台的可临时目录（Windows / Linux 上都是绝对路径）。
+    fn temp_base(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
     #[test]
     fn relative_db_path_is_resolved_against_the_base_dir() {
-        let base = Path::new("D:/apps/jitter");
-        let resolved = resolve_db_path_absolute(base, "data/app.db");
+        // 注意：不要用 "D:/xxx" 这种 Windows 盘符写死路径，
+        // 在 Linux 上它不是绝对路径，测试会挂在「基准目录」上。
+        let base = temp_base("jitter-base");
+        let resolved = resolve_db_path_absolute(&base, "data/app.db");
         assert_eq!(
             resolved,
-            Path::new("D:/apps/jitter").join("data").join("app.db"),
+            base.join("data").join("app.db"),
             "相对路径按基准目录解析，不跟当前工作目录走"
         );
     }
 
     #[test]
     fn absolute_db_path_is_kept_as_is() {
-        let base = Path::new("D:/apps/jitter");
-        let resolved = resolve_db_path_absolute(base, "E:/other/app.db");
-        assert_eq!(resolved, Path::new("E:/other/app.db"));
+        let absolute = temp_base("jitter-other-app.db");
+        let resolved = resolve_db_path_absolute(
+            &temp_base("jitter-base"),
+            &absolute.to_string_lossy(),
+        );
+        assert_eq!(resolved, absolute);
     }
 
     #[test]
     fn empty_db_path_falls_back_to_data_app_db_under_base() {
-        let base = Path::new("D:/apps/jitter");
-        let resolved = resolve_db_path_absolute(base, "   ");
-        assert_eq!(resolved, Path::new("D:/apps/jitter").join("data").join("app.db"));
+        let base = temp_base("jitter-base");
+        let resolved = resolve_db_path_absolute(&base, "   ");
+        assert_eq!(resolved, base.join("data").join("app.db"));
     }
 
     #[test]
     fn base_dir_follows_the_config_file_location() {
-        let base = base_dir_for(Some(Path::new("D:/apps/jitter/jitter.config.json")));
-        assert_eq!(base, Path::new("D:/apps/jitter"));
+        let dir = temp_base("jitter-config-dir");
+        let base = base_dir_for(Some(&dir.join("jitter.config.json")));
+        assert_eq!(base, dir);
     }
 
     #[test]

@@ -249,7 +249,8 @@ fn logs_are_ordered_newest_first() {
     // 界面上的执行记录必须「最新在最上面」，这条测试锁住这个顺序。
     let dir = temp_dir();
     let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let path = format!("{dir}\\app.db");
+    // 用 Path 拼路径（不要手写反斜杠），Linux 上才是一般的子目录。
+    let path = std::path::Path::new(&dir).join("app.db").to_string_lossy().to_string();
     let _ = fs::remove_file(&path);
     init_db(Some(&path)).expect("init");
     create_task(&task_input("ordered"), "t1", 1000).expect("create");
