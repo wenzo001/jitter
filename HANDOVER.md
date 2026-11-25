@@ -387,22 +387,22 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 
 ## 七之二、本轮最终状态（已实测）
 
-**测试（2026-11-25 实测，v2.1.15）**
+**测试（2026-11-25 实测，v2.1.16）**
 
 | 项目 | 结果 |
 | --- | --- |
 | `cargo test --workspace --jobs 1` | **core 251 项 + app 2 项全绿** |
 | `cargo check --workspace --all-targets --jobs 1` | **0 warning / 0 error** |
 | `bun run typecheck` | 退出码 0 |
-| `bun run test` | **10 文件 / 90 用例全绿**（含 `tests/condition.test.ts`、`tests/copy-task.test.ts`、`tests/log-merge.test.ts`） |
-| 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn；连续跳过记录合并成「× 6」并可展开 |
+| `bun run test` | **11 文件 / 94 用例全绿**（含 `tests/log-row.test.ts`：跳过 / 错过不可点详情） |
+| 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn；点跳过行不发请求、不开抽屉，末尾显示「无详情」 |
 
 **发布体积（2026-11-25 实测）**
 
 | 项 | 大小 |
 | --- | --- |
 | `rust/target/release/jitter.exe` | **7,706,624 B（7.35 MB）** |
-| `jitter-windows-x64.zip`（Release） | **3,317,329 B（3.16 MB）** |
+| `jitter-windows-x64.zip`（Release） | **3,318,382 B（3.16 MB）** |
 | `web/dist/assets/index-*.js` | ≈1,743 kB（gzip ≈488 KB） |
 | `web/dist/assets/jetbrains-mono-latin-wght-normal.woff2` | 40.4 KB |
 
