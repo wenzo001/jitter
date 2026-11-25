@@ -215,6 +215,17 @@ function shiftMonth(delta: number): void {
   padding: 0 6px 4px 7px;
 }
 
+/*
+ * 藏掉 antd 自带的「月 / 年」视图切换。
+ *
+ * 「年」视图是整年网格，跟我们按天写的 fullCellRender 对不上（切过去只剩一堆乱码），
+ * 而且这个日历本来只需要按月看，所以直接不要它。
+ * 年份和月份的选择器（.ant-picker-calendar-year-select / -month-select）保留，还能换年月。
+ */
+.cal-panel :deep(.ant-picker-calendar-mode-switch) {
+  display: none;
+}
+
 .cal-cell-day {
   font-family: var(--mono);
   font-size: 13px;
