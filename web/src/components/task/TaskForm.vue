@@ -32,6 +32,13 @@ const editingName = ref('')
 
 const dirty = computed(() => JSON.stringify(model.value) !== baseline.value)
 
+/** 弹窗底部左侧的提示文案。 */
+const footerHint = computed(() => {
+  if (dirty.value) return '有未保存的修改'
+  if (editingId.value) return '保存后按新配置继续定时，任务保持原有运行状态'
+  return '带 * 为必填；其余可留空使用默认值'
+})
+
 const modeOptions = [
   { label: '粘贴 curl', value: 'curl' },
   { label: '手动填写', value: 'structured' },
@@ -565,6 +572,10 @@ defineExpose({
   applyTestConfig: applyTest,
   startCreate,
   requestClose: onCancel,
+  submit,
+  submitting,
+  editingId,
+  footerHint,
 })
 </script>
 
@@ -899,20 +910,6 @@ defineExpose({
           }"
         />
       </section>
-
-      <div class="sticky-actions">
-        <div class="hint">
-          <template v-if="dirty">有未保存的修改</template>
-          <template v-else-if="editingId">保存后按新配置继续定时，任务保持原有运行状态</template>
-          <template v-else>带 <span class="req">*</span> 为必填；其余可留空使用默认值</template>
-        </div>
-        <div class="buttons">
-          <a-button @click="onCancel">{{ editingId ? '取消编辑' : '取消' }}</a-button>
-          <a-button type="primary" :loading="submitting" @click="submit">
-            {{ editingId ? '保存修改' : '创建任务' }}
-          </a-button>
-        </div>
-      </div>
     </form>
 
     <TestBenchDialog ref="testRef" v-model:open="testOpen" @apply="applyTest" @saved-task="emit('saved', $event)" />

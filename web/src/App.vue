@@ -42,6 +42,7 @@ const deleteOpen = ref(false)
 const deleteTarget = ref<Task | null>(null)
 
 const runTarget = ref<Task | null>(null)
+const stopTarget = ref<Task | null>(null)
 const busyId = ref<string | null>(null)
 
 const theme = {
@@ -167,6 +168,17 @@ async function onReorder(ids: string[]) {
 
 async function onRun(task: Task) {
   runTarget.value = task
+}
+
+function askStop(task: Task) {
+  stopTarget.value = task
+}
+
+async function doStop() {
+  const task = stopTarget.value
+  if (!task) return
+  stopTarget.value = null
+  await action(task, 'stop')
 }
 
 async function doRun() {
@@ -351,7 +363,7 @@ onBeforeUnmount(() => {
                 @test="testTask"
                 @pause="openPause"
                 @resume-pause="action($event, 'resumePause')"
-                @stop="action($event, 'stop')"
+                @stop="askStop"
                 @start="action($event, 'start')"
                 @remove="openDelete"
                 @reorder="onReorder"
@@ -370,7 +382,6 @@ onBeforeUnmount(() => {
       :open="formOpen"
       :title="formTitle"
       width="min(920px, 96vw)"
-      :footer="null"
       :mask-closable="false"
       :style="{ top: '40px' }"
       wrap-class-name="task-form-modal"
@@ -378,6 +389,21 @@ onBeforeUnmount(() => {
       @cancel="taskFormRef?.requestClose()"
     >
       <TaskForm ref="taskFormRef" @saved="refreshAll" @close="closeFormPanel" />
+      <template #footer>
+        <div class="task-form-footer">
+          <span class="task-form-footer-hint">{{ taskFormRef?.footerHint }}</span>
+          <div class="task-form-footer-actions">
+            <a-button @click="taskFormRef?.requestClose()">取消</a-button>
+            <a-button
+              type="primary"
+              :loading="taskFormRef?.submitting"
+              @click="taskFormRef?.submit()"
+            >
+              {{ taskFormRef?.editingId ? '保存修改' : '创建任务' }}
+            </a-button>
+          </div>
+        </div>
+      </template>
     </a-modal>
 
     <PauseDialog v-model:open="pauseOpen" :task="pauseTarget" @saved="onPauseSaved" />
@@ -394,6 +420,16 @@ onBeforeUnmount(() => {
       ok-text="执行"
       @update:open="runTarget = null"
       @confirm="doRun"
+    />
+
+    <ConfirmDialog
+      :open="stopTarget !== null"
+      title="停止调度"
+      :content="`停止后任务「${stopTarget?.name ?? ''}」不再自动执行，执行记录会保留，随时可以重新启用。`"
+      ok-text="停止调度"
+      danger
+      @update:open="stopTarget = null"
+      @confirm="doStop"
     />
   </a-config-provider>
 </template>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
+import type { MenuInfo, MenuProps } from 'antdv-next'
 import type { Task } from '@/types/task'
 import ConditionBadge from './ConditionBadge.vue'
 import { formatTime, formatDay, formatElapsed, formatTimeout, pauseStateOf, calendarDays } from '@/utils/format'
@@ -25,8 +26,6 @@ const emit = defineEmits<{
   remove: [task: Task]
   move: [task: Task, delta: number]
 }>()
-
-const moreOpen = ref(false)
 
 const pause = computed(() => (props.task.status === 'active' ? pauseStateOf(props.task) : null))
 
@@ -56,7 +55,6 @@ const footText = computed(() => {
 })
 
 function act(name: 'run' | 'edit' | 'test' | 'pause' | 'resumePause' | 'stop' | 'start' | 'remove') {
-  moreOpen.value = false
   switch (name) {
     case 'run':
       emit('run', props.task)
@@ -83,6 +81,28 @@ function act(name: 'run' | 'edit' | 'test' | 'pause' | 'resumePause' | 'stop' | 
       emit('remove', props.task)
       break
   }
+}
+
+const menu = computed<MenuProps>(() => {
+  const task = props.task
+  const items: NonNullable<MenuProps['items']> = [{ key: 'test', label: '试跑（不记录）' }]
+  if (task.status === 'active') {
+    items.push({ key: 'pause', label: pause.value ? '调整暂停' : '暂停几天' })
+    if (pause.value) items.push({ key: 'resumePause', label: '取消暂停' })
+  }
+  items.push({ type: 'divider' })
+  items.push(
+    task.status === 'active'
+      ? { key: 'stop', label: '停止调度' }
+      : { key: 'start', label: '启用调度' },
+  )
+  items.push({ type: 'divider' })
+  items.push({ key: 'remove', label: '删除任务', danger: true })
+  return { items, onClick: onMenuClick }
+})
+
+function onMenuClick(info: MenuInfo) {
+  act(String(info.key) as 'test' | 'pause' | 'resumePause' | 'stop' | 'start' | 'remove')
 }
 
 function onDragStart(event: DragEvent) {
@@ -142,36 +162,9 @@ function onDragStart(event: DragEvent) {
         </a-button>
         <a-button size="small" @click="act('edit')">编辑</a-button>
 
-        <a-popover v-model:open="moreOpen" trigger="click" placement="bottomRight">
-          <template #content>
-            <div style="display: flex; flex-direction: column; gap: 2px; min-width: 140px">
-              <a-button type="text" size="small" @click="act('test')">试跑（不记录）</a-button>
-              <a-button v-if="task.status === 'active'" type="text" size="small" @click="act('pause')">
-                {{ pause ? '调整暂停' : '暂停几天' }}
-              </a-button>
-              <a-button
-                v-if="task.status === 'active' && pause"
-                type="text"
-                size="small"
-                @click="act('resumePause')"
-              >
-                取消暂停
-              </a-button>
-              <a-button
-                v-if="task.status === 'active'"
-                type="text"
-                size="small"
-                danger
-                @click="act('stop')"
-              >
-                停止调度
-              </a-button>
-              <a-button v-else type="text" size="small" @click="act('start')">启用调度</a-button>
-              <a-button type="text" size="small" danger @click="act('remove')">删除任务</a-button>
-            </div>
-          </template>
+        <a-dropdown :trigger="['click']" :menu="menu" placement="bottomRight">
           <a-button size="small" @click.stop>更多</a-button>
-        </a-popover>
+        </a-dropdown>
       </div>
     </div>
 

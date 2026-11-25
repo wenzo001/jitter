@@ -212,20 +212,30 @@ pub async fn refresh_years_silent() {
 pub fn is_off_day(now_ms: i64) -> Option<bool> {
     let datetime = Local.timestamp_millis_opt(now_ms).single()?;
     let year = datetime.year();
-    let data = match {
-        let map = cache().read().ok()?;
-        map.get(&year).cloned()
-    } {
-        Some(data) => data,
-        None => load_year_from_db(year)?,
-    };
     let date = format!("{:04}-{:02}-{:02}", datetime.year(), datetime.month(), datetime.day());
-    if let Some(day) = data.days.iter().find(|day| day.date == date) {
-        return Some(day.is_off_day);
+    // 节假日文件按「国务院公告年份」归档，12 月的日期可能记录在下一年的文件里
+    //（例如 2018-12-29 的调休上班在 2019.json 中），所以相邻年份也要查。
+    let current = year_data(year);
+    for candidate in [year, year + 1, year - 1] {
+        let Some(data) = year_data(candidate) else {
+            continue;
+        };
+        if let Some(day) = data.days.iter().find(|day| day.date == date) {
+            return Some(day.is_off_day);
+        }
     }
-    // 列表外的日期按星期判断。
+    // 列表外的日期按星期判断；当年数据缺失时无法判断。
+    current.as_ref()?;
     use chrono::Weekday;
     Some(matches!(datetime.weekday(), Weekday::Sat | Weekday::Sun))
+}
+
+/// 内存缓存优先，其次回查数据库。
+fn year_data(year: i32) -> Option<Arc<HolidayYear>> {
+    if let Some(data) = cache().read().ok()?.get(&year).cloned() {
+        return Some(data);
+    }
+    load_year_from_db(year)
 }
 
 /// 缓存缺失时按年回查数据库；数据存在则填充缓存，仍无则 `None`。

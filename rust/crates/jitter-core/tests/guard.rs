@@ -380,3 +380,16 @@ fn cross_midnight_window_uses_start_day_for_day_type() {
     assert!(evaluate_local_guard(&offday, at(2032, 1, 3, 23, 0)).passed);
 }
 
+/// 节假日文件按公告年份归档：12 月的调休日可能记录在下一年的文件里
+///（真实例子：2018-12-29 的调休上班记录在 2019.json），判断时也要能查到。
+#[test]
+fn makeup_day_stored_in_next_year_file_is_honored() {
+    // 2034-12-30 是周六，但属于 2035 年公告里的调休上班日。
+    with_mock_year(2035, &[("2034-12-30", false)]);
+
+    assert_eq!(
+        jitter_core::holiday::is_off_day(at(2034, 12, 30, 10, 0)),
+        Some(false)
+    );
+}
+

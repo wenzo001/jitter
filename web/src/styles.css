@@ -417,7 +417,7 @@ body {
 
 /* ---------- 表单 ---------- */
 .task-form {
-  padding: 0 0 4px;
+  padding: 0 0 12px;
 }
 
 .form-section {
@@ -511,31 +511,25 @@ body {
   color: #3b475c;
 }
 
-.sticky-actions {
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
+/* 弹窗自带 footer 里的按钮区：固定在底部，不随表单内容滚动。 */
+.task-form-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 12px 0;
-  margin-top: 4px;
-  background: rgba(255, 255, 255, 0.96);
-  border-top: 1px solid var(--border);
-  backdrop-filter: blur(6px);
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
-.sticky-actions .hint {
+.task-form-footer-hint {
   color: var(--muted);
   font-size: 12px;
   min-width: 0;
 }
 
-.sticky-actions .buttons {
+.task-form-footer-actions {
   display: flex;
   gap: 8px;
-  flex: none;
+  margin-left: auto;
 }
 
 /* ---------- 日志 ---------- */
@@ -868,7 +862,7 @@ body {
 
 /* ---------- 任务表单弹窗 ---------- */
 .task-form-modal .ant-modal-body {
-  max-height: calc(100vh - 190px);
+  max-height: calc(100vh - 250px);
   overflow-y: auto;
   padding-bottom: 0;
 }
