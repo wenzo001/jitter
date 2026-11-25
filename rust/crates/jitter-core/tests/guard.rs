@@ -116,11 +116,12 @@ fn parse_day_type_accepts_only_known_values() {
 }
 
 /// 测试注入：把某年固定为指定的放假 / 调休数据，写进数据库供判断懒加载。
-/// 数据库是进程级单例：写入端与其它测试串行（用同一把锁）。
+/// 数据库是进程级单例：返回的 guard 要由调用方持有到测试结束，
+/// 否则其它测试中途 init_db 切库会让本次读不到刚写入的数据。
 static DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn with_mock_year(year: i32, days: &[(&str, bool)]) {
-    let _guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+fn with_mock_year(year: i32, days: &[(&str, bool)]) -> std::sync::MutexGuard<'static, ()> {
+    let guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = std::env::temp_dir().join(format!("jitter-guard-holiday-{year}"));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("app.db").to_string_lossy().to_string();
@@ -133,6 +134,7 @@ fn with_mock_year(year: i32, days: &[(&str, bool)]) {
     .to_string();
     let _ = jitter_core::db::init_db(Some(&path));
     jitter_core::db::upsert_holiday_year(year, &raw, 0, days.len() as i64).expect("upsert");
+    guard
 }
 
 #[test]
@@ -203,7 +205,7 @@ fn both_conditions_must_pass() {
 #[test]
 fn workday_condition_blocks_listed_holidays() {
     // 2026-05-01（周五）在 mock 数据里是放假的法定节假日。
-    with_mock_year(2026, &[("2026-05-01", true)]);
+    let _lock = with_mock_year(2026, &[("2026-05-01", true)]);
     let workday_only = LocalGuardConfig {
         day_type: Some(DayType::Workday),
         ..guard()
@@ -218,7 +220,7 @@ fn workday_condition_blocks_listed_holidays() {
 #[test]
 fn offday_condition_blocks_regular_workdays() {
     // 2027-06-05（周六）在 mock 数据里是放假的休息日。
-    with_mock_year(2027, &[("2027-06-05", true)]);
+    let _lock = with_mock_year(2027, &[("2027-06-05", true)]);
     let offday_only = LocalGuardConfig {
         day_type: Some(DayType::Offday),
         ..guard()
@@ -328,7 +330,7 @@ fn host_guard_without_configuration_always_passes() {
 #[test]
 fn makeup_workday_on_weekend_counts_as_workday() {
     // 2030-01-01 是周二 → 01-05 周六（调休上班），01-06 周日（正常休息）。
-    with_mock_year(2030, &[("2030-01-05", false), ("2030-01-06", true)]);
+    let _lock = with_mock_year(2030, &[("2030-01-05", false), ("2030-01-06", true)]);
 
     let workday = LocalGuardConfig {
         day_type: Some(DayType::Workday),
@@ -356,7 +358,7 @@ fn makeup_workday_on_weekend_counts_as_workday() {
 fn cross_midnight_window_uses_start_day_for_day_type() {
     // 2032-01-02 是周五（工作日），2032-01-03 是周六（休息日）。
     // 用独立的年份，避免和上面 mock 的 2030 数据互相污染缓存。
-    with_mock_year(2032, &[]);
+    let _lock = with_mock_year(2032, &[]);
 
     let workday = LocalGuardConfig {
         time_start: Some("22:00".into()),
