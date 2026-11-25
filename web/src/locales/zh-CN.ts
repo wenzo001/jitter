@@ -411,6 +411,9 @@ const zhCN = {
     sourceManual: '手动',
     sourceStartup: '开机',
     detailMore: '详情 ›',
+    /** 跳过 / 错过的记录没有请求详情。 */
+    noDetail: '无详情',
+    noDetailHint: '这次没有发出请求，没有可展开的详情',
     notifyFailedDetail: '通知失败：{error}',
     mergeToggle: '合并重复记录',
     mergeHint: '连续的同型记录会合并成一条，点「× N」可以展开看全部',

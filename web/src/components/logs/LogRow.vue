@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { LogSummary } from '@/types/task'
 import { BACKEND_MARKERS } from '@/api/client'
@@ -18,6 +19,18 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+/**
+ * 跳过 / 错过的记录没有真正发过请求，**没有详情可看**。
+ *
+ * 这类行直接不可点，并把「详情 ›」换成灰色的「无详情」，让用户一眼看出来。
+ */
+const noDetail = computed(() => props.log.kind === 'skipped' || props.log.kind === 'missed')
+
+function onClick() {
+  if (noDetail.value) return
+  emit('select')
+}
 
 function kindLabel(kind: string): string {
   if (kind === 'missed') return t('logs.kindMissed')
@@ -41,7 +54,7 @@ function statusInfo(log: LogSummary): { text: string; color: string } {
 </script>
 
 <template>
-  <div class="log-item" @click="emit('select')">
+  <div class="log-item" :class="{ 'is-disabled': noDetail }" @click="onClick">
     <div class="log-head">
       <a-tag :color="log.kind === 'missed' || log.kind === 'skipped' ? 'orange' : 'default'">
         {{ kindLabel(log.kind) }}
@@ -74,7 +87,10 @@ function statusInfo(log: LogSummary): { text: string; color: string } {
       >
         × {{ mergeCount }}
       </a-tag>
-      <span class="log-more muted">{{ $t('logs.detailMore') }}</span>
+      <span v-if="noDetail" class="log-more log-no-detail" :title="$t('logs.noDetailHint')">
+        {{ $t('logs.noDetail') }}
+      </span>
+      <span v-else class="log-more muted">{{ $t('logs.detailMore') }}</span>
     </div>
     <div v-if="log.error" class="log-error">{{ log.error }}</div>
     <div v-else-if="log.notify && log.notify.error" class="log-error">

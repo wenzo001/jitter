@@ -421,6 +421,9 @@ const enUS: MessageSchema = {
     sourceManual: 'Manual',
     sourceStartup: 'Startup',
     detailMore: 'Details ›',
+    /** Skipped / missed records have no request details. */
+    noDetail: 'No details',
+    noDetailHint: 'No request was sent this time, so there are no details to open',
     notifyFailedDetail: 'Notification failed: {error}',
     mergeToggle: 'Merge repeats',
     mergeHint: 'Consecutive records of the same kind are merged into one; click “× N” to expand them all',

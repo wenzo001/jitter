@@ -709,6 +709,23 @@ body {
   background: #f8fafc;
 }
 
+/* 跳过 / 错过的记录没发过请求，没有详情可看：整行不可点，头部信息淡一点。 */
+.log-item.is-disabled {
+  cursor: default;
+}
+
+.log-item.is-disabled:hover {
+  background: transparent;
+}
+
+.log-item.is-disabled .log-head {
+  opacity: 0.62;
+}
+
+.log-no-detail {
+  color: #a3aab8;
+}
+
 .log-head {
   display: flex;
   align-items: center;

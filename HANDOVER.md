@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-25 · v2.1.15 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-25 · v2.1.16 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.15（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.15>。
+**当前版本：v2.1.16（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.16>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -242,6 +242,21 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 ---
 
 ## 六、本轮已经做完的事（可以直接接手）
+
+### 6.0.5 v2.1.16：跳过 / 错过的记录不可点详情
+
+用户反馈：跳过（skipped）和错过（missed）的记录本来就没发过请求，点「详情 ›」打开抽屉里也没有内容，
+应该直接禁掉点击，并用视觉告诉用户「这条没有详情」。
+
+| 改动 | 落点 |
+| --- | --- |
+| 跳过 / 错过的行不可点：点击不发 `select` 事件，末尾「详情 ›」换成灰色「无详情」，整行头部淡显 | `web/src/components/logs/LogRow.vue`（`noDetail` 计算属性）、`web/src/styles.css`（`.log-item.is-disabled` / `.log-no-detail`） |
+| 文案 | `locales/zh-CN.ts` / `en-US.ts`（`logs.noDetail` / `logs.noDetailHint`） |
+| 单测：普通记录可点、跳过不可点、错过不可点、合并标记仍能展开 | `web/tests/log-row.test.ts` |
+
+**约定**：
+- 只有 `kind = 'skipped'` 和 `kind = 'missed'` 没有详情；`task` / `notify` 照旧可点。
+- **合并标记「× N」不受影响**：跳过组也要能展开看每一条，所以它是 `stop` 传播，不走行的点击。
 
 ### 6.0.4 v2.1.15：执行记录合并显示
 
