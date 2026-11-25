@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+import { useStorage, useTimeoutFn } from '@vueuse/core'
 import {
   getConfig,
   getEnvironment,
@@ -8,6 +9,7 @@ import {
   refreshHolidayStatus,
 } from '@/api/system'
 import { getMetrics } from '@/api/metrics'
+import { translate } from '@/locales/current'
 import type {
   AppConfig,
   HolidayStatus,
@@ -62,6 +64,31 @@ function writePending(value: UpgradePending | null): void {
   }
 }
 
+/**
+ * 升级中的记录（localStorage）。
+ * 用 vueuse 的 useStorage：隐私模式写不进去、跨标签页同步都由它兜底。
+ */
+const pendingStorage = useStorage<UpgradePending | null>(
+  UPGRADE_PENDING_KEY,
+  null,
+  undefined,
+  {
+    serializer: {
+      read: (raw: string) => {
+        try {
+          return raw ? (JSON.parse(raw) as UpgradePending) : null
+        } catch {
+          return null
+        }
+      },
+      write: (value: UpgradePending | null) => (value ? JSON.stringify(value) : ''),
+    },
+    onError: () => {
+      // 隐私模式：只在本次会话生效。
+    },
+  },
+)
+
 export const useAppStore = defineStore('app', () => {
   const config = ref<AppConfig>({ ...CONFIG_DEFAULTS })
   const system = ref<SystemInfo | null>(null)
@@ -70,23 +97,57 @@ export const useAppStore = defineStore('app', () => {
   /** 节假日数据状态：决定「工作日 / 休息日」条件是否可选。 */
   const holiday = ref<HolidayStatus | null>(null)
 
-  /** 顶栏状态行：短暂成功提示或持续错误提示。 */
-  const status = ref({ text: '就绪', error: false })
-  let statusTimer: number | undefined
+  /** 顶栏状态行：短暂成功提示或持续错误提示。null 表示回到「就绪」。 */
+  const statusState = ref<{ text: string; error: boolean } | null>(null)
+  const statusTimer = useTimeoutFn(
+    () => {
+      statusState.value = null
+    },
+    5000,
+    { immediate: false },
+  )
 
   /** 升级结果横幅（刷新后仍保留，直到用户关闭）。 */
-  const banner = ref<{ kind: 'success' | 'error'; text: string } | null>(null)
+  const bannerState = ref<{
+    kind: 'success' | 'error'
+    key: string
+    named?: Record<string, unknown>
+  } | null>(null)
 
   const version = computed(() => system.value?.version ?? '')
 
+  /** 状态行文案；语言切换后「就绪」也会跟着变。 */
+  const status = computed(() =>
+    statusState.value ?? { text: translate('status.ready'), error: false },
+  )
+
+  /** 横幅文案；由 locale key 渲染，语言切换后同步更新。 */
+  const banner = computed(() =>
+    bannerState.value
+      ? {
+          kind: bannerState.value.kind,
+          text: translate(bannerState.value.key, bannerState.value.named),
+        }
+      : null,
+  )
+
   function setStatus(text: string, error = false): void {
-    status.value = { text, error }
-    window.clearTimeout(statusTimer)
+    statusState.value = { text, error }
     if (!error) {
-      statusTimer = window.setTimeout(() => {
-        status.value = { text: '就绪', error: false }
-      }, 5000)
+      // 5 秒后自动回到「就绪」。
+      statusTimer.start()
+    } else {
+      statusTimer.stop()
     }
+  }
+
+  /** 设置横幅：只给 locale key，文字在渲染时按当前语言生成。 */
+  function setBanner(
+    kind: 'success' | 'error',
+    key: string,
+    named?: Record<string, unknown>,
+  ): void {
+    bannerState.value = { kind, key, named }
   }
 
   async function loadConfig(): Promise<void> {
@@ -147,29 +208,27 @@ export const useAppStore = defineStore('app', () => {
 
   /** 页面加载时收尾「升级中/已完成」的记录。 */
   function settleUpgradeBanner(): void {
-    const pending = readPending()
+    const pending = pendingStorage.value
     const current = system.value?.version
     if (!pending || !current) return
     if (pending.expected && sameVersion(current, pending.expected)) {
-      banner.value = {
-        kind: 'success',
-        text: `升级成功：已从 ${versionLabel(pending.from)} 升级到 ${versionLabel(current)}，页面数据已同步。`,
-      }
+      setBanner('success', 'app.upgradeSuccessBanner', {
+        from: versionLabel(pending.from),
+        to: versionLabel(current),
+      })
       return
     }
     if (pending.expected && !sameVersion(current, pending.expected)) {
-      banner.value = {
-        kind: 'error',
-        text: `升级未完成：当前仍是 ${versionLabel(current)}（目标是 ${versionLabel(
-          pending.expected,
-        )}）。请在「设置 → 检查更新」里重试。`,
-      }
+      setBanner('error', 'app.upgradeFailedBanner', {
+        current: versionLabel(current),
+        target: versionLabel(pending.expected),
+      })
     }
   }
 
   function dismissBanner(): void {
-    banner.value = null
-    writePending(null)
+    bannerState.value = null
+    pendingStorage.value = null
   }
 
   return {
@@ -182,6 +241,7 @@ export const useAppStore = defineStore('app', () => {
     banner,
     version,
     setStatus,
+    setBanner,
     loadConfig,
     loadSystem,
     refreshMetrics,
@@ -192,7 +252,9 @@ export const useAppStore = defineStore('app', () => {
     dismissBanner,
     sameVersion,
     versionLabel,
-    readPending,
-    writePending,
+    readPending: () => pendingStorage.value,
+    writePending: (value: UpgradePending | null) => {
+      pendingStorage.value = value
+    },
   }
 })

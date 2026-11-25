@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { Task } from '@/types/task'
 import { pauseTask } from '@/api/tasks'
 import { useAppStore } from '@/stores/app'
@@ -15,6 +16,8 @@ const emit = defineEmits<{
   saved: [task: Task]
 }>()
 
+const { t } = useI18n()
+
 const MAX_PAUSE_DAYS = 15
 const app = useAppStore()
 
@@ -25,10 +28,12 @@ const error = ref('')
 
 const isAdjust = computed(() => (props.task ? pauseStateOf(props.task) !== null : false))
 
-const dayOptions = Array.from({ length: MAX_PAUSE_DAYS }, (_, index) => ({
-  label: `${index + 1} 天`,
-  value: index + 1,
-}))
+const dayOptions = computed(() =>
+  Array.from({ length: MAX_PAUSE_DAYS }, (_, index) => ({
+    label: t('pause.daysOption', { count: index + 1 }),
+    value: index + 1,
+  })),
+)
 
 function interval(): { from: number; until: number } {
   const from = new Date()
@@ -43,12 +48,12 @@ const summary = computed(() => {
   if (!props.task) return ''
   const { from, until } = interval()
   const covered = days.value === 1 ? formatDay(from) : `${formatDay(from)}–${formatDay(until - 1)}`
-  const lead = startsToday.value
-    ? '今天起算：今天剩余时间（含尚未到达的窗口）一律不再触发，不管现在是几点。'
-    : '明天起算：今天剩余时间照常执行，今天已排好的任务不会被取消。'
-  return `${lead}暂停 ${days.value} 个完整自然日（${covered}）；${formatTime(
-    until,
-  )} 恢复，之后按原调度继续执行。`
+  const lead = startsToday.value ? t('pause.summaryStartToday') : t('pause.summaryStartTomorrow')
+  return `${lead}${t('pause.summaryTail', {
+    days: days.value,
+    covered,
+    until: formatTime(until),
+  })}`
 })
 
 watch(
@@ -80,8 +85,8 @@ async function confirm() {
     const data = await pauseTask(task.id, days.value, startsToday.value)
     app.setStatus(
       isAdjust.value
-        ? `任务「${task.name}」的暂停已调整为 ${days.value} 天`
-        : `任务「${task.name}」已暂停 ${days.value} 天`,
+        ? t('pause.statusAdjusted', { name: task.name, days: days.value })
+        : t('pause.statusPaused', { name: task.name, days: days.value }),
     )
     emit('saved', data.task)
     emit('update:open', false)
@@ -96,27 +101,27 @@ async function confirm() {
 <template>
   <a-modal
     :open="open"
-    :title="isAdjust ? '调整暂停' : '暂停任务'"
-    :ok-text="isAdjust ? '保存调整' : '暂停任务'"
+    :title="isAdjust ? $t('pause.adjustTitle') : $t('pause.title')"
+    :ok-text="isAdjust ? $t('pause.adjustOkText') : $t('pause.okText')"
     :confirm-loading="busy"
     @update:open="emit('update:open', $event)"
     @ok="confirm"
   >
     <p v-if="task" style="margin-top: 0">
-      任务「<strong>{{ task.name }}</strong>」
-      <span v-if="isAdjust" class="muted">· 当前已暂停</span>
+      {{ $t('pause.taskLineBefore') }}<strong>{{ task.name }}</strong>{{ $t('pause.taskLineAfter') }}
+      <span v-if="isAdjust" class="muted">{{ $t('pause.currentlyPaused') }}</span>
     </p>
 
     <div class="form-grid-2">
       <div class="field">
-        <label class="field-label">暂停天数</label>
+        <label class="field-label">{{ $t('pause.daysLabel') }}</label>
         <a-select v-model:value="days" :options="dayOptions" style="width: 100%" />
       </div>
       <div class="field">
-        <label class="field-label">从哪天开始算</label>
+        <label class="field-label">{{ $t('pause.startFrom') }}</label>
         <a-radio-group v-model:value="startsToday" style="display: flex; flex-direction: column; gap: 4px">
-          <a-radio :value="true">今天起算</a-radio>
-          <a-radio :value="false">明天起算（今天照常执行）</a-radio>
+          <a-radio :value="true">{{ $t('pause.startToday') }}</a-radio>
+          <a-radio :value="false">{{ $t('pause.startTomorrow') }}</a-radio>
         </a-radio-group>
       </div>
     </div>

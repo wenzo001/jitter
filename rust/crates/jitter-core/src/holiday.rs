@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
-use chrono::{Datelike, Local, TimeZone};
+use chrono::{Datelike, Local, NaiveDate, TimeZone, Weekday};
 use serde::Serialize;
 use serde_json::Value as Json;
 
@@ -54,6 +54,32 @@ pub struct HolidayYearMeta {
     pub fetched_at: i64,
     /// 按日期升序排列的明细。
     pub days: Vec<HolidayDay>,
+}
+
+/// 单日的归类结果（顶栏标签与日历面板共用）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayInfo {
+    /// `YYYY-MM-DD`。
+    pub date: String,
+    /// `holiday` 法定节假日放假 / `makeup` 调休上班 / `weekend` 普通周末 / `workday` 工作日。
+    pub day_type: String,
+    /// 是否上班（工作日与调休上班日为 true）。
+    pub is_workday: bool,
+    /// 节日名称（法定节假日与调休日有，普通日期没有）。
+    pub name: Option<String>,
+    /// 是否依据节假日数据判定；false 表示该年没有数据，只按星期推断。
+    pub authoritative: bool,
+    /// 星期几（1 = 周一 … 7 = 周日）。
+    pub weekday: u32,
+    /// 星期几（中文）。
+    pub weekday_label: String,
+}
+
+const WEEKDAY_LABELS: [&str; 7] = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"];
+
+fn weekday_label(weekday: Weekday) -> &'static str {
+    WEEKDAY_LABELS[weekday.num_days_from_monday() as usize]
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +267,87 @@ fn lookup_listed_day(
     None
 }
 
+/// 查某一天是否出现在节假日文件里（返回是否放假与节日名）。
+/// 与 [`lookup_listed_day`] 同样跨年查找（12 月的日期可能记在下一年的文件里）。
+fn find_listed_day(date: &str, year: i32) -> Option<(bool, String)> {
+    for candidate in [year, year + 1] {
+        let Some(data) = year_data(candidate) else {
+            continue;
+        };
+        if let Some(day) = data.days.iter().find(|day| day.date == date) {
+            return Some((day.is_off_day, day.name.clone()));
+        }
+    }
+    None
+}
+
+/// 单日归类：法定节假日 / 调休上班 / 普通周末 / 工作日。
+pub fn day_info(date: NaiveDate) -> DayInfo {
+    let text = format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day());
+    let year = date.year();
+    let listed = find_listed_day(&text, year);
+    let has_data = year_data(year).is_some();
+    classify_day(date, listed, has_data)
+}
+
+/// 纯函数版的归类逻辑（便于单测，不碰数据库与缓存）。
+fn classify_day(date: NaiveDate, listed: Option<(bool, String)>, has_data: bool) -> DayInfo {
+    let text = format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day());
+    let weekday = date.weekday().num_days_from_monday() as u32 + 1;
+    let label = weekday_label(date.weekday()).to_string();
+    if let Some((is_off_day, name)) = listed {
+        return DayInfo {
+            date: text,
+            day_type: if is_off_day { "holiday" } else { "makeup" }.to_string(),
+            is_workday: !is_off_day,
+            name: if name.is_empty() { None } else { Some(name) },
+            authoritative: true,
+            weekday,
+            weekday_label: label,
+        };
+    }
+    // 不在节假日文件里：该年有数据时按星期判断，否则只按星期推断并标记为不可靠。
+    let weekend = matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
+    DayInfo {
+        date: text,
+        day_type: if weekend { "weekend" } else { "workday" }.to_string(),
+        is_workday: !weekend,
+        name: None,
+        authoritative: has_data,
+        weekday,
+        weekday_label: label,
+    }
+}
+
+/// 今天（或指定时刻所在的那天）的归类。
+pub fn today_info(now_ms: i64) -> DayInfo {
+    let date = Local
+        .timestamp_millis_opt(now_ms)
+        .single()
+        .map(|value| value.date_naive())
+        .unwrap_or_else(|| Local::now().date_naive());
+    day_info(date)
+}
+
+/// 某年某月的逐日归类（日历面板用）。
+pub fn month_info(year: i32, month: u32) -> Vec<DayInfo> {
+    let Some(first) = NaiveDate::from_ymd_opt(year, month, 1) else {
+        return Vec::new();
+    };
+    let days = {
+        let next = if month == 12 {
+            NaiveDate::from_ymd_opt(year + 1, 1, 1)
+        } else {
+            NaiveDate::from_ymd_opt(year, month + 1, 1)
+        };
+        let next = next.unwrap_or(first);
+        (next - first).num_days() as u32
+    };
+    (0..days)
+        .map(|offset| day_info(first + chrono::Days::new(offset as u64)))
+        .collect()
+}
+
 /// 内存缓存优先，其次回查数据库。
 fn year_data(year: i32) -> Option<Arc<HolidayYear>> {
     if let Some(data) = cache().read().ok()?.get(&year).cloned() {
@@ -316,6 +423,40 @@ mod tests {
 
         assert_eq!(lookup_listed_day("2034-12-30", 2034, fetch), Some(false));
         assert_eq!(lookup_listed_day("2034-12-31", 2034, fetch), None);
+    }
+
+    #[test]
+    fn classifies_holiday_makeup_weekend_and_workday() {
+        // 2026-01-05 是周一，2026-01-03 是周六。
+        let monday = NaiveDate::from_ymd_opt(2026, 1, 5).expect("date");
+        let saturday = NaiveDate::from_ymd_opt(2026, 1, 3).expect("date");
+
+        let holiday = classify_day(monday, Some((true, "元旦".into())), true);
+        assert_eq!(holiday.day_type, "holiday");
+        assert!(!holiday.is_workday);
+        assert_eq!(holiday.name.as_deref(), Some("元旦"));
+        assert!(holiday.authoritative);
+
+        let makeup = classify_day(saturday, Some((false, "春节调休".into())), true);
+        assert_eq!(makeup.day_type, "makeup");
+        assert!(makeup.is_workday);
+        assert_eq!(makeup.weekday_label, "星期六");
+
+        let weekend = classify_day(saturday, None, true);
+        assert_eq!(weekend.day_type, "weekend");
+        assert!(!weekend.is_workday);
+        assert!(weekend.authoritative);
+        assert!(weekend.name.is_none());
+
+        let workday = classify_day(monday, None, true);
+        assert_eq!(workday.day_type, "workday");
+        assert!(workday.is_workday);
+        assert_eq!(workday.weekday_label, "星期一");
+
+        // 该年没有节假日数据时只按星期推断，并标记为不可靠。
+        let uncertain = classify_day(monday, None, false);
+        assert_eq!(uncertain.day_type, "workday");
+        assert!(!uncertain.authoritative);
     }
 }
 

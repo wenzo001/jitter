@@ -16,6 +16,8 @@ export const useLogsStore = defineStore('logs', () => {
   const retentionDays = ref(30)
   const loading = ref(false)
   const loadingOlder = ref(false)
+  /** 已经到「最多显示 N 条」的上限，更早的记录不再继续加载。 */
+  const capped = ref(false)
 
   const detailCache = new Map<number, LogDetail>()
   const detailLoading = new Set<number>()
@@ -27,6 +29,7 @@ export const useLogsStore = defineStore('logs', () => {
   function clear(): void {
     logs.value = []
     hasMore.value = false
+    capped.value = false
     cursor = null
     currentTaskId = null
     epoch += 1
@@ -45,9 +48,18 @@ export const useLogsStore = defineStore('logs', () => {
     if (reset || currentTaskId !== taskId) {
       logs.value = []
       hasMore.value = false
+      capped.value = false
       cursor = null
       currentTaskId = taskId
       epoch += 1
+    }
+
+    // 已经显示到上限就不再往回翻了：再翻也只是把新加载的记录挤掉，
+    // 按钮点了没反应。直接告诉用户上限，并让他去「数据库」里看更早的。
+    if (older && logs.value.length >= MAX_LOG_ROWS) {
+      hasMore.value = false
+      capped.value = true
+      return
     }
 
     const myEpoch = epoch
@@ -65,11 +77,15 @@ export const useLogsStore = defineStore('logs', () => {
       for (const row of logs.value) merged.set(row.id, row)
       for (const row of data.logs ?? []) merged.set(row.id, row)
       const sorted = [...merged.values()].sort(compareLogsDesc)
+      // 超过上限时，被挤掉的是**更早**的记录（列表按新到旧排），
+      // 所以"最新在最上面"的顺序不受影响。
+      const overflow = sorted.length > MAX_LOG_ROWS
       logs.value = sorted.slice(0, MAX_LOG_ROWS)
+      capped.value = overflow
 
       const oldest = logs.value[logs.value.length - 1]
       cursor = oldest ? { executedAt: oldest.executed_at, id: oldest.id } : null
-      if (reset || older) hasMore.value = Boolean(data.has_more)
+      if (reset || older) hasMore.value = Boolean(data.has_more) && !overflow
       if (typeof data.retention_days === 'number') retentionDays.value = data.retention_days
     } finally {
       if (myEpoch === epoch) {
@@ -104,6 +120,7 @@ export const useLogsStore = defineStore('logs', () => {
   return {
     logs,
     hasMore,
+    capped,
     retentionDays,
     loading,
     loadingOlder,

@@ -28,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # bun 在这里只是前端工程的包管理器/构建工具，与已移除的 TS 后端无关。
       - uses: oven-sh/setup-bun@v2
       - name: Install
         working-directory: web
@@ -35,16 +36,9 @@ jobs:
       - name: Typecheck
         working-directory: web
         run: bun run typecheck
+      - name: Unit tests
+        working-directory: web
+        run: bun run test
       - name: Build
         working-directory: web
         run: bun run build
-
-  typescript:
-    name: TypeScript reference tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install
-      - run: bun test
-      - run: bun run typecheck

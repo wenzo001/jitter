@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { Task } from '@/types/task'
 import { deleteTask } from '@/api/tasks'
 import { useAppStore } from '@/stores/app'
@@ -13,6 +14,8 @@ const emit = defineEmits<{
   'update:open': [value: boolean]
   deleted: [id: string, name: string, deletedLogs: number]
 }>()
+
+const { t } = useI18n()
 
 const app = useAppStore()
 const input = ref('')
@@ -41,7 +44,9 @@ async function confirm() {
   error.value = ''
   try {
     const data = await deleteTask(task.id)
-    app.setStatus(`已删除任务「${task.name}」及其 ${data.deleted_logs ?? 0} 条日志`)
+    app.setStatus(
+      t('deleteTask.statusDeleted', { name: task.name, count: data.deleted_logs ?? 0 }),
+    )
     emit('deleted', task.id, task.name, data.deleted_logs ?? 0)
     emit('update:open', false)
   } catch (err) {
@@ -55,19 +60,23 @@ async function confirm() {
 <template>
   <a-modal
     :open="open"
-    title="删除任务"
-    ok-text="确认删除"
+    :title="$t('deleteTask.title')"
+    :ok-text="$t('deleteTask.okText')"
     :ok-button-props="{ danger: true, disabled: !matches }"
     :confirm-loading="busy"
     @update:open="emit('update:open', $event)"
     @ok="confirm"
   >
     <p style="margin-top: 0">
-      任务「<strong>{{ task?.name }}</strong>」及其全部历史日志、试跑记录将被永久删除。
+      {{ $t('deleteTask.contentBefore') }}<strong>{{ task?.name }}</strong
+      >{{ $t('deleteTask.contentAfter') }}
     </p>
-    <a-alert type="warning" show-icon message="此操作不可恢复。需要保留数据请先在「设置 → 备份」里新建备份。" />
+    <a-alert type="warning" show-icon :message="$t('deleteTask.warning')" />
     <div class="field" style="margin-top: 12px">
-      <label class="field-label">请输入任务名称确认：<span class="mono">{{ task?.name }}</span></label>
+      <label class="field-label">
+        {{ $t('deleteTask.confirmLabel') }}
+        <span class="mono">{{ task?.name }}</span>
+      </label>
       <a-input v-model:value="input" :placeholder="task?.name" @press-enter="confirm" />
     </div>
     <a-alert v-if="error" type="error" :message="error" show-icon style="margin-top: 10px" />

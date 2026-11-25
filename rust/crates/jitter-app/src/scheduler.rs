@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -216,7 +216,7 @@ pub fn cancel_task(task_id: &str) {
 }
 
 pub fn try_begin_run(task_id: &str) -> bool {
-    let mut guard = state().lock().expect("state");
+    let guard = state().lock().expect("state");
     if guard.running.contains_key(task_id) {
         return false;
     }

@@ -1,7 +1,7 @@
 {
   "name": "jitter-web",
   "private": true,
-  "version": "2.1.8",
+  "version": "2.1.9",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,12 +10,16 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@vueuse/core": "^14.4.0",
     "antdv-next": "^1.8.2",
+    "dayjs": "^1.11.23",
     "pinia": "^4.1.0",
-    "vue": "^3.5.46"
+    "vue": "^3.5.46",
+    "vue-i18n": "^11.4.23"
   },
   "devDependencies": {
     "@antdv-next/auto-import-resolver": "^1.2.0",
+    "@intlify/message-compiler": "^11.4.23",
     "@vitejs/plugin-vue": "^6.0.11",
     "@vue/test-utils": "^2.6.0",
     "jsdom": "^31.0.1",

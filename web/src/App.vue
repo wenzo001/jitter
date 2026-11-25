@@ -1,27 +1,42 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import zhCN from 'antdv-next/locale/zh_CN'
+import enUS from 'antdv-next/locale/en_US'
 import { getTask, resumeTask, runTask, startTask, stopTask } from '@/api/tasks'
+import { BACKEND_MARKERS } from '@/api/client'
 import type { Task } from '@/types/task'
 import type { TestBenchConfig } from '@/types/testbench'
 import { useAppStore } from '@/stores/app'
+import { useDiagnosticsStore } from '@/stores/diagnostics'
 import { useLogsStore } from '@/stores/logs'
 import { useTasksStore } from '@/stores/tasks'
 import { conditionFromTask } from '@/types/form'
 import { curlOf } from '@/utils/curl'
 import { formatDuration, formatRate } from '@/utils/format'
+import { setLocale, type Locale } from '@/i18n'
 import TaskList from '@/components/task/TaskList.vue'
 import TaskForm from '@/components/task/TaskForm.vue'
 import LogsPanel from '@/components/logs/LogsPanel.vue'
+import TopClock from '@/components/common/TopClock.vue'
 import TestBenchDialog from '@/components/dialogs/TestBenchDialog.vue'
 import PauseDialog from '@/components/dialogs/PauseDialog.vue'
 import DeleteTaskDialog from '@/components/dialogs/DeleteTaskDialog.vue'
 import CleanupLogsDialog from '@/components/dialogs/CleanupLogsDialog.vue'
 import StatsDialog from '@/components/dialogs/StatsDialog.vue'
 import SettingsDialog from '@/components/dialogs/SettingsDialog.vue'
+import CalendarDialog from '@/components/dialogs/CalendarDialog.vue'
+import DatabaseDialog from '@/components/dialogs/DatabaseDialog.vue'
+import DiagnosticsDialog from '@/components/dialogs/DiagnosticsDialog.vue'
+import RuntimeLogsDialog from '@/components/dialogs/RuntimeLogsDialog.vue'
+import ErrorBoundary from '@/components/common/ErrorBoundary.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 
+const { t, locale } = useI18n()
+
 const app = useAppStore()
+const diagnostics = useDiagnosticsStore()
 const tasks = useTasksStore()
 const logs = useLogsStore()
 
@@ -32,9 +47,15 @@ const statsOpen = ref(false)
 const settingsOpen = ref(false)
 const cleanupOpen = ref(false)
 const globalTestOpen = ref(false)
+const calendarOpen = ref(false)
+const databaseOpen = ref(false)
+const diagnosticsOpen = ref(false)
+const runtimeLogsOpen = ref(false)
 
 const formOpen = ref(false)
-const formTitle = ref('新建任务')
+/** 弹窗标题由「新建 / 编辑」和任务名拼出来，随语言实时变化。 */
+const formMode = ref<'create' | 'edit'>('create')
+const formTaskName = ref('')
 
 const pauseOpen = ref(false)
 const pauseTarget = ref<Task | null>(null)
@@ -56,23 +77,45 @@ const theme = {
   },
 }
 
+/** antdv-next 组件自带的文案也跟着界面语言切换。 */
+const antLocale = computed(() => (locale.value === 'en-US' ? enUS : zhCN))
+
+const localeOptions = computed(() => [
+  { label: t('topbar.languageZh'), value: 'zh-CN' },
+  { label: t('topbar.languageEn'), value: 'en-US' },
+])
+
+function onLocaleChange(value: unknown): void {
+  if (value === 'zh-CN' || value === 'en-US') setLocale(value as Locale)
+}
+
+const formTitle = computed(() =>
+  formMode.value === 'edit'
+    ? t('task.editTitle', { name: formTaskName.value })
+    : t('task.create'),
+)
+
 const metricsText = computed(() => {
   const overview = app.metrics?.overview
   if (!overview) return ''
   const parts = [
-    `今日 ${overview.today_runs} 次`,
-    `成功率 ${formatRate(overview.success_rate_7d)}`,
-    `均耗时 ${formatDuration(overview.avg_duration_ms_7d)}`,
+    t('metrics.todayRuns', { count: overview.today_runs }),
+    t('metrics.successRate', { value: formatRate(overview.success_rate_7d) }),
+    t('metrics.avgDuration', { value: formatDuration(overview.avg_duration_ms_7d) }),
   ]
-  if (overview.running > 0) parts.push(`${overview.running} 个执行中`)
+  if (overview.running > 0) parts.push(t('metrics.runningCount', { count: overview.running }))
   return parts.join(' · ')
 })
 
 const runContent = computed(() => {
   const task = runTarget.value
   if (!task) return ''
-  return `会真实发送请求；满足成功条件时还会发送通知 curl，并写入执行记录。\n执行条件不满足时会跳过本次。任务「${task.name}」`
+  return t('task.runContent', { name: task.name })
 })
+
+const stopContent = computed(() =>
+  t('task.stopContent', { name: stopTarget.value?.name ?? '' }),
+)
 
 async function refreshLogs(reset = true) {
   await logs.load(tasks.selectedId, { reset, pageSize: app.config.logsPageSize })
@@ -93,7 +136,8 @@ function selectTask(id: string) {
 
 function openCreate() {
   taskFormRef.value?.startCreate()
-  formTitle.value = '新建任务'
+  formMode.value = 'create'
+  formTaskName.value = ''
   formOpen.value = true
 }
 
@@ -101,10 +145,11 @@ async function editTask(task: Task) {
   try {
     const data = await getTask(task.id)
     if (!data?.task) return
-    formTitle.value = `编辑任务 · ${data.task.name}`
+    formMode.value = 'edit'
+    formTaskName.value = data.task.name
     taskFormRef.value?.loadTask(data.task)
     formOpen.value = true
-    app.setStatus(`正在编辑任务「${task.name}」`)
+    app.setStatus(t('task.editingStatus', { name: task.name }))
   } catch (error) {
     app.setStatus(error instanceof Error ? error.message : String(error), true)
   }
@@ -112,7 +157,8 @@ async function editTask(task: Task) {
 
 function closeFormPanel() {
   formOpen.value = false
-  formTitle.value = '新建任务'
+  formMode.value = 'create'
+  formTaskName.value = ''
 }
 
 async function testTask(task: Task) {
@@ -150,7 +196,8 @@ function openGlobalTest() {
 function applyGlobalTest(config: TestBenchConfig) {
   taskFormRef.value?.startCreate()
   taskFormRef.value?.applyTestConfig(config)
-  formTitle.value = '新建任务'
+  formMode.value = 'create'
+  formTaskName.value = ''
   formOpen.value = true
 }
 
@@ -159,7 +206,7 @@ async function onReorder(ids: string[]) {
   if (previous === ids.join(',')) return
   try {
     await tasks.applyOrder(ids)
-    app.setStatus('任务顺序已保存')
+    app.setStatus(t('task.orderSaved'))
   } catch (error) {
     app.setStatus(error instanceof Error ? error.message : String(error), true)
     await tasks.load()
@@ -188,22 +235,24 @@ async function doRun() {
   busyId.value = task.id
   try {
     const data = await runTask(task.id)
-    const parts = [data.skipped ? `任务「${task.name}」被执行条件跳过` : `任务「${task.name}」已执行一次`]
+    const parts = [
+      data.skipped
+        ? t('task.runSkipped', { name: task.name })
+        : t('task.runDone', { name: task.name }),
+    ]
     if (!data.skipped && data.status !== null) parts.push(`HTTP ${data.status}`)
     if (data.error) parts.push(data.error)
-    else if (data.matched) parts.push(data.notifySent ? '成功并发通知' : '成功')
-    else parts.push('未满足成功条件')
+    else if (data.matched) parts.push(data.notifySent ? t('task.runNotified') : t('common.success'))
+    else parts.push(t('task.conditionNotMet'))
     if (!data.skipped) parts.push(`${data.durationMs} ms`)
     app.setStatus(parts.join(' · '), Boolean(data.error))
     await tasks.load()
     await refreshLogs(true)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    const timedOut = message.includes('请求超时')
+    const timedOut = message.includes(BACKEND_MARKERS.timeout)
     app.setStatus(
-      timedOut
-        ? `任务「${task.name}」超过 60 秒未返回，已断开等待；后台可能仍在执行，稍后刷新执行记录查看`
-        : message,
+      timedOut ? t('task.runTimeout', { name: task.name }) : message,
       true,
     )
     await tasks.load()
@@ -220,10 +269,10 @@ async function action(task: Task, kind: 'stop' | 'start' | 'resumePause') {
     else await resumeTask(task.id)
     app.setStatus(
       kind === 'stop'
-        ? '调度已停用'
+        ? t('task.scheduleDisabled')
         : kind === 'resumePause'
-          ? '已取消暂停，恢复定时执行'
-          : '已启用调度',
+          ? t('task.pauseCancelled')
+          : t('task.scheduleEnabled'),
     )
     await tasks.load()
     await refreshLogs(true)
@@ -262,29 +311,37 @@ async function onCleanupDone() {
   if (tasks.selectedId) await refreshLogs(true)
 }
 
-let pollTimer: number | undefined
-let tickTimer: number | undefined
-let metricsTimer: number | undefined
+// 轮询与可见性交给 vueuse：定时器随组件卸载自动清理，
+// 页面切到后台时自动跳过轮询，回到前台立刻补一次刷新。
+const { pause: pauseTick, resume: resumeTick } = useIntervalFn(() => tasks.tick(), 1000)
+const { pause: pausePoll, resume: resumePoll } = useIntervalFn(
+  () => void refreshAll(),
+  () => Math.max(500, Number(app.config.pollIntervalMs) || 4000),
+)
+const { pause: pauseMetrics, resume: resumeMetrics } = useIntervalFn(
+  () => void app.refreshMetrics(),
+  15_000,
+)
 
-function startTimers() {
-  const interval = Math.max(500, Number(app.config.pollIntervalMs) || 4000)
-  tickTimer = window.setInterval(() => tasks.tick(), 1000)
-  pollTimer = window.setInterval(() => {
-    if (document.hidden) return
-    void refreshAll()
-  }, interval)
-  metricsTimer = window.setInterval(() => {
-    if (!document.hidden) void app.refreshMetrics()
-  }, 15_000)
-}
+const visibility = useDocumentVisibility()
 
-function onVisible() {
-  if (!document.hidden) {
-    tasks.tick()
-    void refreshAll()
-    void app.refreshMetrics()
+watch(visibility, (state) => {
+  if (state === 'hidden') {
+    pauseTick()
+    pausePoll()
+    pauseMetrics()
+    return
   }
-}
+  resumeTick()
+  resumePoll()
+  resumeMetrics()
+  // 回到前台：立刻同步一次，别让用户盯着旧数据。
+  tasks.tick()
+  void refreshAll()
+  void app.refreshMetrics()
+  // 跨天后顶栏的「今天 / 工作日」标签要跟着变。
+  void app.loadHoliday()
+})
 
 onMounted(async () => {
   await app.loadConfig()
@@ -292,24 +349,20 @@ onMounted(async () => {
     await tasks.load()
   } catch (error) {
     app.setStatus(error instanceof Error ? error.message : String(error), true)
+    diagnostics.reportError(t('diagnostics.sourceTaskListFailed'), error)
   }
   await app.loadSystem()
   void app.refreshMetrics()
   void app.loadHoliday()
-  startTimers()
-  document.addEventListener('visibilitychange', onVisible)
-})
-
-onBeforeUnmount(() => {
-  window.clearInterval(pollTimer)
-  window.clearInterval(tickTimer)
-  window.clearInterval(metricsTimer)
-  document.removeEventListener('visibilitychange', onVisible)
+  resumeTick()
+  resumePoll()
+  resumeMetrics()
+  diagnostics.startHealthPolling()
 })
 </script>
 
 <template>
-  <a-config-provider :locale="zhCN" :theme="theme">
+  <a-config-provider :locale="antLocale" :theme="theme">
     <div class="app-shell">
       <header class="app-topbar">
         <div class="topbar-inner">
@@ -317,13 +370,36 @@ onBeforeUnmount(() => {
             <span class="brand-mark" />
             <span class="brand-name">Jitter</span>
             <span v-if="app.version" class="muted" style="font-size: 12px">v{{ app.version }}</span>
-            <span class="brand-sub">先测通，再定时 · 按秒 / 分 / 时 / 天调用 curl</span>
+            <span class="brand-sub">{{ $t('topbar.subtitle') }}</span>
+          </div>
+          <div class="topbar-clock">
+            <TopClock
+              :now="tasks.now"
+              :today="app.holiday?.today ?? null"
+              @open-calendar="calendarOpen = true"
+            />
           </div>
           <div class="topbar-actions">
             <span v-if="metricsText" class="metrics-strip">{{ metricsText }}</span>
-            <a-button size="small" @click="statsOpen = true">统计</a-button>
-            <a-button size="small" @click="settingsOpen = true">设置</a-button>
-            <a-button size="small" type="primary" ghost @click="openGlobalTest">试跑 curl</a-button>
+            <a-button size="small" @click="statsOpen = true">{{ $t('topbar.statistics') }}</a-button>
+            <a-button size="small" @click="databaseOpen = true">{{ $t('topbar.database') }}</a-button>
+            <a-button size="small" @click="runtimeLogsOpen = true">
+              {{ $t('topbar.runtimeLogs') }}
+            </a-button>
+            <a-button size="small" @click="diagnosticsOpen = true">
+              {{ $t('topbar.diagnostics') }}
+            </a-button>
+            <a-button size="small" @click="settingsOpen = true">{{ $t('topbar.settings') }}</a-button>
+            <a-button size="small" type="primary" ghost @click="openGlobalTest">
+              {{ $t('topbar.testCurl') }}
+            </a-button>
+            <a-segmented
+              size="small"
+              class="locale-switch"
+              :value="locale"
+              :options="localeOptions"
+              @update:value="onLocaleChange"
+            />
             <span class="status-line" :class="{ 'is-error': app.status.error }">{{ app.status.text }}</span>
           </div>
         </div>
@@ -339,42 +415,86 @@ onBeforeUnmount(() => {
         @close="app.dismissBanner()"
       />
 
-      <main class="page">
-        <div class="layout">
-          <section class="column">
-            <div class="panel">
-              <div class="panel-head">
-                <h2 class="panel-title">任务 <small>{{ tasks.tasks.length }} 个</small></h2>
-                <div class="panel-actions">
-                  <a-button size="small" type="primary" @click="openCreate">新建任务</a-button>
-                  <a-button size="small" type="text" :loading="tasks.loading" @click="refreshAll">
-                    刷新
-                  </a-button>
-                </div>
-              </div>
-              <TaskList
-                :tasks="tasks.tasks"
-                :selected-id="tasks.selectedId"
-                :now="tasks.now"
-                :busy-id="busyId"
-                @select="selectTask"
-                @run="onRun"
-                @edit="editTask"
-                @test="testTask"
-                @pause="openPause"
-                @resume-pause="action($event, 'resumePause')"
-                @stop="askStop"
-                @start="action($event, 'start')"
-                @remove="openDelete"
-                @reorder="onReorder"
-              />
-            </div>
-          </section>
+      <!-- 后台没响应时，必须明确告诉用户发生了什么、下一步该做什么。 -->
+      <a-alert
+        v-if="diagnostics.serviceState === 'down'"
+        type="error"
+        show-icon
+        banner
+        style="border-radius: 0"
+      >
+        <template #message>
+          <strong>{{ $t('alert.backendDown') }}</strong>
+          —— {{ diagnostics.guidance }}
+        </template>
+        <template #action>
+          <a-button size="small" :loading="diagnostics.checking" @click="diagnostics.checkHealth()">
+            {{ $t('common.recheck') }}
+          </a-button>
+          <a-button size="small" @click="runtimeLogsOpen = true">
+            {{ $t('common.viewRuntimeLogs') }}
+          </a-button>
+        </template>
+      </a-alert>
+      <a-alert
+        v-else-if="diagnostics.serviceState === 'degraded' && diagnostics.health?.lastError"
+        type="warning"
+        show-icon
+        banner
+        style="border-radius: 0"
+      >
+        <template #message>
+          <strong>{{ $t('alert.backendDegraded') }}</strong>
+          —— {{ diagnostics.health.lastError.message }}
+        </template>
+        <template #action>
+          <a-button size="small" @click="diagnosticsOpen = true">{{ $t('common.viewDetails') }}</a-button>
+        </template>
+      </a-alert>
 
-          <section class="column">
-            <LogsPanel @cleanup="cleanupOpen = true" />
-          </section>
-        </div>
+      <main class="page">
+        <ErrorBoundary :label="$t('app.mainArea')" @open-diagnostics="diagnosticsOpen = true">
+          <div class="layout">
+            <section class="column">
+              <div class="panel">
+                <div class="panel-head">
+                  <h2 class="panel-title">
+                    {{ $t('task.panelTitle') }}
+                    <small>{{ $t('task.panelCount', { count: tasks.tasks.length }) }}</small>
+                  </h2>
+                  <div class="panel-actions">
+                    <a-button size="small" type="primary" @click="openCreate">
+                      {{ $t('task.create') }}
+                    </a-button>
+                    <a-button size="small" type="text" :loading="tasks.loading" @click="refreshAll">
+                      {{ $t('common.refresh') }}
+                    </a-button>
+                  </div>
+                </div>
+                <TaskList
+                  :tasks="tasks.tasks"
+                  :selected-id="tasks.selectedId"
+                  :now="tasks.now"
+                  :busy-id="busyId"
+                  @select="selectTask"
+                  @run="onRun"
+                  @edit="editTask"
+                  @test="testTask"
+                  @pause="openPause"
+                  @resume-pause="action($event, 'resumePause')"
+                  @stop="askStop"
+                  @start="action($event, 'start')"
+                  @remove="openDelete"
+                  @reorder="onReorder"
+                />
+              </div>
+            </section>
+
+            <section class="column">
+              <LogsPanel @cleanup="cleanupOpen = true" />
+            </section>
+          </div>
+        </ErrorBoundary>
       </main>
     </div>
 
@@ -393,13 +513,13 @@ onBeforeUnmount(() => {
         <div class="task-form-footer">
           <span class="task-form-footer-hint">{{ taskFormRef?.footerHint }}</span>
           <div class="task-form-footer-actions">
-            <a-button @click="taskFormRef?.requestClose()">取消</a-button>
+            <a-button @click="taskFormRef?.requestClose()">{{ $t('common.cancel') }}</a-button>
             <a-button
               type="primary"
               :loading="taskFormRef?.submitting"
               @click="taskFormRef?.submit()"
             >
-              {{ taskFormRef?.editingId ? '保存修改' : '创建任务' }}
+              {{ taskFormRef?.editingId ? $t('taskForm.saveChanges') : $t('taskForm.createTask') }}
             </a-button>
           </div>
         </div>
@@ -410,26 +530,36 @@ onBeforeUnmount(() => {
     <DeleteTaskDialog v-model:open="deleteOpen" :task="deleteTarget" @deleted="onDeleted" />
     <CleanupLogsDialog v-model:open="cleanupOpen" @done="onCleanupDone" />
     <StatsDialog v-model:open="statsOpen" />
+    <CalendarDialog v-model:open="calendarOpen" />
+    <DatabaseDialog v-model:open="databaseOpen" />
+    <RuntimeLogsDialog v-model:open="runtimeLogsOpen" />
+    <DiagnosticsDialog v-model:open="diagnosticsOpen" @open-logs="runtimeLogsOpen = true" />
     <SettingsDialog v-model:open="settingsOpen" @cleanup="cleanupOpen = true" />
     <TestBenchDialog v-model:open="globalTestOpen" ref="testRef" @apply="applyGlobalTest" />
 
     <ConfirmDialog
       :open="runTarget !== null"
-      title="立即执行任务"
+      :title="$t('task.runTitle')"
       :content="runContent"
-      ok-text="执行"
+      :ok-text="$t('task.runOkText')"
       @update:open="runTarget = null"
       @confirm="doRun"
     />
 
     <ConfirmDialog
       :open="stopTarget !== null"
-      title="停止调度"
-      :content="`停止后任务「${stopTarget?.name ?? ''}」不再自动执行，执行记录会保留，随时可以重新启用。`"
-      ok-text="停止调度"
+      :title="$t('task.menuStop')"
+      :content="stopContent"
+      :ok-text="$t('task.menuStop')"
       danger
       @update:open="stopTarget = null"
       @confirm="doStop"
     />
   </a-config-provider>
 </template>
+
+<style scoped>
+.locale-switch {
+  margin-left: 2px;
+}
+</style>

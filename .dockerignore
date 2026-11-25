@@ -1,6 +1,10 @@
 node_modules
+web/node_modules
 data
 dist
+web/dist
+rust/target
+.tmp
 .git
 .env
 *.log

@@ -116,7 +116,7 @@ fn restore_round_trip_preserves_data() {
 #[test]
 fn swap_database_removes_wal_sidecars() {
     let db_path = temp_db_path();
-    fs::write(&db_path, b"SQLite format 3\0 old");
+    fs::write(&db_path, b"SQLite format 3\0 old").unwrap();
     let wal = std::path::PathBuf::from(format!("{}-wal", db_path.to_string_lossy()));
     let shm = std::path::PathBuf::from(format!("{}-shm", db_path.to_string_lossy()));
     fs::write(&wal, b"stale").unwrap();

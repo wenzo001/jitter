@@ -4,14 +4,14 @@
 //! 所以现有数据库文件可以直接被 Rust 版接管，无需任何转换。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Local};
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as Json};
 
-use crate::types::{LogKind, RedirectMode, TaskStatus};
+use crate::types::{LogKind, TaskStatus};
 
 pub const LOG_RETENTION_SETTING: &str = "logRetentionDays";
 /// 全局「默认跳过 TLS 证书校验」开关；缺省视为开启（打卡系统多为自签证书）。
@@ -1417,7 +1417,7 @@ pub fn get_log_storage_usage() -> LogStorageUsage {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
-struct LogCountRow {
+pub struct LogCountRow {
     count: i64,
     bytes: i64,
     oldest: Option<i64>,
@@ -1604,6 +1604,11 @@ pub struct RunTotals {
     pub runs: i64,
     pub ok: i64,
     pub avg_duration_ms: Option<f64>,
+}
+
+/// 一个任务最近一次正式执行记录（轻量字段）；没有执行过则为 `None`。
+pub fn get_last_task_log(task_id: &str) -> Result<Option<LogSummary>, DbError> {
+    Ok(list_recent_task_logs(task_id, 1)?.into_iter().next())
 }
 
 /// 自某个时刻以来的任务执行统计。
@@ -1824,5 +1829,145 @@ pub fn get_test_run(id: i64) -> Result<Option<TestRunRow>, DbError> {
             })
         })?;
         Ok(rows.next().transpose()?)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 数据库浏览（只读）：界面「数据库」面板用
+// ---------------------------------------------------------------------------
+
+/// 表结构里的一列。
+#[derive(Debug, Clone, Serialize)]
+pub struct DatabaseColumn {
+    pub name: String,
+    /// 声明类型（`TEXT` / `INTEGER` / …）。
+    pub decl_type: String,
+}
+
+/// 一张表及其规模。
+#[derive(Debug, Clone, Serialize)]
+pub struct DatabaseTable {
+    pub name: String,
+    pub columns: Vec<DatabaseColumn>,
+    pub row_count: i64,
+}
+
+/// 某张表的一页数据。
+#[derive(Debug, Clone, Serialize)]
+pub struct DatabaseRows {
+    pub table: String,
+    pub columns: Vec<DatabaseColumn>,
+    /// 每行是一个 `{列名: 值}` 的对象。
+    pub rows: Vec<JsonMap<String, Json>>,
+    /// 该表的总行数。
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// 把表名转义成 SQL 标识符。
+///
+/// SQLite 的标识符用双引号包裹，内部的 `"` 要写成 `""`。
+/// 表名来自 `sqlite_master`，正常情况下不含引号，但转义后拼接才是安全的。
+pub fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// 用户可见的表（排除 SQLite 内部表）。
+fn visible_table_names(conn: &Connection) -> Result<Vec<String>, DbError> {
+    let mut statement = conn.prepare(
+        "SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+          ORDER BY name",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.filter_map(|result| result.ok()).collect())
+}
+
+/// 表的列结构（用 `pragma_table_info` 取值函数，参数化避免拼接表名）。
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<DatabaseColumn>, DbError> {
+    let mut statement = conn.prepare("SELECT name, type FROM pragma_table_info(?1)")?;
+    let rows = statement.query_map(params![table], |row| {
+        Ok(DatabaseColumn {
+            name: row.get(0)?,
+            decl_type: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        })
+    })?;
+    Ok(rows.filter_map(|result| result.ok()).collect())
+}
+
+/// SQLite 值 → JSON。
+fn json_value(value: rusqlite::types::ValueRef<'_>) -> Json {
+    use rusqlite::types::ValueRef;
+    match value {
+        ValueRef::Null => Json::Null,
+        ValueRef::Integer(number) => Json::from(number),
+        ValueRef::Real(number) => Json::from(number),
+        ValueRef::Text(text) => Json::String(String::from_utf8_lossy(text).into_owned()),
+        ValueRef::Blob(bytes) => {
+            use base64::Engine as _;
+            Json::String(base64::engine::general_purpose::STANDARD.encode(bytes))
+        }
+    }
+}
+
+/// 全部可见表 + 列结构 + 行数。
+pub fn list_database_tables() -> Result<Vec<DatabaseTable>, DbError> {
+    with_db(|conn, _| {
+        let mut tables = Vec::new();
+        for name in visible_table_names(conn)? {
+            let columns = table_columns(conn, &name)?;
+            let row_count: i64 = conn.query_row(
+                &format!("SELECT COUNT(*) FROM {}", quote_identifier(&name)),
+                [],
+                |row| row.get(0),
+            )?;
+            tables.push(DatabaseTable {
+                name,
+                columns,
+                row_count,
+            });
+        }
+        Ok(tables)
+    })
+}
+
+/// 某张表的一页数据（只读）。
+///
+/// 表名必须在 [`visible_table_names`] 里出现，否则拒绝执行——避免把表名拼进 SQL。
+pub fn list_database_rows(
+    table: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<DatabaseRows, DbError> {
+    let limit = limit.clamp(1, 500);
+    let offset = offset.max(0);
+    with_db(|conn, _| {
+        if !visible_table_names(conn)?.iter().any(|name| name == table) {
+            return Err(DbError(format!("表不存在：{table}")));
+        }
+        let columns = table_columns(conn, table)?;
+        // 表名按 SQL 标识符规则转义（内部双引号要写两遍），否则带引号的表名会破坏语句。
+        let quoted = quote_identifier(table);
+        let total: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {quoted}"), [], |row| row.get(0))?;
+        let mut statement = conn.prepare(&format!("SELECT * FROM {quoted} LIMIT ?1 OFFSET ?2"))?;
+        let mut rows = Vec::new();
+        let mut query = statement.query(params![limit, offset])?;
+        while let Some(row) = query.next()? {
+            let mut item = JsonMap::new();
+            for index in 0..columns.len() {
+                let value = row.get_ref(index)?;
+                item.insert(columns[index].name.clone(), json_value(value));
+            }
+            rows.push(item);
+        }
+        Ok(DatabaseRows {
+            table: table.to_string(),
+            columns,
+            rows,
+            total,
+            limit,
+            offset,
+        })
     })
 }

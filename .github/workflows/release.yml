@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   test:
-    name: "Gate: both sides green"
+    name: "Gate: Rust core green"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,9 +17,6 @@ jobs:
       - name: Rust core tests
         working-directory: rust
         run: cargo test -p jitter-core
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install
-      - run: bun test
 
   frontend:
     name: Build frontend
@@ -33,6 +30,9 @@ jobs:
       - name: Typecheck
         working-directory: web
         run: bun run typecheck
+      - name: Unit tests
+        working-directory: web
+        run: bun run test
       - name: Build
         working-directory: web
         run: bun run build
@@ -101,7 +101,8 @@ jobs:
           cp "rust/target/${{ matrix.target }}/release/${{ matrix.bin }}" "staging/${{ matrix.bin }}"
           chmod +x "staging/${{ matrix.bin }}"
           asset="jitter-${{ matrix.platform }}-${{ matrix.arch }}.zip"
-          (cd staging && zip -r "../$asset" .)
+          # -9：最大压缩率，安装包越小用户下载越快。
+          (cd staging && zip -9 -r "../$asset" .)
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$asset" | tee "$asset.sha256"
           else

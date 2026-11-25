@@ -8,7 +8,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post};
 use axum::{Json as AxumJson, Router};
 use include_dir::{include_dir, Dir};
 use serde::Deserialize;
@@ -21,8 +21,8 @@ use jitter_core::types::JsonMap;
 
 use jitter_core::backup;
 use jitter_core::config::get_active_config;
-use jitter_core::curl_parser::{parse_curl_command, CurlParseError};
-use jitter_core::db::{self, NewLogInput, NewTaskInput, RequestParts};
+use jitter_core::curl_parser::parse_curl_command;
+use jitter_core::db::{self, NewTaskInput, RequestParts};
 use jitter_core::executor;
 use jitter_core::metrics::get_metrics_report;
 use jitter_core::schedule::{build_schedule, schedule_of, StoredSchedule};
@@ -30,11 +30,72 @@ use jitter_core::system;
 use jitter_core::updater;
 
 use std::sync::atomic::Ordering;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use crate::ACTUAL_PORT;
 
+/// 进程启动时刻（健康检查里回报运行时长）。
+static STARTED_AT: OnceLock<Instant> = OnceLock::new();
+
+fn started_at() -> Instant {
+    *STARTED_AT.get_or_init(Instant::now)
+}
+
+/// 最近一次服务端错误（时间 + 原因），健康检查里回报，方便界面提示用户。
+static LAST_ERROR: OnceLock<Mutex<Option<(i64, String)>>> = OnceLock::new();
+
+fn last_error_slot() -> &'static Mutex<Option<(i64, String)>> {
+    LAST_ERROR.get_or_init(|| Mutex::new(None))
+}
+
+/// 记录最近一次**服务端**错误（只保留最近一条）。
+///
+/// 只有 5xx 才会让界面进入「后台降级」状态；4xx 多半是请求本身的问题
+/// （比如查一张刚被删掉的表），把它算成后台故障会让横幅一直挂着，误导用户。
+fn record_error(message: &str) {
+    let mut guard = last_error_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some((executor::now_ms(), message.to_string()));
+    tracing::error!("接口错误: {message}");
+}
+
+/// 记录一次 4xx（客户端请求有误）：只写日志，不改变「后台降级」状态。
+fn record_client_error(message: &str) {
+    tracing::warn!("请求有误: {message}");
+}
+
+/// 启动期错误（例如配置文件损坏）：让界面在健康检查里看到，用户知道该去修什么。
+pub fn set_startup_error(message: &str) {
+    record_error(message);
+}
+
+/// 按状态码决定要不要算作「后台故障」。
+fn record_by_status(status: StatusCode, message: &str) {
+    if status.is_server_error() {
+        record_error(message);
+    } else {
+        record_client_error(message);
+    }
+}
+
 fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
-    (status, AxumJson(json!({ "error": message.into() }))).into_response()
+    let message = message.into();
+    record_by_status(status, &message);
+    (status, AxumJson(json!({ "error": message }))).into_response()
+}
+
+/// 带处理建议的错误响应：界面可以直接把 hint 展示给用户，告诉他下一步怎么做。
+fn error_response_with_hint(
+    status: StatusCode,
+    message: impl Into<String>,
+    hint: impl Into<String>,
+) -> Response {
+    let message = message.into();
+    let hint = hint.into();
+    record_by_status(status, &message);
+    (status, AxumJson(json!({ "error": message, "hint": hint }))).into_response()
 }
 
 fn bad_request(message: impl Into<String>) -> Response {
@@ -469,6 +530,33 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
     })
 }
 
+/// 上一次执行的结果归类：`success` 成功 / `condition_miss` 请求成功但未满足成功条件 / `failed` 失败。
+fn last_run_view(row: &db::LogSummary) -> Json {
+    let request_ok = row.error.is_none()
+        && row
+            .response_status
+            .map(|status| (200..300).contains(&status))
+            .unwrap_or(false);
+    let outcome = if !request_ok {
+        "failed"
+    } else if row.matched.unwrap_or(0) != 0 {
+        "success"
+    } else {
+        "condition_miss"
+    };
+    json!({
+        "id": row.id,
+        "executedAt": row.executed_at,
+        "outcome": outcome,
+        "status": row.response_status,
+        "durationMs": row.duration_ms,
+        "error": row.error,
+        "matched": row.matched,
+        "runSource": row.run_source,
+        "kind": row.kind,
+    })
+}
+
 /// 任务行 → 前端视图（运行中状态、调度错误与描述等派生字段）。
 fn task_view(task: &db::TaskRow) -> Json {
     let stored = StoredSchedule {
@@ -501,6 +589,13 @@ fn task_view(task: &db::TaskRow) -> Json {
             "schedule_error".to_string(),
             schedule_error.map(Json::String).unwrap_or(Json::Null),
         );
+        // 上一次执行：时间与成功/失败，任务列表用它做醒目标记。
+        let last_run = db::get_last_task_log(&task.id)
+            .ok()
+            .flatten()
+            .map(|row| last_run_view(&row))
+            .unwrap_or(Json::Null);
+        object.insert("last_run".to_string(), last_run);
     }
     view
 }
@@ -981,8 +1076,69 @@ async fn system_holiday() -> Response {
     AxumJson(json!({
         "years": jitter_core::holiday::list_years(),
         "hasCurrentYear": jitter_core::holiday::has_current_year_data(executor::now_ms()),
+        "today": jitter_core::holiday::today_info(executor::now_ms()),
     }))
     .into_response()
+}
+
+/// 某年某月的逐日归类（日历面板：工作日 / 休息日 / 法定节假日 / 调休）。
+async fn system_holiday_month(Query(params): Query<std::collections::HashMap<String, String>>) -> Response {
+    let now = executor::now_ms();
+    let today = jitter_core::holiday::today_info(now);
+    let current_year = today
+        .date
+        .get(..4)
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(1970);
+    let current_month = today
+        .date
+        .get(5..7)
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1);
+    let year = params
+        .get("year")
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|value| (1970..=2999).contains(value))
+        .unwrap_or(current_year);
+    let month = params
+        .get("month")
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| (1..=12).contains(value))
+        .unwrap_or(current_month);
+    AxumJson(json!({
+        "year": year,
+        "month": month,
+        "today": today,
+        "days": jitter_core::holiday::month_info(year, month),
+    }))
+    .into_response()
+}
+
+/// 数据库里的全部表（只读浏览用）。
+async fn database_tables() -> Response {
+    match db::list_database_tables() {
+        Ok(tables) => AxumJson(json!({ "tables": tables })).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
+    }
+}
+
+/// 某张表的一页数据（只读浏览用）。
+async fn database_rows(Query(params): Query<std::collections::HashMap<String, String>>) -> Response {
+    let Some(table) = params.get("table").map(|value| value.trim()).filter(|value| !value.is_empty()) else {
+        return bad_request("缺少 table 参数");
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(100);
+    let offset = params
+        .get("offset")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    match db::list_database_rows(table, limit, offset) {
+        Ok(rows) => AxumJson(json!(rows)).into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error.0),
+    }
 }
 
 /// 手动拉取节假日数据（去年 / 今年 / 明年三年，成功的覆盖本地）。
@@ -991,6 +1147,7 @@ async fn system_holiday_refresh() -> Response {
     AxumJson(json!({
         "years": jitter_core::holiday::list_years(),
         "hasCurrentYear": jitter_core::holiday::has_current_year_data(executor::now_ms()),
+        "today": jitter_core::holiday::today_info(executor::now_ms()),
         "refreshed": refreshed,
         "errors": errors,
     }))
@@ -1255,14 +1412,69 @@ async fn test_run_detail(Path(id): Path<String>) -> Response {
     }
 }
 
+/// 健康检查：顺带回报运行时长、路径与最近一次错误，界面据此提示用户。
 async fn health() -> Response {
-    AxumJson(json!({ "ok": true, "now": executor::now_ms() })).into_response()
+    let config = get_active_config();
+    let last_error = last_error_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let db_ok = db::list_tasks().is_ok();
+    AxumJson(json!({
+        "ok": true,
+        "now": executor::now_ms(),
+        "version": jitter_core::VERSION,
+        "uptimeMs": started_at().elapsed().as_millis() as u64,
+        "dbOk": db_ok,
+        "dbPath": config.db_path,
+        "logDir": jitter_core::logging::log_dir(&config.db_path).to_string_lossy().to_string(),
+        "lastError": match last_error {
+            Some((at, message)) => json!({ "at": at, "message": message }),
+            None => Json::Null,
+        },
+    }))
+    .into_response()
+}
+
+/// 运行日志文件列表（界面「运行日志」面板用）。
+async fn system_logs() -> Response {
+    let dir = jitter_core::logging::log_dir(&get_active_config().db_path);
+    AxumJson(json!({
+        "dir": dir.to_string_lossy(),
+        "retentionDays": jitter_core::logging::retention_days_from_env(),
+        "files": jitter_core::logging::list_files(&dir),
+    }))
+    .into_response()
+}
+
+/// 读取某个运行日志的一段内容。
+async fn system_log_file(
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let dir = jitter_core::logging::log_dir(&get_active_config().db_path);
+    let offset = params
+        .get("offset")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(64 * 1024);
+    match jitter_core::logging::read_file(&dir, &name, offset, limit) {
+        Ok(chunk) => AxumJson(json!(chunk)).into_response(),
+        Err(message) => error_response_with_hint(
+            StatusCode::BAD_REQUEST,
+            message,
+            "请在「运行日志」面板里重新选择日志文件。",
+        ),
+    }
 }
 
 /// 首页与静态资源：从嵌入的 web/dist 读取。
 fn static_file(path: &str, immutable: bool) -> Response {
     let Some(file) = WEB_DIST.get_file(path) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return missing_asset_page(path);
     };
     let mime = mime_guess::from_path(path).first_or_octet_stream();
     let cache = if immutable {
@@ -1276,6 +1488,47 @@ fn static_file(path: &str, immutable: bool) -> Response {
             (header::CACHE_CONTROL, cache),
         ],
         file.contents(),
+    )
+        .into_response()
+}
+
+/// 前端资源缺失时的可读兜底页：告诉用户发生了什么、怎么修。
+///
+/// 正常不会走到；构建产物没打进去时，至少别给用户一个空白页。
+fn missing_asset_page(path: &str) -> Response {
+    tracing::error!("前端资源缺失: {path}");
+    let html = r#"<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Jitter · 界面文件缺失</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+background:#f5f6f8;color:#18212f;margin:0;padding:40px 20px;display:flex;justify-content:center}
+.card{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:28px 32px;max-width:560px}
+h1{font-size:19px;margin:0 0 10px}
+p{font-size:14px;line-height:1.8;color:#3b475c}
+li{font-size:13.5px;line-height:1.9;color:#3b475c}
+code{background:#f1f4f9;border-radius:4px;padding:1px 5px;font-size:12.5px}
+</style></head><body><div class="card">
+<h1>界面文件缺失，Jitter 后台仍在运行</h1>
+<p>程序本体启动正常，但打包时没有带上网页资源（缺少 <code>web/dist</code>），所以界面打不开。
+调度器仍在按计划执行任务，数据库也没有损坏。</p>
+<p>可以这样处理：</p>
+<ol>
+<li>重新下载或重新安装一次 Jitter（覆盖安装即可）。</li>
+<li>如果你是自己构建的：先在 <code>web/</code> 目录执行 <code>bun install &amp;&amp; bun run build</code>，
+再回到 <code>rust/</code> 执行 <code>cargo build --release -p jitter-app</code>。</li>
+<li>仍然不行的话，把下面的日志目录内容发出来，便于定位：</li>
+</ol>
+<p id="logdir">日志目录：正在获取…</p>
+<p><a href="/api/system/logs">查看运行日志接口</a> · <a href="/api/health">查看服务状态</a></p>
+</div>
+<script>fetch('/api/system/logs').then(r=>r.json()).then(d=>{const el=document.getElementById('logdir');
+if(el&&d&&d.dir)el.textContent='日志目录：'+d.dir;}).catch(()=>{});</script>
+</body></html>"#;
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
     )
         .into_response()
 }
@@ -1548,8 +1801,13 @@ pub fn build_router() -> Router {
         .route("/api/test-runs/:id", get(test_run_detail))
         .route("/api/system", get(system_info))
         .route("/api/system/environment", get(system_environment))
+        .route("/api/system/logs", get(system_logs))
+        .route("/api/system/logs/:name", get(system_log_file))
         .route("/api/system/holiday", get(system_holiday))
+        .route("/api/system/holiday/month", get(system_holiday_month))
         .route("/api/system/holiday/refresh", post(system_holiday_refresh))
+        .route("/api/database/tables", get(database_tables))
+        .route("/api/database/rows", get(database_rows))
         .route("/api/system/autostart", post(set_autostart_handler))
         .route("/api/quit", post(quit))
         .route("/api/backup/list", get(backup_list))
@@ -1563,4 +1821,39 @@ pub fn build_router() -> Router {
         .route("/api/update/apply", post(update_apply))
         // 备份导入可能携带大文件（数据库快照）。
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 4xx 是请求本身的问题，不该把后台标记成「降级」；
+    /// 只有 5xx 才算后台故障。合在一个用例里，避免共享的 LAST_ERROR 互相干扰。
+    #[test]
+    fn only_server_errors_mark_the_service_as_degraded() {
+        {
+            let mut guard = last_error_slot()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = None;
+        }
+
+        let _ = error_response(StatusCode::BAD_REQUEST, "表不存在：nope");
+        assert!(
+            last_error_slot()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none(),
+            "4xx 不应把后台标记成降级"
+        );
+
+        let _ = error_response(StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        assert!(
+            last_error_slot()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some(),
+            "5xx 必须让界面知道后台出问题了"
+        );
+    }
 }

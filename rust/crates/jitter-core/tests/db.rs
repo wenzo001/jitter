@@ -245,6 +245,77 @@ fn log_summaries_paging_and_since_window() {
 }
 
 #[test]
+fn logs_are_ordered_newest_first() {
+    // 界面上的执行记录必须「最新在最上面」，这条测试锁住这个顺序。
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = format!("{dir}\\app.db");
+    let _ = fs::remove_file(&path);
+    init_db(Some(&path)).expect("init");
+    create_task(&task_input("ordered"), "t1", 1000).expect("create");
+
+    // 故意乱序插入，并且让两条记录同一毫秒（考验 id 作为第二排序键）。
+    for (executed_at, count) in [(5000i64, 1), (9000, 2), (3000, 1), (9000, 1)] {
+        for _ in 0..count {
+            insert_log(&NewLogInput {
+                task_id: "t1".into(),
+                executed_at,
+                response_status: Some(200),
+                ..Default::default()
+            })
+            .expect("log");
+        }
+    }
+
+    let full = list_logs("t1", 100, None).expect("full");
+    assert_eq!(full.len(), 5);
+    for pair in full.windows(2) {
+        assert!(
+            pair[0].executed_at > pair[1].executed_at
+                || (pair[0].executed_at == pair[1].executed_at && pair[0].id > pair[1].id),
+            "执行记录必须按执行时间降序、同毫秒按 id 降序，实际是 {:?} -> {:?}",
+            (pair[0].executed_at, pair[0].id),
+            (pair[1].executed_at, pair[1].id)
+        );
+    }
+    assert_eq!(full[0].executed_at, 9000, "最新的一条在最上面");
+
+    // 分页之后仍然保持降序，且两页合起来不重不漏。
+    let first_page = list_log_summaries("t1", 2, None, None).expect("page");
+    let cursor = LogCursor {
+        executed_at: first_page[1].executed_at,
+        id: first_page[1].id,
+    };
+    let second_page = list_log_summaries("t1", 10, Some(cursor), None).expect("page");
+    let mut seen = first_page
+        .iter()
+        .chain(second_page.iter())
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    assert_eq!(seen.len(), 5, "两页合起来是全部记录");
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), 5, "两页之间没有重复");
+
+    // 任务卡上的「上一次执行」也是同一条规则。
+    let recent = list_recent_task_logs("t1", 3).expect("recent");
+    assert_eq!(recent.len(), 3);
+    assert!(recent[0].executed_at >= recent[1].executed_at);
+    assert!(recent[1].executed_at >= recent[2].executed_at);
+
+    cleanup(&path);
+    close_db();
+}
+
+#[test]
+fn quote_identifier_escapes_embedded_quotes() {
+    // 表名会被拼进 SQL，标识符里的双引号必须翻倍，否则语句会被破坏。
+    assert_eq!(quote_identifier("tasks"), "\"tasks\"");
+    assert_eq!(quote_identifier("a\"b"), "\"a\"\"b\"");
+    assert_eq!(quote_identifier("\"; DROP TABLE tasks; --"), "\"\"\"; DROP TABLE tasks; --\"");
+}
+
+#[test]
 fn retention_prunes_by_age_and_per_task_count() {
     let dir = temp_dir();
     let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -490,6 +561,51 @@ fn run_totals_count_successes() {
     assert_eq!(totals.runs, 4);
     assert_eq!(totals.ok, 2);
     assert!(totals.avg_duration_ms.unwrap_or(0.0) > 100.0);
+    cleanup(&path);
+    close_db();
+}
+
+#[test]
+fn database_browser_lists_tables_and_rows() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = format!("{dir}\\app.db");
+    let _ = fs::remove_file(&path);
+    init_db(Some(&path)).expect("init");
+    create_task(&task_input("browse"), "t1", 1000).expect("create");
+    insert_log(&NewLogInput {
+        task_id: "t1".into(),
+        executed_at: 1100,
+        response_status: Some(200),
+        ..Default::default()
+    })
+    .expect("log");
+
+    let tables = list_database_tables().expect("tables");
+    let names: Vec<&str> = tables.iter().map(|table| table.name.as_str()).collect();
+    assert!(names.contains(&"tasks"));
+    assert!(names.contains(&"logs"));
+    assert!(
+        !names.iter().any(|name| name.starts_with("sqlite_")),
+        "内部表不应出现：{names:?}"
+    );
+    let tasks_table = tables.iter().find(|table| table.name == "tasks").expect("tasks");
+    assert_eq!(tasks_table.row_count, 1);
+    assert!(tasks_table.columns.iter().any(|column| column.name == "id"));
+
+    let rows = list_database_rows("tasks", 10, 0).expect("rows");
+    assert_eq!(rows.total, 1);
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.rows[0].get("id").and_then(|value| value.as_str()), Some("t1"));
+
+    // 分页：偏移后没有更多行。
+    let page = list_database_rows("tasks", 1, 1).expect("page");
+    assert_eq!(page.rows.len(), 0);
+    assert_eq!(page.total, 1);
+
+    // 未知表名直接拒绝（表名不会被拼进 SQL）。
+    assert!(list_database_rows("no_such_table", 10, 0).is_err());
+
     cleanup(&path);
     close_db();
 }

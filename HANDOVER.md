@@ -1,263 +1,281 @@
-# Jitter 交接说明
+# Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-24 · v1.3.0（单任务「开机后自动执行一次」）
+> 最后更新：2026-11-25 · v2.1.9 · 单主线（Rust 后端 + Vue 前端）
+> 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
+
+---
 
 ## 一、一句话现状
 
-**Rust 版已通过与 TS 版逐接口对齐的完整审查：五步测试台、调度预览、测试留档、日志游标分页、同步立即执行、任务生命周期（停/恢复/暂停）、清理确认链全部补齐；两处自死锁与前端一个致命语法错误已修复。v1.0.1 起可直接替代 Bun 版使用。**
+Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间 → 到点自动发 → 判定成功 → 可选再发一条通知 curl。
+**仓库只有一条代码线**：Rust 后端（axum + tokio + rusqlite）+ Vue 3 前端（`web/`），
+前端产物通过 `include_dir!` 嵌进二进制，发布出来是单文件程序。
+
+早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
+Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
+
+**当前版本：v2.1.9。** 工作区改动都已提交在 `main` 上，发布走 `v*` 标签。
+接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
 ---
 
-## 二、这个项目是什么
-
-一个「定时 / 循环执行 HTTP 请求」的小工具：
-
-- 任务来源：粘贴浏览器里复制出来的 **curl 命令**（自动解析成请求），或结构化填写
-- 调度：每天在 HH:mm–HH:mm 窗口内随机一次、精确时间 ± 抖动、或每隔 N 秒/分/时/天（可加抖动、可设首跑锚点）
-- 执行前判断：可选的前置请求 + 「只在某些星期 / 某个时段 / 接通电源 / 本机 IP 匹配」的本地条件
-- 结果判定：期望状态码 / 期望正文 / 表达式（如 `data.code=0`）
-- 命中后通知：再发一个 curl
-- 网页是唯一界面：任务、日志（含请求/响应全文与截断标记）、统计、测试台、设置、数据库备份
-
-典型用途：每天自动打卡、定时签到、循环回调自己的服务。
-
----
-
-## 三、两条代码线
-
-| | TypeScript 版（线上） | Rust 版（在移植，目标转正） |
-|---|---|---|
-| 入口 | `src/index.ts` | `rust/crates/jitter-app/src/main.rs` |
-| 运行时 | Bun + Elysia | axum + tokio |
-| 数据库 | `bun:sqlite` | `rusqlite`（bundled SQLite） |
-| 前端 | `web/`（Vue 3 + antdv-next） | **同一份构建产物：Bun 读 `web/dist`，Rust `include_dir!` 嵌入** |
-| 产物 | `dist/jitter.exe` **111MB** | debug 13MB（release 预计 8–10MB） |
-| 测试 | `bun test` → **360 项** | `cargo test` → **198 项** |
-| 状态 | 功能完整，可直接用 | 核心跑通，缺桌面集成与发布 |
-
-**关键约定：前端零改动。** 前端是独立的 `web/`（Vue 3 + TypeScript + antdv-next + Vite），两个后端共用同一套 API（同路径、同状态码、同 JSON 字段）与同一份 `web/dist` 构建产物。
-
----
-
-## 四、目录地图
+## 二、目录地图
 
 ```
-src/                      TypeScript 版
-├── index.ts              启动：配置 → 数据库 → 调度器 → HTTP
-├── api.ts                全部 HTTP 路由
-├── db.ts                 SQLite schema / 迁移 / CRUD / 保留清理
-├── scheduler.ts          定时器与执行编排
-├── executor.ts           传输层（重试 / 代理回退 / 超时 / 截断）+ 前置判断 + 通知
-├── schedule.ts           调度模型（daily / interval）
-├── window.ts             跨午夜窗口、暂停区间、恢复计划
-├── condition.ts          表达式求值器（安全的类 JS 表达式）
-├── curl-parser.ts        curl 命令解析
-├── guard.ts              星期 / 时段本地判断
-├── metrics.ts            统计
-├── system.ts             版本、路径、开机自启、退出
-├── updater.ts            GitHub Releases 检查与自替换
-├── backup.ts / restore.ts 数据库备份 / 导出 / 导入 / 恢复
-├── proxy.ts              环境代理失效自动回退
-└── types.ts
-
-web/                      Vue 3 + TypeScript + antdv-next + Vite（两个版本共用）
-└── src/{App.vue,components,stores,api,types,utils}
-
 rust/
-├── crates/jitter-core/   纯逻辑库（可单测，不依赖 HTTP 框架）
-│   └── src/{condition,window,schedule,curl_parser,guard,db,executor,config,metrics,types}.rs
-└── crates/jitter-app/    可执行程序
-    └── src/{main,api,scheduler}.rs
-
-data/app.db               你的真实数据库（不要删）
-data/backups/             备份目录
+  crates/jitter-core/   纯逻辑库（无 HTTP、无 UI），可单测
+    config.rs           配置：内置默认 < 配置文件 < 环境变量
+    db.rs               SQLite schema / CRUD / 保留清理 / 只读浏览
+    schedule.rs         调度模型（daily 窗口 / 精确时间±抖动 / interval）
+    window.rs           跨午夜窗口、暂停区间
+    guard.rs            本地条件（星期 / 时段 / 工作日）
+    condition.rs        表达式求值器（受限的类 JS，不执行任意代码）
+    curl_parser.rs      curl 命令解析
+    executor.rs         传输层 + 前置判断 + 判定 + 通知（含连接重置重试）
+    holiday.rs          中国法定节假日（含调休上班日）
+    logging.rs          运行日志落盘 / 按天轮转 / 清理
+    backup.rs / updater.rs / host.rs / system.rs / testbench.rs / metrics
+  crates/jitter-app/    可执行程序
+    main.rs             启动顺序、panic 兜底、启动失败弹窗、tracing 初始化
+    api.rs              全部 HTTP 路由
+    scheduler.rs        调度器（定时器 + 执行编排）
+    tray.rs             Windows 托盘（macOS / Linux 为空实现）
+web/                   前端（Vue 3 + TS + antdv-next + Vite + Pinia + vue-i18n + vueuse）
+  src/api/              请求封装（client.ts 是统一入口）
+  src/components/       组件
+  src/stores/           Pinia（app / tasks / logs / diagnostics）
+  src/locales/          zh-CN / en-US 文案
+  tests/                vitest 单测
 ```
 
 ---
 
-## 五、怎么跑 / 怎么测 / 怎么打包
+## 三、不能随便碰的约定
 
-### TypeScript 版
+1. **接口路径与 JSON 字段是契约**。前端 `web/src/api/*.ts` 与后端 `rust/crates/jitter-app/src/api.rs` 必须一一对应，
+   `web/src/types/*.ts` 是类型侧的同一份契约。改任何 `/api/*` 路径或字段名，三处一起改。
+2. **`web/dist` 会被编译进二进制**。改前端后必须先 `cd web && bun run build`，再 `cargo build`。
+3. **release profile 是 `panic = "unwind"`**，不是 abort。abort 会让任意一处 panic 直接杀掉整个进程；
+   unwind 之后单个请求里的 panic 只结束那一次连接。这条不要改回去。
+4. **数据库只读浏览是严格只读的**。`list_database_rows` 的表名必须命中白名单，否则 400。不要为了方便放开。
+5. **手动执行跳过执行条件**。`executor.rs` 里 `RunSource::Manual` 会跳过所有前置判断。这是有意设计，
+   改之前先确认 UI 文案同步。
+6. **节假日判定在服务端**。前端不重复实现节假日语义，一切以 `/api/system/holiday*` 为准。
+7. **日志按本地日期轮转**（`jitter-YYYY-MM-DD.log`，保留 14 天，`JITTER_LOG_DAYS` 可调）。
+   **不要换成 `tracing-appender`**：它按 UTC 换文件，国内用户早上 8 点就"昨天的日志"跑到今天去了。
+8. **相对 `dbPath` 的基准是「配置文件目录 → exe 目录 → CWD」，不是 CWD**（`config.rs` 的 `base_dir_for` /
+   `resolve_db_path_absolute`）。这条是为了避免"在仓库根目录跑开发版，把用户正式库 `data/app.db` 直接写坏"。
+   仓库根 `jitter.config.json` 是**开发/容器默认配置**：`port` 3111、`dbPath` `.tmp/dev/app.db`，
+   改它之前先确认 Docker 的 `PORT` / `JITTER_DB_PATH` 环境变量没被绕过。
+
+---
+
+## 四、踩过的坑（别再踩一遍）
+
+### 4.1 Windows 上 `append(true)` 打开的文件，目录项里的大小是 0
+只开 `FILE_APPEND_DATA` 权限时，Windows 要等句柄关闭才更新目录项里的文件大小，
+于是「运行日志」面板读到的文件大小一直是 0 字节。
+**修法**：打开日志文件时同时给 `.write(true)`；`list_files` 用 `fs::metadata(path)` 而不是 `DirEntry::metadata()`。
+
+### 4.2 `panic = "abort"` 会让整个进程死掉
+一次请求里的 panic 直接杀掉服务，用户看到的是「程序没了」。改成 unwind 后单请求失败不影响其它功能，
+再配合 `main.rs` 的 panic hook（落盘 + stderr）和启动失败弹窗，异常才看得见、救得回来。
+
+### 4.3 Windows 发布版没有控制台
+`#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]`。
+发布版里日志文件是**唯一**的线索，所以 `init_tracing` 必须同时写控制台和文件，文件写失败也不能影响启动。
+
+### 4.4 本机编译会 os error 1455
+Windows 页面文件不够。编译前设 `CARGO_PROFILE_DEV_DEBUG=0`，并用 `--jobs 1`。
+
+### 4.5 只有一个实例能跑
+`acquire_single_instance()` 抢命名互斥体。要同时跑两个实例时设 `JITTER_ALLOW_MULTI_INSTANCE=1`。
+互斥体句柄是 `isize`（Copy 类型），`mem::forget` 对它没作用——**不关闭句柄**才是让它活到进程结束的关键。
+
+### 4.6 vue-i18n 的文案里不能出现裸的 `|`
+vue-i18n 消息语法把 `|` 当复数分隔符。文案里写逻辑或 `||` 会在**编译期**抛
+`SyntaxError: Plural must have messages`（@intlify 错误码 11），用到那条文案的组件直接渲染失败。
+**症状极其隐蔽**：只有在切换语言、真正渲染到那条文案时才炸，页面看起来还挺正常。
+**修法**：文案里不写裸 `|`（改用"逻辑或"这种文字）。
+**防回归**：`web/tests/i18n-compile.test.ts` 用 `@intlify/message-compiler` 把两份文案逐条编译一遍，改文案后必须跑。
+
+### 4.7 vueuse 的 `useIntervalFn` 默认 `immediate: true`
+写 `{ immediate: false }` 会让**定时器根本不启动**（`if (immediate && isClient) resume()`）。
+`stores/diagnostics.ts` 的健康轮询曾经这么写，结果「后台没响应」横幅永远不会出现——
+用户看到的是界面卡在旧数据上，没有任何提示。
+**防回归**：`web/tests/diagnostics.test.ts` 里用 fake timers 断言轮询真的在跑。
+
+### 4.8 Vue 模板里的空格会被折叠
+`<span>{{ label }} </span>{{ value }}` 渲染出来是 `labelvalue`。要间距就用 CSS margin 或 `&nbsp;`，
+别指望模板里的空格。
+
+### 4.9 手工 vite codeSplitting 会造成循环依赖
+手动拆 antd / vue chunk 后运行时报 `TypeError: nt is not a constructor`。
+字节数与自动分包相同，已放弃手工分包。**别再试。**
+
+### 4.10 `tracing_subscriber` 的 `Filter` trait 路径
+`tracing_subscriber::filter::Filter` 不存在，正确是 `tracing_subscriber::layer::Filter`；
+`enabled` 的第二个参数是 `Context`（不是 `&Context`）。
+
+### 4.11 配置文件坏了不等于要换数据库
+相对 `dbPath` 的基准是「配置文件目录 → exe 目录 → CWD」。
+如果配置文件解析失败时把基准退回 exe 目录，用户自定义的 `dbPath` 就被丢掉了，
+程序会拿默认的 `data/app.db` 指向另一个库——界面看上去"任务全没了"。
+**规则**：只要找到了配置文件，基准目录就按它算，跟配置内容读没读出来无关。
+**防回归**：`main.rs` 的 `a_broken_config_keeps_its_own_directory_as_the_data_base`。
+
+### 4.12 4xx 不等于"后台故障"
+接口 400/404（查一张刚被删掉的表、翻页游标坏了）是请求本身的问题，
+把它记进 `LAST_ERROR` 会让界面永久挂着"后台降级"横幅。
+**规则**：只有 5xx 才算后台故障；4xx 只写日志。
+**防回归**：`api.rs` 的 `only_server_errors_mark_the_service_as_degraded`。
+
+### 4.13 按字节分页读日志会切碎中文
+`read_file` 按字节偏移读，`String::from_utf8_lossy` 会把被切断的中文字变成 `�`。
+**修法**：读完先算出"完整字符前缀"，残缺的那几个字节留给下一段（`next_offset` 只算完整部分）。
+**防回归**：`logging.rs` 的 `utf8_prefix_keeps_only_complete_characters`。
+
+---
+
+## 五、构建与测试
 
 ```bash
-bun run start        # 启动（默认 http://127.0.0.1:3000）
-bun run dev          # 热重载
-bun test             # 360 项测试
-bun run typecheck    # tsc --noEmit
-bun run build        # 打包 → dist/jitter.exe（111MB）
+# 前端
+cd web && bun install && bun run typecheck && bun run test && bun run build
+
+# 后端
+cd rust && cargo test -p jitter-core --jobs 1
+cd rust && cargo check --workspace --all-targets --jobs 1
+cd rust && cargo build --release -p jitter-app --jobs 1
 ```
 
-### Rust 版
+Windows 本机编译务必 `set CARGO_PROFILE_DEV_DEBUG=0`，否则会 os error 1455。
+
+**改动落点与对应测试**：
+
+| 改动 | 必须跑的测试 |
+| --- | --- |
+| `rust/crates/jitter-core/**` | `cargo test -p jitter-core --jobs 1` |
+| `web/src/**` | `cd web && bun run typecheck && bun run test` |
+| `web/src/locales/**` | 必须包含 `bun run test`（i18n-compile 用例会逐条编译文案） |
+| `web/src/**` 界面相关 | 改完还要开浏览器实测（见下） |
+| 接口路径 / 字段 | 前后端一起改，并同步 `web/src/types/*` |
+
+### 界面回归怎么测
+
+起一个**副本实例**（绝不能动用户自己的 `data/app.db`）：
 
 ```bash
-cd rust
-cargo run -p jitter-app                 # 直接跑
-cargo test -p jitter-core               # 198 项测试
-cargo build --release -p jitter-app     # 出包
+# 1) 复制真实库并把任务置为 stopped，避免真的发请求
+cd D:/fwd/code/Jitter
+bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.status='stopped'
+
+# 2) 用副本配置启动（端口 3111）
+#    JITTER_CONFIG=.tmp/preview/jitter.config.json
+#    JITTER_ALLOW_MULTI_INSTANCE=1   （用户自己的实例在跑，不设会被单实例锁拦下）
+#    JITTER_DB_PATH=.tmp/preview/app.db
+#    & rust/target/debug/jitter.exe
 ```
 
-⚠️ **本机编译必须加这两个环境变量**，否则会报"元数据损坏"：
+然后用内置浏览器打开 `http://127.0.0.1:3111` 逐个点：顶栏时钟 / 日历 / 数据库 / 运行日志 / 诊断 / 设置 /
+任务表单 / 试跑 curl / 任务卡「更多」/「立即执行」，
+最后用浏览器控制台查询（console kind）确认没有 error。
 
-```bash
-export CARGO_PROFILE_DEV_DEBUG=0        # 关 debuginfo，省内存
-cargo build ... --jobs 1                # 串行编译
-```
-
-原因见第九节。
-
-### 环境变量
-
-| 变量 | 作用 | 默认 |
-|---|---|---|
-| `PORT` | 端口 | 3000（被占用时自动 +1） |
-| `JITTER_DB_PATH` | 数据库路径 | `data/app.db` |
-| `JITTER_CONFIG` | 配置文件路径 | `jitter.config.json` |
+> 用户自己还有一个真实实例在跑：`D:\下载\Compressed\jitter.exe`（端口 3000/3001）。
+> **不要擅自重启它**，需要时先问用户。
 
 ---
 
-## 六、你必须要知道的几个设计决策
+## 六、本轮已经做完的事（可以直接接手）
 
-1. **窗口实例按「开始日」归属**。23:50–00:10 属于开始那天，所以 D+1 的 00:05 仍是 D 的这一次。暂停、星期判断、恢复计划全依赖这条。
-2. **暂停是整自然日**，不是「从现在起 N×24 小时」。「今天开始」会连今天下午的窗口一起跳过；「明天开始」不碰今天。
-3. **错过判定**：daily 看窗口是否仍开着；interval 有 5–60 秒的迟到容差，超了记 `missed` 而不是补跑。
-4. **执行器只对「连接被重置」重试**（最多 2 次，带 `Connection: close`）。HTTP 错误码是正常响应，不重试。
-5. **环境代理探测超时会自动回退直连**，但用户显式 `-x` 指定的代理绝不改写。
-6. **响应体按 100 KiB 截断**，截断的正文不参与「期望正文 / 表达式」判定（会判失败而不是误判成功）。
-7. **备份用 `VACUUM INTO`**：活库上直接做完整快照（自动合并 WAL，不停服务），产物是标准 SQLite 文件。
-8. **恢复前自动另存当前状态**，所以恢复永远不会悄悄丢数据。
+**后端健壮性**
+- panic 兜底：`panic = "unwind"` + `main.rs` 的 panic hook 落盘 + 启动失败弹 `MessageBoxW`。
+- `/api/health` 扩展：version / uptimeMs / dbOk / dbPath / logDir / lastError。
+- 错误响应带 `hint` 字段，前端能直接显示「下一步该做什么」。
+- 新增 `/api/system/logs` 与 `/api/system/logs/:name`，前端「运行日志」面板可读、可复制。
+- 运行日志按本地日期落盘轮转，保留 14 天。
+- `executor.rs` 补齐了「连接被重置自动重试」（之前只是死常量 + README 吹牛），含 3 个单测。
 
----
+**前端健壮性**
+- `api/client.ts` 重写：`ApiError`、错误分类、GET 自动重试 2 次、默认 hint。
+- `stores/diagnostics.ts`：全局异常收集（上限 60 条）、服务状态 ok/degraded/down、诊断报告。
+- `main.ts`：`app.config.errorHandler` + `unhandledrejection` + `error` 全局捕获，并 `console.error` 打完整堆栈。
+- `ErrorBoundary.vue` / `DiagnosticsDialog.vue` / `RuntimeLogsDialog.vue`：错误边界、诊断面板、运行日志面板。
+- `App.vue`：后台无响应横幅（重新检测 / 查看运行日志）、主界面错误边界包裹。
 
-## 七、数据安全（重点）
+**国际化 / 依赖**
+- vue-i18n 11 接入，678 条文案中英各一份，`MessageSchema = typeof zhCN` 保证 key 一致。
+- 顶栏 `a-segmented` 切换语言，立即生效 + localStorage 持久化 + 同步 `<html lang>`，antdv-next locale 同步。
+- **后端返回的动态数据不翻译**（任务名、schedule_description、日志内容、后端错误文本），这是有意约定。
+- vueuse 14 接入：剪贴板、localStorage、定时器、可见性都用 vueuse，不再手写。
+- RUST_LOG 回到标准 `tracing_subscriber::EnvFilter`（自写 LogFilter 已删）。
 
-- 真实库：`data/app.db`（WAL 模式，`-wal` / `-shm` 是它的搭档文件，别单独删）
-- 已有备份：`data/backups/jitter-20261123-112049.db`（含 2 个任务）
-- 网页「设置 → 备份与恢复」支持：新建备份 / 下载导出 / 上传导入 / 恢复 / 删除
-- 路径穿越已防：备份文件名严格白名单，`../app.db`、`C:\evil\app.db` 都被拒绝（有测试）
-- **删除数据库文件之前先做备份**；恢复旧备份后启动会自动跑迁移，老 schema 也能升上来
+**本轮修掉的三个真 bug**
+1. vue-i18n 文案里的 `||` 触发编译崩溃（见 4.6）。
+2. vueuse `useIntervalFn({ immediate: false })` 导致「后台没响应」检测从未生效（见 4.7）。
+3. 任务卡 `Schedule每天 …` 少一个分隔符（模板空格被折叠，见 4.8）。
 
----
-
-## 八、当前进度
-
-### TypeScript 版：功能完整 ✅
-
-任务 CRUD 与拖动排序、三种调度、前置判断（curl + 星期/时段）、通知、日志分页与全文、执行中断、测试台五步链、统计、日志清理与保留策略、设置面板（版本/自启/升级/退出）、数据库备份导出导入恢复。
-
-### Rust 版：核心跑通 ✅
-
-| 模块 | 状态 | 测试 |
-|---|---|---|
-| condition（表达式求值） | ✅ | 23 |
-| window（窗口 / 暂停 / 恢复） | ✅ | 47 |
-| schedule（daily / interval / 锚点 / 漂移） | ✅ | 37 |
-| curl_parser（分词 / 参数映射） | ✅ | 46 |
-| guard（星期 / 时段） | ✅ | 13 |
-| db（同 schema / 迁移 / CRUD / 清理） | ✅ | 13 |
-| executor（重试 / 代理 / 超时 / 截断 / 通知） | ✅ | 19 |
-| config / metrics | ✅ | — |
-| api（axum 全核心路由） | ✅ | — |
-| scheduler（tokio 定时器） | ✅ | — |
-
-实测：启动 → 首页 52KB + app.js 114KB 正常 → 从 curl 建任务 → 触发执行 → 200 入库 `matched=1`。
-
-### 还缺什么（按顺序）
-
-~~原五项已全部完成~~；v1.0.1 完成了「Rust 与 TS 功能完全对齐」的全面审查，修复内容：
-
-- **补齐的接口**：`POST /api/schedule/preview`（接下来 7 次预览）、`POST /api/test/run`（测试台五步链，移植为 `jitter-core/src/testbench.rs`）、`GET /api/tasks/:id/test-runs` 与 `GET /api/test-runs/:id`（测试留档）、`GET /api/logs/cleanup/preview`。
-- **修复的契约错位**：任务载荷按前端真实形状解析（**扁平的 `notify_enabled`/`notify_curl`/`precheck_*` 字段与文本型 headers**——v1.0.0 误按对象解析，通知与前置判断会被静默丢弃）；`/api/tasks/:id/run` 改为同步返回完整执行结果；任务视图补 `running`/`running_since`/`schedule_error`；日志分页改 `before` 游标 + `has_more` + 保留窗口过滤；`/api/metrics`、`/api/logs/cleanup*` 改为直接返回对象（与 TS 版一致）；`/api/config` 补生效保留天数；全部校验规则对齐（状态码 100–599、名称 200 字、表达式校验、通知必填 curl、前置判断组合规则）。
-- **修复的死锁（两处）**：`scheduler::finish_run` 持锁调 `schedule_new_task`（第一次执行后调度器永久冻结）；`db::get_log_cleanup_preview` 持锁调 `get_log_storage_usage`。
-- **修复的前端致命 bug**：`app.js` 顶层 `formatBytes` 重复声明——ES module 里是 SyntaxError，**整个前端不执行**（TS 版页面同样受害，PM2 里跑的旧进程没 reload 所以没发现）。
-- 任务生命周期对齐：resume 恢复 stopped 任务（状态回 active + 清暂停）、stop 清暂停、暂停对 stopped 任务返回 400。
-- v1.0.5：执行记录区分触发来源——`logs.run_source`（`scheduled` 定时 / `manual` 页面立即执行），页面手动执行的那条显示「手动」徽标；调度器新增 `[scheduler] arm/fire/execute` 追踪日志。
-- v1.0.8：拖动排序持久化修复（`backfill_sort_order` 原来每次启动都无条件重写，
-  改为仅列新增时回填一次）；任务卡操作区精简为 立即执行/编辑/更多/删除，
-  试跑、暂停、停止收进「更多」下拉；立即执行加二次确认；长标题单行省略；
-  页头显示版本号；favicon 与托盘图标同一套设计。
-- v1.0.9：修复两个执行语义问题——①定时执行完成后改用 `plan_schedule_after`
-  （daily 排明天 / interval 锚定网格），失败不会再在同一窗口内连环重跑
-  （此前会每分钟重试到窗口结束）；②环境代理回退条件从「仅超时」放宽为
-  「第一轮未拿到响应即回退直连」——代理软件关掉后进程里残留的代理变量
-  不再让所有请求秒失败（与 TS withProxyFallback 对齐）；错误日志带完整
-  错误链（DNS / TCP / TLS / 代理层级可见）。
-- v1.0.10：执行语义定稿「一次触发 = 一次调用」——删除未使用的连接重置重试，
-  失败只记一条日志，不重试、不补跑；「默认跳过 TLS 证书校验」做成全局设置
-  （设置页「请求安全」，默认勾选，任务级 -k 优先）；启动时清理超过一天的
-  升级下载临时目录。压测：**100 条任务（35 窗口 + 35 精确抖动 + 30 循环）
-  5 分钟曲线：工作集 15.9→16.4MB 后平稳、物理提交 ~3.5MB、句柄 202 稳定、
-  CPU 累计 0.3s**（约 0.1% 单核），无泄漏趋势。
-- v1.3.0：新增单任务配置 `run_on_startup`（默认关闭）。Jitter 启动 15 秒后对开启该选项的 active 任务各执行一次，仍检查执行条件；日志 `run_source='startup'`，页面显示「开机」/「开机执行」。只在进程启动时触发，恢复备份/导入不会触发；旧库自动补列，默认 0，不影响已有任务。
-- v1.2.0：界面按「粘贴请求 → 什么时候执行 → 更多设置」重排；成功条件默认折叠，编辑自定义条件时自动展开；删除收进「更多」，状态改为「调度中 / 已停用」；术语统一为「成功 / 条件检查」；校验失败自动聚焦；移动端顶栏换行。仅布局、文案与交互调整，未改数据库结构、请求字段与执行逻辑。
-- v1.1.1：本机 IP 条件只按逗号分组，含空格会提示格式错误（避免「10.1. *」被拆成两个模式后误匹配全部 IP）；Linux 防休眠抑制进程退出后自动重启；任务卡片说明标明「立即执行」不受前置条件限制。
-- v1.1.0：执行条件新增「接通电源（AC）」与「本机 IP 匹配」（`precheck_require_ac` / `precheck_ip_pattern`，`*` 匹配任意数字或点、多组逗号分隔）；条件只约束定时自动执行，页面「立即执行」不受限制。设置页新增「接通电源时防止系统休眠」：Windows 用 `SetThreadExecutionState`，macOS 用 `caffeinate`，Linux 用 `systemd-inhibit`，拔掉电源自动恢复系统休眠策略。新增 `GET /api/system/environment` 供表单显示当前电源与本机 IP。
-- **资源占用实测**（v1.0.5，2 个任务、页面关闭）：工作集约 13 MB、物理提交约 2 MB、CPU 全天接近 0；tokio 固定 2 个工作线程（原按 CPU 核数开会到 17 线程）。Bun 版服务通常在几十 MB 量级。- 浏览器实测通过：页面加载/轮询、表单建任务（含通知）、立即执行（同步结果 + 命中 + 真实发通知）、执行记录、设置页（版本/自启/备份/对真实 Release 的升级检查）、测试台五步链、统计条、调度预览。
-
-原来的五项：
-
-1. **托盘** ✅：`jitter-app/src/tray.rs`，`tray-icon` + `muda`（仅 Windows 目标依赖）。图标为程序生成的 64×64 渐变圆角方块 + 白色表盘（4× 超采样抗锯齿）。**发布版为 GUI 子系统（`windows_subsystem = "windows"`，无控制台窗口，debug 版保留控制台）**，双击即静默运行。菜单：打开界面 / 重启 / 开机自启（勾选项，点击即时切换）/ 退出；左键点托盘直接打开界面。菜单统一在托盘线程的 PeekMessage 循环里处理（muda 的菜单项是 Rc，不可跨线程）。**macOS/Linux 上托盘暂缺**（无原生事件循环可用，以纯服务形态发布），依赖只在 `cfg(windows)` 下引入，不影响三平台 CI。
-   - **单实例保护**：`main.rs` 启动时抢命名互斥体（`Local\JitterSingleInstance`）。重复启动不会再起第二个调度器（否则两个进程会各跑一遍同一套任务），只会读取 `%APPDATA%\Jitter\jitter.runtime.json` 里的实际端口、打开已有实例的页面然后退出。
-   - **自启条目固定工作目录**（Windows `start /D`、macOS `WorkingDirectory`、Linux `Path=`）：否则从 Startup 目录启动时相对的 `data/app.db` 会落到别处，数据分叉。
-2. **开机自启 / 退出 / 自动升级** ✅：`jitter-core/src/system.rs`（三平台纯文件写，与 TS `system.ts` 完全对齐）与 `jitter-core/src/updater.rs`（GitHub Releases 检查 / 下载 / zip 解压 / 自替换，Windows 走「等进程退出的辅助 cmd」）。退出经 `main.rs` 的 `quit_token()` 统一走优雅关停，托盘菜单与设置页共用。
-3. **备份 / 导出 / 导入 / 恢复** ✅：`jitter-core/src/backup.rs` + `api.rs` 全部 `/api/backup/*` 路由（`VACUUM INTO`、路径穿越白名单、SQLite 头校验、恢复前安全快照、恢复后自动重启调度器）。注意 `axum` 的 body 上限已放宽到 256MB 以支持大库导入。
-4. **GitHub Actions** ✅：`.github/workflows/ci.yml`（Rust core 双平台 + TS 参考测试）与 `.github/workflows/release.yml`（打 `v*` tag 触发；先跑两侧测试，再出 `jitter-windows-x64.zip` / `jitter-macos-arm64.zip` / `jitter-macos-x64.zip` / `jitter-linux-x64.zip` / `jitter-linux-arm64.zip` 五个资产并附 `.sha256`，资产名是升级逻辑的契约，不能改）。
-5. **转正** ✅：README 已把 Rust 版标为发布物、TS 版标为参考实现。
+**其它**：README 重写为用户使用文档；Bun/TS 旧代码线彻底删除；CI 门禁加上 `bun run test`；
+Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --workspace --all-targets` 0 warning）。
 
 ---
 
-## 九、环境坑（踩过的，别再踩）
+## 七、还没做完的事（接手从这里开始）
 
-### Windows 提交内存耗尽（最容易误判）
+1. **决定要不要提交**：目前全部未提交，改动量很大（30+ 文件）。
+2. **用户自己的实例需要更新**：新功能要 `cargo build --release` 后重启 `D:\下载\Compressed\jitter.exe` 才生效，
+   **必须先问用户**再动。
+3. **未实跑验证的**：`docker build`（本机没有 docker 命令），Dockerfile 改动后没跑过。
 
-症状：
+## 七之二、本轮最终状态（已实测）
 
-```
-error[E0786]: found invalid metadata files for crate `xxx`
-crate `xxx` required to be available in rlib format, but was not found
-failed to mmap ... rlib: 页面文件太小，无法完成操作 (os error 1455)
-target/debug/deps 目录整个消失
-```
+**测试**
 
-**这不是缓存坏了，也不是杀软**，是页面文件/提交内存不足导致 mmap 失败。解法：`CARGO_PROFILE_DEV_DEBUG=0` + `--jobs 1`。排查时先在完整错误里搜 `1455`。
+| 项目 | 结果 |
+| --- | --- |
+| `cargo test -p jitter-core --jobs 1` | **241 项全绿** |
+| `cargo check --workspace --all-targets --jobs 1` | **0 warning / 0 error** |
+| `bun run typecheck` | 退出码 0 |
+| `bun run test` | **5 文件 / 57 用例全绿** |
+| 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn |
 
-### 数据库/配置是进程级单例
+**发布体积（2026-11-25 实测）**
 
-Rust 的 `db` 与 `config` 都是全局单例。**涉及它们的测试必须整段持锁**（不是只在初始化时持锁），否则并发测试会互相换掉全局连接，症状是 `UNIQUE constraint failed` 或 `FOREIGN KEY constraint failed`。
+| 项 | 大小 |
+| --- | --- |
+| `rust/target/release/jitter.exe` | **7,584,256 B（7.23 MB）** |
+| zip（deflate-6） | **3,169,860 B（3.02 MB）**，CI 的 `zip -9` 还会再小一点 |
+| `web/dist/assets/index-*.js` | 1,687,282 B（gzip 465 KB） |
+| `web/dist/assets/index-*.css` | 20,944 B |
 
-### 其它
+> 对比本轮开工前（7,446,528 B / zip 3.07 MB）：**整体更小了**。
+> 拆解：i18n 让前端 +135 KB 原始体积，但压缩率高，zip 反而小了；
+> 标准 `EnvFilter` 比自写 `LogFilter` 大约 265 KB（3.7%），换来标准 `RUST_LOG` 语义
+> （级别 + 目标前缀 + span），按「能用开源就用开源，体积不受影响就用开源」保留。
+> release profile 已是 `opt-level="z" + lto + codegen-units=1 + strip=true`，没有进一步空间。
 
-- Rust 嵌入前端用 `include_dir!("$CARGO_MANIFEST_DIR/../../../web/dist")`，`build.rs` 会检查 `web/dist/index.html` 是否存在；改完前端必须 `bun run build` 再 `cargo build`（否则嵌入的是旧产物）
-- Bun 在本机非交互 shell 下 `node`/`npm` 可能找不到，跑 bun 前 `export PATH=...:<bun 目录>`
-- 本机 bash 的 `cd` 钩子会打印一条 fnm 报错并返回非零码：**`cd X && cmd` 会被短路成失败**，必须写 `cd X; cmd`；cargo 全路径 `/c/Users/lhcz-fu/.cargo/bin/cargo.exe`
-- `(... &)` 起的后台进程会随 shell 退出而死，跨调用要用工具的后台任务
-- Elysia 收 octet-stream 时 body 可能是 `ArrayBuffer` 或 `Uint8Array`，两者都要接；客户端必须显式带 `Content-Type: application/octet-stream`
-- `logs` 的 `*_options` 列是 `NOT NULL`，写 `"{}"` 而不是 `NULL`
-- 后端单线程设计（TS 版）：任何可能长时间阻塞的操作都要分批（保留清理按 5000 行一批）
-- Rust 升级检查的代理回退链：环境变量代理 → Windows 注册表系统代理（Clash 一类写的 `ProxyServer`）→ 直连；本机 curl/reqwest 不带 `-x` 直连不了 GitHub，`git` 走的是 `http.proxy=127.0.0.1:7897`
+**界面实测结论**
+- 顶栏在窄窗口下是「第一行品牌 + 时钟 / 第二行整排按钮」两段式，不再从按钮中间断开。
+- 左右两块面板等高填满，各自内部滚动，不再一边留白。
+- 执行记录面板头：标题 + 副信息归一段，按钮整组换行，不会只掉下一个「刷新」。
+
 
 ---
 
-## 十、改动时的红线
+## 八、发布
 
-1. **不要动 API 契约**（路径、字段名、状态码）；改前端时同步检查 Rust 版 `api.rs` 与 `web/src/api/*`
-2. **不要改 SQLite schema 而不加迁移**：只能 `ensure_column` 追加，不能改/删已有列
-3. **改调度语义必须同时跑两边测试**：`bun test` 与 `cargo test -p jitter-core`
-4. **改上传/恢复/清理这类破坏性接口**，先手动跑一遍"备份 → 改数据 → 恢复"回路
-5. 提交前：`bun run typecheck && bun test`，Rust 侧 `cargo test -p jitter-core --jobs 1`
-6. **持锁不要再锁**：`scheduler::state()` 与 `db` 的全局 Mutex 都不可重入——任何"锁内调用另一个会拿锁的函数"都会自死锁（v1.0.0 之前 `finish_run` 和 `get_log_cleanup_preview` 各有一处，症状是接口无响应挂起）。前端是 Vue 工程：改完必须 `bun run typecheck && bun run build`，Rust 侧再 `cargo build` 重新嵌入，最后在浏览器里真实打开一次页面。
+- 打 `v*` 标签触发 `.github/workflows/release.yml`。
+- **资产名必须保持 `jitter-<platform>-<arch>.zip`**（platform ∈ windows/macos/linux，arch ∈ x64/arm64），
+  内置升级逻辑按这个名字找包，改名会让升级找不到。
+- 包内只有 `jitter.exe`（Windows）或 `jitter`（其它平台），同时发布同名 `.sha256`。
+- 五个平台：windows-x64、macos-arm64、macos-x64、linux-x64、linux-arm64。
+- `Dockerfile` 是三阶段（前端 → Rust 构建 → debian-slim 运行），别把 `rust/target` 拷进构建上下文（本地有十几 GB）。
+- 本机没有 docker 命令，Dockerfile 改动后未实跑验证过。
 
 ---
 
-## 十一、发布怎么打
+## 九、文档同步约定
 
-```bash
-# 提交 + 推送（CI 会跑两侧测试）
-git push
-
-# 打 tag 触发 Release 工作流（等 Actions 出完资产即可下载）
-git tag v1.0.1 && git push origin v1.0.1
-```
-
-升级逻辑按资产名找当前平台的 zip（`jitter-<platform>-<arch>.zip`），所以资产名是契约。**新版本的 tag 必须大于二进制里的 `CARGO_PKG_VERSION`（workspace version）才会被判定为可升级**：发布前把 `rust/Cargo.toml` 的 `workspace.package.version` 与 `package.json` 一起 bump，再打对应 tag。
-
-老用户迁移（例如从 PM2 管理的 TS 版）：停掉旧进程 → 下载 zip 解压运行新版 → 网页「设置 → 备份与恢复」上传旧库备份（或直接用旧 `data/app.db` 的备份）→ 点「恢复」→ 勾选「开机自启」。
+- **README.md 面向用户**（怎么用、怎么排查、怎么升级），**本文面向维护者**（架构与约定）。
+- 改动命令、路径、字段名、环境变量、配置项时，两份文档都要核对。
+- 文档里不写「以后补」这类空洞句子；拿不准就去读代码。

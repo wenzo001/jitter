@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { BackupEntry, HolidayDay, HolidayYearMeta, Settings, UpdateInfo, UpdateProgress } from '@/types/system'
 import { getSettings, updateSettings, quitApp, setAutostart } from '@/api/system'
+import { BACKEND_MARKERS } from '@/api/client'
 import {
   applyUpdate as applyUpdateApi,
   backupDownloadUrl,
@@ -25,6 +27,8 @@ const emit = defineEmits<{
   'update:open': [value: boolean]
   cleanup: []
 }>()
+
+const { t } = useI18n()
 
 const app = useAppStore()
 const tasks = useTasksStore()
@@ -55,25 +59,36 @@ const updateError = ref('')
 const confirmOpen = ref(false)
 const confirmTitle = ref('')
 const confirmContent = ref('')
-const confirmOkText = ref('确定')
+const confirmOkText = ref(t('common.ok'))
 const confirmDanger = ref(true)
 const confirmBusy = ref(false)
 let confirmAction: (() => Promise<void>) | null = null
 
-const retentionOptions = [0, 7, 14, 30, 60, 90, 180, 365].map((days) => ({
-  value: days,
-  label: days === 0 ? '不限制（永久保留）' : `最近 ${days} 天`,
-}))
+const retentionOptions = computed(() =>
+  [0, 7, 14, 30, 60, 90, 180, 365].map((days) => ({
+    value: days,
+    label:
+      days === 0
+        ? t('settings.retentionForever')
+        : t('settings.retentionDays', { days }),
+  })),
+)
 
 const updateSummary = computed(() => {
   const info = updateInfo.value
   if (!info) return ''
-  if (info.error && !info.latest) return `检查失败：${info.error}`
-  if (!info.latest) return '还没有发布任何版本（仓库里暂无 Release）。'
-  if (!info.available) return `当前版本 v${info.current} 已是最新（最新发布 ${info.latest}）。`
-  return `发现新版本 ${info.latest}（当前 ${info.current}）${
-    info.asset ? `，安装包 ${formatBytes(info.asset.size)}` : ''
-  }`
+  if (info.error && !info.latest) return t('update.summaryFailed', { error: info.error })
+  if (!info.latest) return t('update.summaryNoRelease')
+  if (!info.available) {
+    return t('update.summaryUpToDate', { current: info.current, latest: info.latest })
+  }
+  return info.asset
+    ? t('update.summaryNewAsset', {
+        latest: info.latest,
+        current: info.current,
+        size: formatBytes(info.asset.size),
+      })
+    : t('update.summaryNew', { latest: info.latest, current: info.current })
 })
 
 watch(
@@ -107,7 +122,10 @@ async function loadBackups() {
     backups.value = data.backups ?? []
     backupDir.value = data.backup_dir ?? ''
   } catch (err) {
-    backupDir.value = err instanceof Error ? `备份列表读取失败：${err.message}` : '备份列表读取失败'
+    backupDir.value =
+      err instanceof Error
+        ? t('backup.listFailed', { error: err.message })
+        : t('backup.listFailedSimple')
     backups.value = []
   }
 }
@@ -120,7 +138,9 @@ async function saveRetention() {
     await updateSettings({ logRetentionDays: retention.value })
     await app.loadConfig()
     app.setStatus(
-      retention.value > 0 ? `已设置保留最近 ${retention.value} 天的日志` : '已取消日志保留期限',
+      retention.value > 0
+        ? t('settings.statusRetentionSet', { days: retention.value })
+        : t('settings.statusRetentionCleared'),
     )
     await tasks.load()
     await logs.load(tasks.selectedId, { reset: true, pageSize: app.config.logsPageSize })
@@ -141,11 +161,11 @@ async function toggleSetting(key: 'skipTlsVerify' | 'preventSleepOnAc', value: b
     app.setStatus(
       key === 'skipTlsVerify'
         ? value
-          ? '已开启：默认跳过 TLS 证书校验'
-          : '已关闭默认跳过（仅 -k 生效）'
+          ? t('settings.statusSkipTlsOn')
+          : t('settings.statusSkipTlsOff')
         : value
-          ? '已开启：接通电源时防止系统休眠'
-          : '已关闭：恢复系统默认休眠策略',
+          ? t('settings.statusSleepOn')
+          : t('settings.statusSleepOff'),
     )
   } catch (err) {
     if (settings.value) settings.value[key] = previous ?? !value
@@ -158,7 +178,7 @@ async function toggleAutostart(value: boolean) {
   try {
     const data = await setAutostart(value)
     await app.loadSystem()
-    app.setStatus(data.autostart ? '已设置开机自启' : '已取消开机自启')
+    app.setStatus(data.autostart ? t('settings.statusAutostartOn') : t('settings.statusAutostartOff'))
   } catch (err) {
     app.setStatus(err instanceof Error ? err.message : String(err), true)
     await app.loadSystem()
@@ -175,13 +195,26 @@ async function refreshHoliday() {
   try {
     const status = await app.refreshHoliday()
     if (status?.errors?.length) holidayErrors.value = status.errors
-    else app.setStatus(status?.refreshed?.length ? '节假日数据已更新' : '节假日数据没有变化')
+    else
+      app.setStatus(
+        status?.refreshed?.length
+          ? t('settings.statusHolidayUpdated')
+          : t('settings.statusHolidayUnchanged'),
+      )
   } finally {
     holidayRefreshing.value = false
   }
 }
 
-const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+const WEEKDAY_LABELS = [
+  'weekday.sun',
+  'weekday.mon',
+  'weekday.tue',
+  'weekday.wed',
+  'weekday.thu',
+  'weekday.fri',
+  'weekday.sat',
+] as const
 
 function parseLocalDate(text: string): Date | null {
   const [year, month, day] = text.split('-').map(Number)
@@ -192,7 +225,7 @@ function parseLocalDate(text: string): Date | null {
 /** `YYYY-MM-DD` → 周几（数据都是本地日期，用字符串解析避免时区偏差）。 */
 function weekdayOf(date: string): string {
   const parsed = parseLocalDate(date)
-  return parsed ? WEEKDAY_LABELS[parsed.getDay()] : ''
+  return parsed ? t(WEEKDAY_LABELS[parsed.getDay()]) : ''
 }
 
 function nextDayOf(date: string): string | null {
@@ -271,7 +304,7 @@ async function createSnapshot() {
   backupBusy.value = true
   try {
     await createBackup()
-    app.setStatus('备份已创建')
+    app.setStatus(t('backup.statusCreated'))
     await loadBackups()
   } catch (err) {
     app.setStatus(err instanceof Error ? err.message : String(err), true)
@@ -286,13 +319,13 @@ function downloadBackup(name: string) {
 
 function askRestore(name: string) {
   ask(
-    '恢复备份',
-    `确定用备份「${name}」恢复吗？当前数据会被覆盖（恢复前会自动另存一份当前状态的安全备份）。`,
-    '恢复',
+    t('backup.restoreTitle'),
+    t('backup.restoreContent', { name }),
+    t('backup.restoreOk'),
     true,
     async () => {
       await restoreBackup(name)
-      app.setStatus('已恢复备份，正在刷新数据')
+      app.setStatus(t('backup.statusRestored'))
       await Promise.all([tasks.load(), app.loadConfig()])
       await logs.load(tasks.selectedId, { reset: true, pageSize: app.config.logsPageSize })
       await loadBackups()
@@ -301,9 +334,9 @@ function askRestore(name: string) {
 }
 
 function askDeleteBackup(name: string) {
-  ask('删除备份', `删除备份「${name}」？此操作不可恢复。`, '删除', true, async () => {
+  ask(t('backup.removeTitle'), t('backup.removeContent', { name }), t('backup.removeOk'), true, async () => {
     await deleteBackup(name)
-    app.setStatus(`已删除备份 ${name}`)
+    app.setStatus(t('backup.statusRemoved', { name }))
     await loadBackups()
   })
 }
@@ -319,13 +352,13 @@ async function onFile(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (!file) return
   if (!file.name.endsWith('.db')) {
-    app.setStatus('请选择 .db 备份文件', true)
+    app.setStatus(t('backup.statusBadFile'), true)
     return
   }
   uploadBusy.value = true
   try {
     await uploadBackup(file)
-    app.setStatus(`已导入备份 ${file.name}，可在列表里点「恢复」`)
+    app.setStatus(t('backup.statusImported', { name: file.name }))
     await loadBackups()
   } catch (err) {
     app.setStatus(err instanceof Error ? err.message : String(err), true)
@@ -358,7 +391,7 @@ async function waitForServerBack(previousVersion: string): Promise<string | null
     updateProgress.value = {
       phase: 'wait',
       percent: 0,
-      message: `等待新版本启动…（已等 ${attempt + 1} 秒）`,
+      message: t('update.progressWaiting', { seconds: attempt + 1 }),
       error: null,
     }
     try {
@@ -380,14 +413,14 @@ async function applyUpdate() {
   const expected = updateInfo.value?.latest ?? null
   updateBusy.value = true
   updateError.value = ''
-  updateProgress.value = { phase: 'prepare', percent: 0, message: '正在准备…', error: null }
+  updateProgress.value = { phase: 'prepare', percent: 0, message: t('update.progressPreparing'), error: null }
 
   try {
     const health = await fetch('/api/health', { cache: 'no-store' })
-    if (!health.ok) throw new Error('无法连接 Jitter 服务')
+    if (!health.ok) throw new Error(t('update.errorNoService'))
   } catch {
     updateBusy.value = false
-    updateError.value = '无法连接 Jitter 服务。请确认程序仍在运行，然后点「重试」。'
+    updateError.value = t('update.errorNoServiceDetail')
     return
   }
 
@@ -413,42 +446,57 @@ async function applyUpdate() {
   }
 
   if (requestError) {
-    updateProgress.value = { phase: 'wait', percent: 0, message: '升级请求中断，正在等待服务恢复…', error: null }
+    updateProgress.value = {
+      phase: 'wait',
+      percent: 0,
+      message: t('update.progressInterrupted'),
+      error: null,
+    }
     const back = await waitForServerBack(previous)
     if (back && (!expected || app.sameVersion(back, expected))) {
       await finishUpgrade(back, previous)
     } else if (back) {
-      updateError.value = `服务已恢复，但版本仍是 ${back}（期望 ${expected ?? '新版本'}）。可能替换未生效，可点「重试」。`
+      updateError.value = t('update.errorVersionMismatch', {
+        current: back,
+        expected: expected ?? t('update.newVersion'),
+      })
       updateBusy.value = false
     } else {
-      updateError.value = `升级失败：${(requestError as Error)?.message ?? String(requestError)}。若托盘图标仍在，可点「重试」；否则请手动重新打开程序。`
+      updateError.value = t('update.errorUpgradeFailed', {
+        error: (requestError as Error)?.message ?? String(requestError),
+      })
       updateBusy.value = false
     }
     return
   }
 
   if (!result?.ok) {
-    const message = result?.message ?? '未知原因'
-    if (message.includes('最新版本')) {
+    const message = result?.message ?? t('update.errorUnknownReason')
+    if (message.includes(BACKEND_MARKERS.alreadyLatest)) {
       app.writePending(null)
       updateProgress.value = { phase: 'idle', percent: 100, message, error: null }
       updateBusy.value = false
       return
     }
-    updateError.value = `升级失败：${message}。当前版本仍可正常使用，可点「重试」。`
+    updateError.value = t('update.errorUpgradeFailedUsable', { error: message })
     updateBusy.value = false
     return
   }
 
-  updateProgress.value = { phase: 'restart', percent: 100, message: '升级包已就位，正在重启…', error: null }
+  updateProgress.value = {
+    phase: 'restart',
+    percent: 100,
+    message: t('update.progressRestarting'),
+    error: null,
+  }
   const back = await waitForServerBack(previous)
   if (!back) {
-    updateError.value = '等待 60 秒仍未恢复。请检查托盘图标是否在运行、端口是否被占用；可点「重试」。'
+    updateError.value = t('update.errorTimeout')
     updateBusy.value = false
     return
   }
   if (expected && !app.sameVersion(back, expected)) {
-    updateError.value = `服务已恢复，但版本仍是 ${back}（期望 ${expected}）。可能替换未生效，可点「重试」或手动重新下载安装包。`
+    updateError.value = t('update.errorVersionMismatchRetry', { current: back, expected })
     updateBusy.value = false
     return
   }
@@ -459,15 +507,15 @@ async function finishUpgrade(newVersion: string, previousVersion: string) {
   updateProgress.value = {
     phase: 'success',
     percent: 100,
-    message: `升级成功：v${previousVersion} → v${newVersion}，页面数据已刷新。`,
+    message: t('update.progressSuccess', { from: `v${previousVersion}`, to: `v${newVersion}` }),
     error: null,
   }
   app.writePending({ from: previousVersion, expected: newVersion, at: Date.now() })
-  app.banner = {
-    kind: 'success',
-    text: `升级成功：已从 v${previousVersion} 升级到 v${newVersion}，页面数据已同步。`,
-  }
-  app.setStatus(`已升级到 v${newVersion}`)
+  app.setBanner('success', 'app.upgradeSuccessBanner', {
+    from: `v${previousVersion}`,
+    to: `v${newVersion}`,
+  })
+  app.setStatus(t('update.statusUpgraded', { version: `v${newVersion}` }))
   updateBusy.value = false
   await app.loadSystem()
   await tasks.load()
@@ -475,9 +523,9 @@ async function finishUpgrade(newVersion: string, previousVersion: string) {
 }
 
 function askQuit() {
-  ask('退出 Jitter', '退出后 Jitter 会停止运行，页面也会断开。确定退出吗？', '退出', true, async () => {
+  ask(t('settings.quitTitle'), t('settings.quitContent'), t('settings.quitOk'), true, async () => {
     await quitApp()
-    app.setStatus('正在退出…')
+    app.setStatus(t('settings.statusQuitting'))
   })
 }
 
@@ -490,32 +538,32 @@ function openCleanup() {
 <template>
   <a-modal
     :open="open"
-    title="设置"
+    :title="$t('settings.title')"
     width="min(820px, 96vw)"
     :footer="null"
     @update:open="emit('update:open', $event)"
   >
     <a-tabs v-model:active-key="tab">
-      <a-tab-pane key="general" tab="常规">
+      <a-tab-pane key="general" :tab="$t('settings.tabGeneral')">
         <div class="settings-section">
-          <div class="settings-title">日志保留</div>
+          <div class="settings-title">{{ $t('settings.logRetention') }}</div>
           <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
             <a-select v-model:value="retention" :options="retentionOptions" style="width: 220px" />
             <a-button type="primary" size="small" :loading="settingsBusy" @click="saveRetention">
-              保存
+              {{ $t('common.save') }}
             </a-button>
-            <a-button size="small" @click="openCleanup">立即清理日志</a-button>
+            <a-button size="small" @click="openCleanup">{{ $t('settings.cleanupNow') }}</a-button>
           </div>
           <p class="field-hint" style="margin-top: 6px">
-            超出保留期的日志不查询、不渲染，并由后台巡检删除（每轮最多 5000 条）。
+            {{ $t('settings.retentionHint') }}
           </p>
         </div>
 
         <div class="settings-section">
           <div class="settings-line">
             <div>
-              <div class="settings-title" style="margin: 0">默认跳过 TLS 证书校验</div>
-              <div class="muted" style="font-size: 12px">对自签名证书的内网接口很有用</div>
+              <div class="settings-title" style="margin: 0">{{ $t('settings.skipTls') }}</div>
+              <div class="muted" style="font-size: 12px">{{ $t('settings.skipTlsHint') }}</div>
             </div>
             <a-switch
               :checked="settings?.skipTlsVerify !== false"
@@ -525,8 +573,8 @@ function openCleanup() {
           </div>
           <div class="settings-line">
             <div>
-              <div class="settings-title" style="margin: 0">接通电源时防止系统休眠</div>
-              <div class="muted" style="font-size: 12px">只在本机接通 AC 电源时抑制休眠</div>
+              <div class="settings-title" style="margin: 0">{{ $t('settings.preventSleep') }}</div>
+              <div class="muted" style="font-size: 12px">{{ $t('settings.preventSleepHint') }}</div>
             </div>
             <a-switch
               :checked="settings?.preventSleepOnAc === true"
@@ -535,9 +583,13 @@ function openCleanup() {
           </div>
           <div class="settings-line">
             <div>
-              <div class="settings-title" style="margin: 0">开机自启</div>
+              <div class="settings-title" style="margin: 0">{{ $t('settings.autostart') }}</div>
               <div class="muted" style="font-size: 12px">
-                {{ app.system?.compiled ? app.system?.autostart_path : '仅对安装后的程序有效，当前从源码运行' }}
+                {{
+                  app.system?.compiled
+                    ? app.system?.autostart_path
+                    : $t('settings.autostartHintCompiled')
+                }}
               </div>
             </div>
             <a-switch
@@ -550,10 +602,9 @@ function openCleanup() {
         </div>
 
         <div class="settings-section">
-          <div class="settings-title">节假日数据</div>
+          <div class="settings-title">{{ $t('settings.holidayTitle') }}</div>
           <p class="field-hint" style="margin-top: 0">
-            来自 holiday-cn（中国法定节假日，含调休上班日），供「仅工作日 / 仅休息日」执行条件使用。
-            每次启动静默更新，每月 1 号自动刷新；拉取范围是去年、今年、明年。
+            {{ $t('settings.holidayHint') }}
           </p>
           <div v-if="app.holiday?.years?.length" class="holiday-years">
             <button
@@ -561,27 +612,38 @@ function openCleanup() {
               :key="entry.year"
               type="button"
               class="holiday-year-row"
-              :title="`查看 ${entry.year} 年的放假与调休明细`"
+              :title="$t('settings.holidayYearTitle', { year: entry.year })"
               @click="holidayDetail = entry"
             >
-              <span class="holiday-year">{{ entry.year }} 年</span>
+              <span class="holiday-year">{{ $t('settings.holidayYearLabel', { year: entry.year }) }}</span>
               <span class="muted">
-                放假 {{ entry.offDays }} 天 · 调休上班 {{ entry.makeupDays }} 天 · 更新于
-                {{ formatTime(entry.fetchedAt) }}
+                {{
+                  $t('settings.holidayYearSummary', {
+                    offDays: entry.offDays,
+                    makeupDays: entry.makeupDays,
+                    time: formatTime(entry.fetchedAt),
+                  })
+                }}
               </span>
-              <a-tag v-if="entry.year === new Date().getFullYear()" color="blue">今年</a-tag>
-              <span class="holiday-more">查看明细</span>
+              <a-tag v-if="entry.year === new Date().getFullYear()" color="blue">
+                {{ $t('settings.holidayThisYear') }}
+              </a-tag>
+              <span class="holiday-more">{{ $t('settings.holidayMore') }}</span>
             </button>
           </div>
           <div v-else class="muted" style="font-size: 12.5px; padding: 6px 0">
-            还没有节假日数据：任务里的「仅工作日 / 仅休息日」条件会被跳过。点下面按钮拉取。
+            {{ $t('settings.holidayEmpty') }}
           </div>
           <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px">
             <a-button size="small" :loading="holidayRefreshing" @click="refreshHoliday">
-              立即拉取（去年 / 今年 / 明年）
+              {{ $t('settings.holidayFetch') }}
             </a-button>
             <a-tag :color="app.holiday?.hasCurrentYear ? 'success' : 'warning'">
-              {{ app.holiday?.hasCurrentYear ? '今年数据可用' : '今年数据缺失' }}
+              {{
+                app.holiday?.hasCurrentYear
+                  ? $t('settings.holidayAvailable')
+                  : $t('settings.holidayMissing')
+              }}
             </a-tag>
           </div>
           <a-alert
@@ -595,47 +657,53 @@ function openCleanup() {
         </div>
 
         <div class="settings-section">
-          <div class="settings-title">运行信息</div>
+          <div class="settings-title">{{ $t('settings.runtimeTitle') }}</div>
           <div class="settings-line">
-            <span class="label">版本</span>
+            <span class="label">{{ $t('settings.labelVersion') }}</span>
             <span class="value">{{ app.system ? `v${app.system.version}` : '—' }}</span>
           </div>
           <div class="settings-line">
-            <span class="label">运行模式</span>
-            <span class="value">{{ app.system?.compiled ? '已安装的单文件程序' : '开发模式（从源码运行）' }}</span>
+            <span class="label">{{ $t('settings.labelMode') }}</span>
+            <span class="value">
+              {{ app.system?.compiled ? $t('settings.modeCompiled') : $t('settings.modeDev') }}
+            </span>
           </div>
           <div class="settings-line">
-            <span class="label">访问地址</span>
+            <span class="label">{{ $t('settings.labelUrl') }}</span>
             <span class="value">{{ app.system?.url ?? '—' }}</span>
           </div>
           <div class="settings-line">
-            <span class="label">安装目录</span>
-            <span class="value">{{ app.system?.install_dir ?? app.system?.binary_path ?? '源码目录' }}</span>
+            <span class="label">{{ $t('settings.labelInstallDir') }}</span>
+            <span class="value">
+              {{ app.system?.install_dir ?? app.system?.binary_path ?? $t('settings.sourceDir') }}
+            </span>
           </div>
           <div class="settings-line">
-            <span class="label">数据文件</span>
+            <span class="label">{{ $t('settings.labelDataFile') }}</span>
             <span class="value">{{ app.system?.db_path ?? '—' }}</span>
           </div>
           <div class="settings-line">
-            <span class="label">开机自启文件</span>
+            <span class="label">{{ $t('settings.autostartPath') }}</span>
             <span class="value">{{ app.system?.autostart_path ?? '—' }}</span>
           </div>
         </div>
       </a-tab-pane>
 
-      <a-tab-pane key="backup" tab="备份">
+      <a-tab-pane key="backup" :tab="$t('settings.tabBackup')">
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px">
           <a-button type="primary" size="small" :loading="backupBusy" @click="createSnapshot">
-            新建备份
+            {{ $t('backup.create') }}
           </a-button>
-          <a-button size="small" :loading="uploadBusy" @click="pickFile">导入 .db 备份</a-button>
+          <a-button size="small" :loading="uploadBusy" @click="pickFile">
+            {{ $t('backup.import') }}
+          </a-button>
           <input ref="fileInput" type="file" accept=".db" style="display: none" @change="onFile" />
           <span class="muted" style="font-size: 12px">{{ backupDir }}</span>
         </div>
-        <p class="field-hint">备份包含任务、日志和设置。恢复前会自动另存一份当前状态。</p>
+        <p class="field-hint">{{ $t('backup.hint') }}</p>
 
         <div v-if="backups.length === 0" class="empty" style="padding: 20px 0">
-          还没有备份。点「新建备份」生成一份完整快照。
+          {{ $t('backup.empty') }}
         </div>
         <div v-else>
           <div v-for="entry in backups" :key="entry.name" class="backup-item">
@@ -646,17 +714,23 @@ function openCleanup() {
               </div>
             </div>
             <div class="backup-actions">
-              <a-button size="small" @click="downloadBackup(entry.name)">下载</a-button>
-              <a-button size="small" @click="askRestore(entry.name)">恢复</a-button>
-              <a-button size="small" danger @click="askDeleteBackup(entry.name)">删除</a-button>
+              <a-button size="small" @click="downloadBackup(entry.name)">
+                {{ $t('backup.download') }}
+              </a-button>
+              <a-button size="small" @click="askRestore(entry.name)">{{ $t('backup.restore') }}</a-button>
+              <a-button size="small" danger @click="askDeleteBackup(entry.name)">
+                {{ $t('backup.remove') }}
+              </a-button>
             </div>
           </div>
         </div>
       </a-tab-pane>
 
-      <a-tab-pane key="update" tab="更新">
+      <a-tab-pane key="update" :tab="$t('settings.tabUpdate')">
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
-          <a-button size="small" :loading="updateBusy && !pendingUpdate" @click="check">检查更新</a-button>
+          <a-button size="small" :loading="updateBusy && !pendingUpdate" @click="check">
+            {{ $t('update.check') }}
+          </a-button>
           <a-button
             v-if="pendingUpdate"
             type="primary"
@@ -664,7 +738,7 @@ function openCleanup() {
             :loading="updateBusy"
             @click="applyUpdate"
           >
-            下载并安装 {{ updateInfo?.latest }}
+            {{ $t('update.downloadInstall', { version: updateInfo?.latest }) }}
           </a-button>
         </div>
 
@@ -705,17 +779,17 @@ function openCleanup() {
             style="margin-top: 10px"
           />
         </div>
-        <p v-else class="field-hint">检查 GitHub Release 是否有新版本。升级会下载安装包并自动重启。</p>
+        <p v-else class="field-hint">{{ $t('update.hint') }}</p>
       </a-tab-pane>
 
-      <a-tab-pane key="danger" tab="退出">
+      <a-tab-pane key="danger" :tab="$t('settings.tabQuit')">
         <a-alert
           type="warning"
           show-icon
-          message="退出后所有定时任务停止，页面也会断开。下次启动会自动恢复调度。"
+          :message="$t('settings.quitWarning')"
         />
         <div style="display: flex; justify-content: flex-end; margin-top: 16px">
-          <a-button danger @click="askQuit">退出 Jitter</a-button>
+          <a-button danger @click="askQuit">{{ $t('settings.quitTitle') }}</a-button>
         </div>
       </a-tab-pane>
     </a-tabs>
@@ -733,42 +807,56 @@ function openCleanup() {
 
   <a-modal
     :open="Boolean(holidayDetail)"
-    :title="holidayDetail ? `${holidayDetail.year} 年放假与调休明细` : ''"
+    :title="holidayDetail ? $t('settings.holidayDetailTitle', { year: holidayDetail.year }) : ''"
     width="min(520px, 94vw)"
     :footer="null"
     @update:open="holidayDetail = null"
   >
     <template v-if="holidayDetail">
       <div class="holiday-detail-summary">
-        <span>全年放假 <strong>{{ offDaysOf(holidayDetail).length }}</strong> 天</span>
-        <span>调休上班 <strong>{{ makeupDaysOf(holidayDetail).length }}</strong> 天</span>
+        <span>
+          {{ $t('settings.holidayOffDaysBefore') }}<strong>{{ offDaysOf(holidayDetail).length }}</strong
+          >{{ $t('settings.holidayOffDaysAfter') }}
+        </span>
+        <span>
+          {{ $t('settings.holidayMakeupDaysBefore') }}<strong>{{ makeupDaysOf(holidayDetail).length }}</strong
+          >{{ $t('settings.holidayMakeupDaysAfter') }}
+        </span>
       </div>
 
       <div class="holiday-detail-block">
-        <div class="holiday-detail-title">法定节假日放假</div>
+        <div class="holiday-detail-title">{{ $t('settings.holidayOffTitle') }}</div>
         <div
           v-for="range in offDayRanges(holidayDetail)"
           :key="`${range.name}-${range.start}`"
           class="holiday-detail-row"
         >
           <span class="holiday-detail-date">{{ rangeLabel(range) }}</span>
-          <span class="muted">{{ range.name }} · {{ range.count }} 天</span>
+          <span class="muted">
+            {{ $t('settings.holidayRangeMeta', { name: range.name, count: range.count }) }}
+          </span>
         </div>
       </div>
 
       <div class="holiday-detail-block">
-        <div class="holiday-detail-title">调休上班</div>
+        <div class="holiday-detail-title">{{ $t('settings.holidayMakeupTitle') }}</div>
         <div v-if="!makeupDaysOf(holidayDetail).length" class="muted" style="font-size: 12.5px">
-          这一年没有调休上班日。
+          {{ $t('settings.holidayNoMakeup') }}
         </div>
         <div v-for="day in makeupDaysOf(holidayDetail)" :key="day.date" class="holiday-detail-row">
           <span class="holiday-detail-date">{{ day.date }} {{ weekdayOf(day.date) }}</span>
-          <span class="muted">{{ day.name ? `${day.name}调休上班` : '调休上班' }}</span>
+          <span class="muted">
+            {{
+              day.name
+                ? $t('settings.holidayMakeupName', { name: day.name })
+                : $t('settings.holidayMakeupTitle')
+            }}
+          </span>
         </div>
       </div>
 
       <p class="field-hint" style="margin: 12px 0 0">
-        「仅工作日 / 仅休息日」按这里的数据判断：调休上班日即使落在周末也算工作日，放假日期即使落在工作日也算休息日。
+        {{ $t('settings.holidayDetailHint') }}
       </p>
     </template>
   </a-modal>

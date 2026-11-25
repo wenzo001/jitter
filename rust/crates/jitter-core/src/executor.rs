@@ -1,6 +1,6 @@
 //! 执行引擎：前置判断 → 主请求 → 判定 → 通知，以及全部传输层健壮性。
 //!
-//! 与 TypeScript 版（`src/executor.ts`）行为一致：
+//! 传输层的行为约定：
 //! - 连接被重置才重试（最多 2 次，带抖动退避，重试时带 `Connection: close`）
 //! - 环境代理探测超时自动回退直连（用户显式 `-x` 的代理绝不改写）
 //! - 响应体按上限截断（默认 100 KiB），截断的响应不参与正文条件判定
@@ -332,6 +332,34 @@ fn describe_error(error: &str, aborted: bool) -> String {
     error.to_string()
 }
 
+/// 判断错误是不是「连接被重置」这一类传输层失败。
+///
+/// 长间隔任务（每天一次的通知）经常撞上服务端把空闲 keep-alive 连接悄悄关掉：
+/// 下一次请求写进半关闭的 socket，响应头还没到就被重置。
+/// 只有这一类错误才值得重试——DNS / TLS / HTTP 状态码 / 正文错误都不是传输层抖动，
+/// 重试它们只会把一次失败放大成多次。
+fn is_connection_reset_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    // 超时是另一回事（由调用方的超时预算负责），不当作重置。
+    if lower.contains("timed out") || lower.contains("timeout") || lower.contains("etimedout") {
+        return false;
+    }
+    lower.contains("connection reset")
+        || lower.contains("econnreset")
+        || lower.contains("epipe")
+        || lower.contains("connection closed before message completed")
+        || lower.contains("socket connection was closed unexpectedly")
+}
+
+/// 0–79ms 的抖动：多个任务同时撞上重置时不要一起重试。
+fn retry_jitter_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.subsec_nanos() as u64)
+        .unwrap_or(0)
+        % 80
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn perform_request(
     url: &str,
@@ -396,7 +424,9 @@ async fn perform_request(
                 break;
             }
         };
-        let request = {
+        // 每次重试都要重建请求（RequestBuilder 不能克隆），
+        // 所以把「组装请求」做成一个闭包，重试时带上 Connection: close。
+        let build_request = |close: bool| {
             let mut request = client.request(
                 reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET),
                 url,
@@ -414,7 +444,7 @@ async fn perform_request(
             if let Some(text) = body {
                 request = request.body(text.to_string());
             }
-            if round > 0 {
+            if close {
                 // 重试带 Connection: close，避免复用半关闭的 keep-alive 连接。
                 request = request.header(reqwest::header::CONNECTION, "close");
             }
@@ -428,7 +458,34 @@ async fn perform_request(
         };
 
         let attempt = async {
-            let response = request.send().await?;
+            // 传输层重试：只对「连接被重置」这一类错误，
+            // 且只发生在响应头到达之前（读正文失败不重试）。
+            let mut send_attempt = 0usize;
+            let response = loop {
+                let builder = build_request(round > 0 || send_attempt > 0);
+                match builder.send().await {
+                    Ok(response) => break response,
+                    Err(error) => {
+                        let message = error_text(&error);
+                        if send_attempt >= FETCH_RESET_RETRIES
+                            || !is_connection_reset_error(&message)
+                        {
+                            return Err(message);
+                        }
+                        send_attempt += 1;
+                        // 小幅抖动退避；等待可被中断，停止/超时仍然灵敏。
+                        let delay = FETCH_RETRY_BASE_DELAY_MS * send_attempt as u64
+                            + retry_jitter_ms();
+                        tracing::warn!(
+                            "[jitter] 连接被重置，{delay} ms 后重试（第 {send_attempt} 次）"
+                        );
+                        tokio::select! {
+                            _ = cancel.cancelled() => return Err("cancelled".to_string()),
+                            _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
+                        }
+                    }
+                }
+            };
             let status_value = response.status().as_u16() as i64;
             let mut header_map = JsonMap::new();
             for (name, value) in response.headers() {
@@ -443,7 +500,7 @@ async fn perform_request(
             let mut stream = response.bytes_stream();
             let mut is_truncated = false;
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk?;
+                let chunk = chunk.map_err(|error| error_text(&error))?;
                 let remaining = body_limit.saturating_sub(buffer.len());
                 if chunk.len() > remaining {
                     if remaining > 0 {
@@ -454,7 +511,7 @@ async fn perform_request(
                 }
                 buffer.extend_from_slice(&chunk);
             }
-            Ok::<_, reqwest::Error>((
+            Ok::<_, String>((
                 status_value,
                 headers_json_value,
                 String::from_utf8_lossy(&buffer).to_string(),
@@ -467,10 +524,10 @@ async fn perform_request(
             result = async {
                 match timeout_duration {
                     Some(duration) => match tokio::time::timeout(duration, attempt).await {
-                        Ok(inner) => inner.map_err(|error| error_text(&error)),
+                        Ok(inner) => inner,
                         Err(_) => Err(format!("timeout after {} ms", active_timeout_ms)),
                     },
-                    None => attempt.await.map_err(|error| error_text(&error)),
+                    None => attempt.await,
                 }
             } => result,
         };
@@ -896,7 +953,6 @@ struct PrecheckRun {
     headers_json: Option<String>,
     body: String,
     truncated: bool,
-    error: Option<String>,
     aborted: bool,
     duration_ms: i64,
 }
@@ -934,8 +990,48 @@ async fn run_precheck(
         headers_json: result.headers_json,
         body: result.body,
         truncated: result.truncated,
-        error: result.error,
         aborted: result.aborted,
         duration_ms: result.duration_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_connection_reset_failures() {
+        assert!(is_connection_reset_error(
+            "error sending request for url (https://x/): connection reset by peer"
+        ));
+        assert!(is_connection_reset_error("ECONNRESET"));
+        assert!(is_connection_reset_error("EPIPE"));
+        assert!(is_connection_reset_error(
+            "connection closed before message completed"
+        ));
+        assert!(is_connection_reset_error(
+            "socket connection was closed unexpectedly"
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_other_failures() {
+        // 超时不是重置：交给超时预算处理，不要重复打请求。
+        assert!(!is_connection_reset_error("operation timed out"));
+        assert!(!is_connection_reset_error("timeout after 30000 ms"));
+        assert!(!is_connection_reset_error("ETIMEDOUT"));
+        // DNS / TLS / 普通错误都不重试。
+        assert!(!is_connection_reset_error(
+            "dns error: failed to lookup address"
+        ));
+        assert!(!is_connection_reset_error("certificate verify failed"));
+        assert!(!is_connection_reset_error(""));
+    }
+
+    #[test]
+    fn retry_jitter_stays_in_range() {
+        for _ in 0..50 {
+            assert!(retry_jitter_ms() < 80);
+        }
     }
 }

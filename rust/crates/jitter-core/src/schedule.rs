@@ -10,7 +10,7 @@ use serde_json::{Map, Value as Json};
 use crate::window::{
     next_window_start_after, parse_window, plan_after_run_with_pause, plan_paused, plan_recovery,
     plan_with_pause, start_of_local_day, window_instance_at, PauseInterval, RecoveryReason,
-    WindowError, WindowSpec, MAX_PAUSE_DAYS,
+    WindowError, WindowSpec,
 };
 
 pub const SCHEDULE_KIND_DAILY: &str = "daily";
@@ -335,7 +335,7 @@ fn pad2(value: u32) -> String {
 
 /// 锚点的本地时间标签；不是今年才带年份。
 fn format_anchor(timestamp: i64) -> String {
-    use chrono::{Datelike, Local, TimeZone, Timelike};
+    use chrono::{Datelike, Local, Timelike};
     let datetime = chrono::DateTime::from_timestamp_millis(timestamp)
         .map(|value| value.with_timezone(&Local))
         .unwrap_or_else(|| Local::now());

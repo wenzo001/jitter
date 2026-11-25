@@ -1,4 +1,4 @@
-use jitter_core::curl_parser::{normalize_structured, parse_curl_command, CurlParseError, StructuredRequestInput};
+use jitter_core::curl_parser::{normalize_structured, parse_curl_command, StructuredRequestInput};
 use serde_json::{json, Value as Json};
 
 fn error_of(expression: &str) -> String {

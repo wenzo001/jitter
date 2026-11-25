@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { TestBenchConfig, TestBenchResult, TestRunSummary } from '@/types/testbench'
 import type { ConditionModel } from '@/types/form'
 import { emptyCondition } from '@/types/form'
@@ -15,6 +16,8 @@ const emit = defineEmits<{
   'update:open': [value: boolean]
   apply: [config: TestBenchConfig]
 }>()
+
+const { t } = useI18n()
 
 const app = useAppStore()
 
@@ -38,10 +41,10 @@ const history = ref<TestRunSummary[]>([])
 const summaryText = computed(() => {
   const summary = result.value?.summary
   if (!summary) return ''
-  if (summary.skipped) return '执行条件未满足，本次跳过'
-  if (summary.matched) return summary.notifySent ? '成功，已发送通知' : '成功'
-  if (summary.error) return '执行失败'
-  return '未满足成功条件'
+  if (summary.skipped) return t('testbench.summarySkipped')
+  if (summary.matched) return summary.notifySent ? t('testbench.summaryNotified') : t('testbench.summarySuccess')
+  if (summary.error) return t('testbench.summaryFailed')
+  return t('testbench.summaryNotMet')
 })
 
 const summaryColor = computed(() => {
@@ -53,22 +56,30 @@ const summaryColor = computed(() => {
   return 'orange'
 })
 
-const stepMeta: Record<string, { label: string; cls: string }> = {
-  ok: { label: '通过', cls: 'is-ok' },
-  fail: { label: '失败', cls: 'is-fail' },
-  skip: { label: '跳过', cls: 'is-skip' },
-  info: { label: '提示', cls: 'is-info' },
+const STEP_META: Record<string, { cls: string }> = {
+  ok: { cls: 'is-ok' },
+  fail: { cls: 'is-fail' },
+  skip: { cls: 'is-skip' },
+  info: { cls: 'is-info' },
+}
+
+const STEP_LABELS: Record<string, string> = {
+  ok: 'testbench.stepOk',
+  fail: 'testbench.stepFail',
+  skip: 'testbench.stepSkip',
+  info: 'testbench.stepInfo',
 }
 
 function stepLabel(status: string): string {
-  return stepMeta[status]?.label ?? status
+  const key = STEP_LABELS[status]
+  return key ? t(key) : status
 }
 
 function stepClass(status: string): string {
-  return stepMeta[status]?.cls ?? 'is-info'
+  return STEP_META[status]?.cls ?? 'is-info'
 }
 
-const envText = computed(() => describeHostEnvironment(app.environment))
+const envText = computed(() => describeHostEnvironment(app.environment, t))
 
 function openWith(config?: Partial<TestBenchConfig>) {
   curl.value = config?.curl ?? ''
@@ -116,7 +127,7 @@ async function loadHistory() {
 function buildPayload(): Record<string, unknown> | null {
   const value = curl.value.trim()
   if (!value) {
-    error.value = '请粘贴主请求 curl'
+    error.value = t('testbench.errNoCurl')
     return null
   }
   const payload: Record<string, unknown> = {
@@ -132,11 +143,11 @@ function buildPayload(): Record<string, unknown> | null {
     if (cond.weekdays.length > 0) payload.precheck_weekdays = cond.weekdays
     if (cond.timeStart || cond.timeEnd) {
       if (!cond.timeStart || !cond.timeEnd) {
-        error.value = '执行时段需要同时填写开始和结束时间'
+        error.value = t('testbench.errTimeRange')
         return null
       }
       if (cond.timeStart === cond.timeEnd) {
-        error.value = '执行时段的开始和结束时间不能相同'
+        error.value = t('testbench.errTimeSame')
         return null
       }
       payload.precheck_time_start = cond.timeStart
@@ -149,13 +160,13 @@ function buildPayload(): Record<string, unknown> | null {
     const rawStatus = cond.expectStatus.trim()
     const expr = cond.expr.trim()
     if (!cond.curl.trim() && (rawStatus || expr)) {
-      error.value = '配置了条件状态码或表达式时，必须填写条件检查 curl'
+      error.value = t('testbench.errCondStatusOrExpr')
       return null
     }
     if (rawStatus) {
       const status = Number(rawStatus)
       if (!Number.isInteger(status) || status < 100 || status > 599) {
-        error.value = '条件检查的期望状态码必须是 100–599 的整数'
+        error.value = t('testbench.errCondStatusRange')
         return null
       }
       payload.precheck_expect_status = status
@@ -169,7 +180,7 @@ function buildPayload(): Record<string, unknown> | null {
       Boolean(cond.dayType) ||
       Boolean(cond.curl.trim())
     if (!hasAny) {
-      error.value = '启用执行条件时，至少配置星期、时段、电源、本机 IP 或前置 curl 之一'
+      error.value = t('testbench.errCondAny')
       return null
     }
   }
@@ -177,7 +188,7 @@ function buildPayload(): Record<string, unknown> | null {
   if (expectStatus.value.trim()) {
     const status = Number(expectStatus.value)
     if (!Number.isInteger(status) || status < 100 || status > 599) {
-      error.value = '期望状态码必须是 100–599 的整数'
+      error.value = t('testbench.errExpectStatusRange')
       return null
     }
     payload.expect_status = status
@@ -187,7 +198,7 @@ function buildPayload(): Record<string, unknown> | null {
 
   if (notifyEnabled.value) {
     if (!notifyCurl.value.trim()) {
-      error.value = '请填写通知 curl'
+      error.value = t('testbench.errNoNotifyCurl')
       return null
     }
     payload.notify_curl = notifyCurl.value.trim()
@@ -207,7 +218,7 @@ async function send() {
   try {
     const data = await runTestBench(payload as never)
     result.value = data.result
-    app.setStatus(`测试完成：${summaryText.value}`)
+    app.setStatus(t('testbench.statusDone', { summary: summaryText.value }))
     if (taskId.value) void loadHistory()
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -221,7 +232,7 @@ async function showRun(id: number) {
     const data = await getTestRun(id)
     if (data.run) {
       result.value = { steps: data.run.steps, summary: data.run.summary }
-      app.setStatus(`查看 ${formatTime(data.run.created_at)} 的测试记录`)
+      app.setStatus(t('testbench.statusView', { time: formatTime(data.run.created_at) }))
     }
   } catch (err) {
     app.setStatus(err instanceof Error ? err.message : String(err), true)
@@ -251,18 +262,18 @@ defineExpose({ openWith })
 <template>
   <a-modal
     :open="open"
-    :title="taskName ? `试跑 · ${taskName}` : '试跑 curl'"
+    :title="taskName ? $t('testbench.titleWithTask', { name: taskName }) : $t('testbench.title')"
     width="min(760px, 96vw)"
     :footer="null"
     @update:open="!$event && close()"
     @cancel="close"
   >
     <p class="field-hint" style="margin-top: 0">
-      按正式执行的完整链路跑一遍：解析 → 本地条件 → 条件检查 → 主请求 → 成功判定 → 通知预览。不会写执行记录，也不会真正发送通知（除非勾选）。
+      {{ $t('testbench.intro') }}
     </p>
 
     <div class="field test-curl">
-      <label class="field-label">主请求 curl <span class="req">*</span></label>
+      <label class="field-label">{{ $t('testbench.curlLabel') }} <span class="req">*</span></label>
       <a-textarea
         v-model:value="curl"
         :auto-size="{ minRows: 5, maxRows: 12 }"
@@ -271,9 +282,9 @@ defineExpose({ openWith })
       />
     </div>
 
-    <a-divider style="margin: 10px 0">执行条件</a-divider>
+    <a-divider style="margin: 10px 0">{{ $t('testbench.sectionCondition') }}</a-divider>
     <a-switch v-model:checked="precheckEnabled" size="small" />
-    <span style="margin-left: 8px">模拟「只在满足条件时执行」</span>
+    <span style="margin-left: 8px">{{ $t('testbench.simulateCondition') }}</span>
     <ConditionFields
       v-if="precheckEnabled"
       v-model="conditions"
@@ -281,49 +292,49 @@ defineExpose({ openWith })
       style="margin-top: 10px"
     />
 
-    <a-divider style="margin: 10px 0">成功条件</a-divider>
+    <a-divider style="margin: 10px 0">{{ $t('testbench.sectionSuccess') }}</a-divider>
     <div class="form-grid-2">
       <div class="field">
-        <label class="field-label">期望状态码（可选）</label>
-        <a-input v-model:value="expectStatus" placeholder="例如 200" />
+        <label class="field-label">{{ $t('testbench.expectStatus') }}</label>
+        <a-input v-model:value="expectStatus" :placeholder="t('testbench.expectStatusPlaceholder')" />
       </div>
       <div class="field">
-        <label class="field-label">期望响应体（可选，完全相等）</label>
+        <label class="field-label">{{ $t('testbench.expectBody') }}</label>
         <a-textarea v-model:value="expectBody" :auto-size="{ minRows: 1, maxRows: 4 }" class="mono" />
       </div>
     </div>
     <div class="field">
-      <label class="field-label">条件表达式（可选）</label>
+      <label class="field-label">{{ $t('testbench.expectExpr') }}</label>
       <a-textarea v-model:value="expectExpr" :auto-size="{ minRows: 1, maxRows: 4 }" class="mono" />
     </div>
 
-    <a-divider style="margin: 10px 0">通知</a-divider>
+    <a-divider style="margin: 10px 0">{{ $t('testbench.sectionNotify') }}</a-divider>
     <a-switch v-model:checked="notifyEnabled" size="small" />
-    <span style="margin-left: 8px">成功时发送通知</span>
+    <span style="margin-left: 8px">{{ $t('testbench.notifyOnSuccess') }}</span>
     <div v-if="notifyEnabled" style="margin-top: 8px">
       <a-textarea
         v-model:value="notifyCurl"
         :auto-size="{ minRows: 3, maxRows: 8 }"
         class="mono"
-        placeholder="通知 curl"
+        :placeholder="t('testbench.notifyCurlPlaceholder')"
       />
       <a-checkbox v-model:checked="sendNotify" style="margin-top: 6px">
-        这次试跑真的发送通知（默认只预览）
+        {{ $t('testbench.notifyActuallySend') }}
       </a-checkbox>
     </div>
 
     <a-alert v-if="error" type="error" :message="error" show-icon style="margin-top: 12px" />
 
     <div style="display: flex; justify-content: space-between; gap: 8px; margin-top: 14px; flex-wrap: wrap">
-      <a-button :disabled="!curl.trim()" @click="apply">带入表单</a-button>
+      <a-button :disabled="!curl.trim()" @click="apply">{{ $t('testbench.applyToForm') }}</a-button>
       <div style="display: flex; gap: 8px">
-        <a-button @click="close">关闭</a-button>
-        <a-button type="primary" :loading="running" @click="send">开始测试</a-button>
+        <a-button @click="close">{{ $t('testbench.close') }}</a-button>
+        <a-button type="primary" :loading="running" @click="send">{{ $t('testbench.start') }}</a-button>
       </div>
     </div>
 
     <div v-if="history.length" style="margin-top: 14px">
-      <div class="field-label">最近测试留档（点击回看）</div>
+      <div class="field-label">{{ $t('testbench.historyTitle') }}</div>
       <div class="test-history">
         <a-button
           v-for="run in history"
@@ -331,16 +342,17 @@ defineExpose({ openWith })
           size="small"
           @click="showRun(run.id)"
         >
-          {{ formatShortTime(run.created_at) }} {{ run.ok ? '成功' : '未成功' }}
+          {{ formatShortTime(run.created_at) }}
+          {{ run.ok ? $t('testbench.historySuccess') : $t('testbench.historyFail') }}
         </a-button>
       </div>
     </div>
 
     <template v-if="result">
-      <a-divider style="margin: 16px 0 12px">测试结果</a-divider>
+      <a-divider style="margin: 16px 0 12px">{{ $t('testbench.resultTitle') }}</a-divider>
       <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px">
         <a-tag :color="summaryColor">{{ summaryText }}</a-tag>
-        <span class="muted">总耗时 {{ result.summary.totalMs ?? 0 }} ms</span>
+        <span class="muted">{{ $t('testbench.totalDuration', { value: result.summary.totalMs ?? 0 }) }}</span>
       </div>
       <ul style="list-style: none; padding: 0; margin: 0">
         <li
@@ -359,17 +371,19 @@ defineExpose({ openWith })
           </div>
           <div class="test-step-detail">{{ step.detail }}</div>
           <details v-if="step.request || step.response" style="margin-top: 6px">
-            <summary class="muted" style="cursor: pointer; font-size: 12px">请求 / 响应详情</summary>
+            <summary class="muted" style="cursor: pointer; font-size: 12px">
+              {{ $t('testbench.detailToggle') }}
+            </summary>
             <div style="margin-top: 6px">
               <div v-if="step.request" class="detail-block">
-                <h4>请求</h4>
+                <h4>{{ $t('testbench.request') }}</h4>
                 <pre>{{ step.request.method }} {{ step.request.url }}</pre>
               </div>
               <div
                 v-if="step.request && Object.keys(step.request.headers ?? {}).length"
                 class="detail-block"
               >
-                <h4>请求头</h4>
+                <h4>{{ $t('testbench.requestHeaders') }}</h4>
                 <pre>{{
                   Object.entries(step.request.headers)
                     .map(([name, value]) => `${name}: ${value}`)
@@ -377,18 +391,18 @@ defineExpose({ openWith })
                 }}</pre>
               </div>
               <div v-if="step.request?.body" class="detail-block">
-                <h4>请求体</h4>
+                <h4>{{ $t('testbench.requestBody') }}</h4>
                 <pre>{{ step.request.body }}</pre>
               </div>
               <div v-if="step.response" class="detail-block">
-                <h4>响应状态</h4>
-                <pre>{{ step.response.status ?? '无响应' }}</pre>
+                <h4>{{ $t('testbench.responseStatus') }}</h4>
+                <pre>{{ step.response.status ?? $t('testbench.noResponse') }}</pre>
               </div>
               <div
                 v-if="step.response && Object.keys(step.response.headers ?? {}).length"
                 class="detail-block"
               >
-                <h4>响应头</h4>
+                <h4>{{ $t('testbench.responseHeaders') }}</h4>
                 <pre>{{
                   Object.entries(step.response.headers ?? {})
                     .map(([name, value]) => `${name}: ${value}`)
@@ -396,10 +410,10 @@ defineExpose({ openWith })
                 }}</pre>
               </div>
               <div v-if="step.response" class="detail-block">
-                <h4>响应体</h4>
-                <pre>{{ step.response.body ? prettyJson(step.response.body) : '（空）' }}</pre>
+                <h4>{{ $t('testbench.responseBody') }}</h4>
+                <pre>{{ step.response.body ? prettyJson(step.response.body) : $t('testbench.emptyBody') }}</pre>
                 <div v-if="step.response.truncated" class="muted" style="font-size: 12px">
-                  响应体超过上限，已截断
+                  {{ $t('testbench.truncated') }}
                 </div>
               </div>
             </div>

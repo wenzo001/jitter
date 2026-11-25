@@ -13,7 +13,10 @@ import ConditionFields from './ConditionFields.vue'
 import TestBenchDialog from '@/components/dialogs/TestBenchDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { TestBenchConfig } from '@/types/testbench'
+
+const { t } = useI18n()
 
 const app = useAppStore()
 const tasksStore = useTasksStore()
@@ -34,30 +37,30 @@ const dirty = computed(() => JSON.stringify(model.value) !== baseline.value)
 
 /** 弹窗底部左侧的提示文案。 */
 const footerHint = computed(() => {
-  if (dirty.value) return '有未保存的修改'
-  if (editingId.value) return '保存后按新配置继续定时，任务保持原有运行状态'
-  return '带 * 为必填；其余可留空使用默认值'
+  if (dirty.value) return t('taskForm.footerDirty')
+  if (editingId.value) return t('taskForm.footerEditing')
+  return t('taskForm.footerDefault')
 })
 
-const modeOptions = [
-  { label: '粘贴 curl', value: 'curl' },
-  { label: '手动填写', value: 'structured' },
-]
-const scheduleOptions = [
-  { label: '每天一次', value: 'daily' },
-  { label: '每隔一段时间', value: 'interval' },
-]
-const dailyModeOptions = [
-  { label: '时段内随机', value: 'range' },
-  { label: '固定时间', value: 'exact' },
-  { label: '固定时间 + 浮动', value: 'jitter' },
-]
-const unitOptions = [
-  { label: '秒', value: 1 },
-  { label: '分钟', value: 60 },
-  { label: '小时', value: 3600 },
-  { label: '天', value: 86400 },
-]
+const modeOptions = computed(() => [
+  { label: t('taskForm.modeCurl'), value: 'curl' },
+  { label: t('taskForm.modeStructured'), value: 'structured' },
+])
+const scheduleOptions = computed(() => [
+  { label: t('taskForm.scheduleDaily'), value: 'daily' },
+  { label: t('taskForm.scheduleInterval'), value: 'interval' },
+])
+const dailyModeOptions = computed(() => [
+  { label: t('taskForm.dailyRange'), value: 'range' },
+  { label: t('taskForm.dailyExact'), value: 'exact' },
+  { label: t('taskForm.dailyJitter'), value: 'jitter' },
+])
+const unitOptions = computed(() => [
+  { label: t('taskForm.unitSecond'), value: 1 },
+  { label: t('taskForm.unitMinute'), value: 60 },
+  { label: t('taskForm.unitHour'), value: 3600 },
+  { label: t('taskForm.unitDay'), value: 86400 },
+])
 const methodOptions = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'].map((value) => ({
   label: value,
   value,
@@ -76,18 +79,24 @@ const testRef = ref<InstanceType<typeof TestBenchDialog> | null>(null)
 const confirmOpen = ref(false)
 const confirmTitle = ref('')
 const confirmContent = ref('')
-const confirmOkText = ref('确定')
+const confirmOkText = ref(t('common.ok'))
 let confirmAction: (() => void) | null = null
 
 const expectSummary = computed(() => {
   const parts: string[] = []
-  if (model.value.expectStatus.trim()) parts.push(`状态码 ${model.value.expectStatus.trim()}`)
-  if (model.value.expectBody.trim()) parts.push('响应体相等')
-  if (model.value.expectExpr.trim()) parts.push(`表达式 ${model.value.expectExpr.trim()}`)
-  return parts.length ? `已自定义：${parts.join(' + ')}` : '默认：任意 2xx 视为成功'
+  if (model.value.expectStatus.trim()) {
+    parts.push(t('taskForm.expectSummaryStatus', { value: model.value.expectStatus.trim() }))
+  }
+  if (model.value.expectBody.trim()) parts.push(t('taskForm.expectSummaryBody'))
+  if (model.value.expectExpr.trim()) {
+    parts.push(t('taskForm.expectSummaryExpr', { value: model.value.expectExpr.trim() }))
+  }
+  return parts.length
+    ? t('taskForm.expectSummaryCustom', { items: parts.join(' + ') })
+    : t('taskForm.expectSummaryDefault')
 })
 
-const envText = computed(() => describeHostEnvironment(app.environment))
+const envText = computed(() => describeHostEnvironment(app.environment, t))
 
 /** 节假日数据就绪：当年数据存在，「仅工作日 / 仅休息日」选项才可选。 */
 const holidayReady = computed(() => app.holiday?.hasCurrentYear === true)
@@ -150,9 +159,9 @@ function loadTask(task: Task) {
   }
   if (dirty.value) {
     askThen(
-      '切换编辑目标？',
-      '当前表单还有未保存的修改，切换后会丢失。',
-      '丢弃并切换',
+      t('taskForm.switchTargetTitle'),
+      t('taskForm.switchTargetContent'),
+      t('taskForm.switchTargetOk'),
       apply,
     )
     return
@@ -179,7 +188,7 @@ function onCancel() {
     emit('close')
     return
   }
-  askThen('放弃未保存的修改？', '当前填写的内容还没有保存，关闭后会清空。', '放弃修改', () => {
+  askThen(t('taskForm.discardTitle'), t('taskForm.discardContent'), t('taskForm.discardOk'), () => {
     resetForm()
     emit('close')
   })
@@ -191,7 +200,7 @@ function startCreate() {
 }
 
 function resetIfEditing(taskId: string) {
-  if (editingId.value === taskId) resetForm('任务已删除，编辑状态已清除')
+  if (editingId.value === taskId) resetForm(t('taskForm.taskDeleted'))
 }
 
 function hasExpected(value: TaskFormModel): boolean {
@@ -293,14 +302,17 @@ const previewNote = computed(() => {
   const data = preview.value
   if (!data) return ''
   if (data.kind === 'daily') {
-    if (data.window?.instant) return '每天固定这个时刻'
+    if (data.window?.instant) return t('taskForm.previewNoteInstant')
     if ((data.jitter_minutes ?? 0) > 0) {
-      return `基准 ${model.value.exactTime}，前后各 ${data.jitter_minutes} 分钟随机`
+      return t('taskForm.previewNoteJitter', {
+        time: model.value.exactTime,
+        minutes: data.jitter_minutes,
+      })
     }
-    return '窗口内随机，具体时刻执行前才确定'
+    return t('taskForm.previewNoteWindow')
   }
   return (model.value.intervalJitter ?? 0) > 0
-    ? `每次再加 0–${model.value.intervalJitter} 秒抖动`
+    ? t('taskForm.previewNoteIntervalJitter', { seconds: model.value.intervalJitter })
     : ''
 })
 
@@ -310,29 +322,29 @@ function validate(): FormErrors {
   const value = model.value
   const result: FormErrors = {}
 
-  if (!value.name.trim()) result.name = '请填写任务名称'
+  if (!value.name.trim()) result.name = t('taskForm.errName')
 
   if (value.mode === 'curl') {
-    if (!value.curl.trim()) result.curl = '请粘贴 curl 命令'
+    if (!value.curl.trim()) result.curl = t('taskForm.errCurl')
   } else {
     const url = value.url.trim()
-    if (!url) result.url = '请填写 URL'
-    else if (!/^https?:\/\//i.test(url)) result.url = 'URL 需要以 http:// 或 https:// 开头'
+    if (!url) result.url = t('taskForm.errUrl')
+    else if (!/^https?:\/\//i.test(url)) result.url = t('taskForm.errUrlScheme')
   }
 
   if (value.scheduleKind === 'daily') {
     if (value.dailyMode === 'range') {
       if (!value.windowStart || !value.windowEnd) {
-        result.windowStart = '请填写执行时段的开始和结束'
+        result.windowStart = t('taskForm.errWindow')
       } else if (value.windowStart === value.windowEnd) {
-        result.windowStart = '开始和结束不能相同；固定时刻请选「固定时间」'
+        result.windowStart = t('taskForm.errWindowSame')
       }
     } else {
-      if (!value.exactTime) result.exactTime = '请选择每天的执行时间'
+      if (!value.exactTime) result.exactTime = t('taskForm.errExactTime')
       if (value.dailyMode === 'jitter') {
         const jitter = Number(value.jitterMinutes)
         if (!Number.isInteger(jitter) || jitter < 0 || jitter > 60) {
-          result.jitterMinutes = '浮动分钟必须是 0–60 的整数'
+          result.jitterMinutes = t('taskForm.errJitterMinutes')
         }
       }
     }
@@ -340,27 +352,27 @@ function validate(): FormErrors {
     const amount = Number(value.intervalValue)
     const unit = Number(value.intervalUnit)
     if (!Number.isInteger(amount) || amount < 1) {
-      result.intervalValue = '执行间隔必须是大于 0 的整数'
+      result.intervalValue = t('taskForm.errIntervalValue')
     } else if (amount * unit > 30 * 24 * 3600) {
-      result.intervalValue = '执行间隔不能超过 30 天'
+      result.intervalValue = t('taskForm.errIntervalTooLong')
     }
     const jitter = Number(value.intervalJitter || 0)
     if (!Number.isInteger(jitter) || jitter < 0) {
-      result.intervalJitter = '抖动必须是大于等于 0 的整数秒'
+      result.intervalJitter = t('taskForm.errIntervalJitter')
     } else if (amount * unit && jitter > amount * unit) {
-      result.intervalJitter = '抖动不能大于执行间隔'
+      result.intervalJitter = t('taskForm.errJitterTooLarge')
     }
   }
 
   if (value.notifyEnabled && !value.notifyCurl.trim()) {
-    result.notifyCurl = '请填写通知 curl'
+    result.notifyCurl = t('taskForm.errNotifyCurl')
   }
 
   const expectStatus = value.expectStatus.trim()
   if (expectStatus) {
     const status = Number(expectStatus)
     if (!Number.isInteger(status) || status < 100 || status > 599) {
-      result.expectStatus = '期望状态码必须是 100–599 的整数'
+      result.expectStatus = t('taskForm.errExpectStatus')
     }
   }
 
@@ -377,9 +389,9 @@ function validateConditions(cond: TaskFormModel['conditions'], result: FormError
   const hasTime = Boolean(cond.timeStart) || Boolean(cond.timeEnd)
   if (hasTime) {
     if (!cond.timeStart || !cond.timeEnd) {
-      result.condTime = '执行时段需要同时填写开始和结束时间'
+      result.condTime = t('taskForm.errCondTime')
     } else if (cond.timeStart === cond.timeEnd) {
-      result.condTime = '执行时段的开始和结束不能相同'
+      result.condTime = t('taskForm.errCondTimeSame')
     }
   }
   const rawStatus = cond.expectStatus.trim()
@@ -387,12 +399,12 @@ function validateConditions(cond: TaskFormModel['conditions'], result: FormError
   if (rawStatus) {
     status = Number(rawStatus)
     if (!Number.isInteger(status) || status < 100 || status > 599) {
-      result.condStatus = '条件检查的期望状态码必须是 100–599 的整数'
+      result.condStatus = t('taskForm.errCondStatus')
     }
   }
   const curl = cond.curl.trim()
   if (!curl && (status !== null || cond.expr.trim())) {
-    result.condCurl = '配置了条件状态码或表达式时，必须填写条件检查 curl'
+    result.condCurl = t('taskForm.errCondCurl')
   }
   const hasAny =
     cond.weekdays.length > 0 ||
@@ -402,7 +414,7 @@ function validateConditions(cond: TaskFormModel['conditions'], result: FormError
     Boolean(cond.dayType) ||
     Boolean(curl)
   if (!hasAny) {
-    result.condAny = '启用执行条件时，至少配置星期、时段、工作日、电源、本机 IP 或前置 curl 之一'
+    result.condAny = t('taskForm.errCondAny')
   }
 }
 
@@ -478,7 +490,7 @@ async function submit() {
   errors.value = found
   const keys = Object.keys(found)
   if (keys.length > 0) {
-    app.setStatus(`还有 ${keys.length} 项需要修正`, true)
+    app.setStatus(t('taskForm.needFix', { count: keys.length }), true)
     await nextTick()
     focusFirstError(keys[0])
     return
@@ -494,10 +506,10 @@ async function submit() {
     const task = data.task
     app.setStatus(
       !wasEditing
-        ? `已创建任务「${task.name}」`
+        ? t('taskForm.created', { name: task.name })
         : task.status === 'active'
-          ? `已保存任务「${task.name}」，继续按新配置定时`
-          : `已保存任务「${task.name}」，任务仍保持停止；如需定时请恢复`,
+          ? t('taskForm.savedActive', { name: task.name })
+          : t('taskForm.savedInactive', { name: task.name }),
       false,
     )
     resetForm()
@@ -562,7 +574,7 @@ function applyTest(config: TestBenchConfig) {
   model.value.notifyEnabled = config.notifyEnabled
   model.value.notifyCurl = config.notifyCurl
   precheckOn.value = config.precheckEnabled
-  app.setStatus('已把试跑配置带入表单，确认后点「创建任务」或「保存修改」')
+  app.setStatus(t('taskForm.testConfigApplied'))
 }
 
 defineExpose({
@@ -587,17 +599,17 @@ defineExpose({
         <div class="section-head">
           <span class="section-step">1</span>
           <div>
-            <h3>请求</h3>
-            <p>把 curl 粘进来，或手动填写 URL / 方法 / 头 / 体。不确定能否跑通？先点「先试跑」。</p>
+            <h3>{{ $t('taskForm.sectionRequest') }}</h3>
+            <p>{{ $t('taskForm.sectionRequestDesc') }}</p>
           </div>
         </div>
 
         <div class="field" data-error-key="name">
-          <label class="field-label">任务名称 <span class="req">*</span></label>
+          <label class="field-label">{{ $t('taskForm.name') }} <span class="req">*</span></label>
           <a-input
             v-model:value="model.name"
             :status="errors.name ? 'error' : undefined"
-            placeholder="例如：每日签到"
+            :placeholder="t('taskForm.namePlaceholder')"
             :maxlength="200"
             allow-clear
           />
@@ -605,14 +617,14 @@ defineExpose({
         </div>
 
         <div class="field">
-          <label class="field-label">请求填写方式</label>
+          <label class="field-label">{{ $t('taskForm.modeLabel') }}</label>
           <a-segmented v-model:value="model.mode" :options="modeOptions" block />
         </div>
 
         <div v-if="model.mode === 'curl'" class="field" data-error-key="curl">
           <div class="field-label-row">
-            <label class="field-label">curl 命令 <span class="req">*</span></label>
-            <a-button size="small" type="link" @click="openTest">先试跑</a-button>
+            <label class="field-label">{{ $t('taskForm.curlLabel') }} <span class="req">*</span></label>
+            <a-button size="small" type="link" @click="openTest">{{ $t('taskForm.tryFirst') }}</a-button>
           </div>
           <a-textarea
             v-model:value="model.curl"
@@ -626,7 +638,7 @@ defineExpose({
 
         <div v-else>
           <div class="field" data-error-key="url">
-            <label class="field-label">URL <span class="req">*</span></label>
+            <label class="field-label">{{ $t('taskForm.urlLabel') }} <span class="req">*</span></label>
             <a-input
               v-model:value="model.url"
               :status="errors.url ? 'error' : undefined"
@@ -638,11 +650,11 @@ defineExpose({
 
           <div class="form-grid-2">
             <div class="field">
-              <label class="field-label">方法</label>
+              <label class="field-label">{{ $t('taskForm.methodLabel') }}</label>
               <a-select v-model:value="model.method" :options="methodOptions" style="width: 100%" />
             </div>
             <div class="field">
-              <label class="field-label">Headers（每行一个，可选）</label>
+              <label class="field-label">{{ $t('taskForm.headersLabel') }}</label>
               <a-textarea
                 v-model:value="model.headers"
                 :auto-size="{ minRows: 2, maxRows: 5 }"
@@ -653,7 +665,7 @@ defineExpose({
           </div>
 
           <div class="field">
-            <label class="field-label">Body（可选）</label>
+            <label class="field-label">{{ $t('taskForm.bodyLabel') }}</label>
             <a-textarea
               v-model:value="model.body"
               :auto-size="{ minRows: 2, maxRows: 8 }"
@@ -663,7 +675,7 @@ defineExpose({
           </div>
 
           <div class="field">
-            <a-button size="small" @click="openTest">用这份配置试跑</a-button>
+            <a-button size="small" @click="openTest">{{ $t('taskForm.runWithConfig') }}</a-button>
           </div>
         </div>
       </section>
@@ -673,13 +685,13 @@ defineExpose({
         <div class="section-head">
           <span class="section-step">2</span>
           <div>
-            <h3>执行时间</h3>
-            <p>每天一次（可在时段内随机），或者每隔一段时间重复。</p>
+            <h3>{{ $t('taskForm.sectionSchedule') }}</h3>
+            <p>{{ $t('taskForm.sectionScheduleDesc') }}</p>
           </div>
         </div>
 
         <div class="field">
-          <label class="field-label">执行方式</label>
+          <label class="field-label">{{ $t('taskForm.scheduleKindLabel') }}</label>
           <a-segmented v-model:value="model.scheduleKind" :options="scheduleOptions" block />
         </div>
 
@@ -690,7 +702,7 @@ defineExpose({
 
           <div v-if="model.dailyMode === 'range'" class="form-grid-2" data-error-key="windowStart">
             <div class="field">
-              <label class="field-label">时段开始 <span class="req">*</span></label>
+              <label class="field-label">{{ $t('taskForm.windowStart') }} <span class="req">*</span></label>
               <a-time-picker
                 v-model:value="model.windowStart"
                 format="HH:mm"
@@ -700,7 +712,7 @@ defineExpose({
               />
             </div>
             <div class="field">
-              <label class="field-label">时段结束 <span class="req">*</span></label>
+              <label class="field-label">{{ $t('taskForm.windowEnd') }} <span class="req">*</span></label>
               <a-time-picker
                 v-model:value="model.windowEnd"
                 format="HH:mm"
@@ -717,7 +729,7 @@ defineExpose({
           <div v-else data-error-key="exactTime">
             <div class="form-grid-2">
               <div class="field">
-                <label class="field-label">每天执行时间 <span class="req">*</span></label>
+                <label class="field-label">{{ $t('taskForm.exactTime') }} <span class="req">*</span></label>
                 <a-time-picker
                   v-model:value="model.exactTime"
                   format="HH:mm"
@@ -727,7 +739,7 @@ defineExpose({
                 />
               </div>
               <div v-if="model.dailyMode === 'jitter'" class="field">
-                <label class="field-label">前后浮动（分钟）</label>
+                <label class="field-label">{{ $t('taskForm.jitterMinutes') }}</label>
                 <a-input-number v-model:value="model.jitterMinutes" :min="0" :max="60" style="width: 100%" />
               </div>
             </div>
@@ -738,10 +750,10 @@ defineExpose({
           <p class="field-hint">
             {{
               model.dailyMode === 'range'
-                ? '每天在开始~结束之间随机选一个时刻执行一次；结束早于开始表示跨午夜（例如 23:50–00:10），按开始那天计一次。'
+                ? $t('taskForm.dailyRangeHint')
                 : model.dailyMode === 'exact'
-                  ? '每天就在这个时间执行一次，不随机。'
-                  : '以该时间为中心，前后各随机浮动 N 分钟内执行。'
+                  ? $t('taskForm.dailyExactHint')
+                  : $t('taskForm.dailyJitterHint')
             }}
           </p>
         </template>
@@ -749,11 +761,11 @@ defineExpose({
         <template v-else>
           <div class="form-grid-2" data-error-key="intervalValue">
             <div class="field">
-              <label class="field-label">每隔 <span class="req">*</span></label>
+              <label class="field-label">{{ $t('taskForm.intervalEvery') }} <span class="req">*</span></label>
               <a-input-number v-model:value="model.intervalValue" :min="1" :step="1" style="width: 100%" />
             </div>
             <div class="field">
-              <label class="field-label">单位</label>
+              <label class="field-label">{{ $t('taskForm.intervalUnit') }}</label>
               <a-select v-model:value="model.intervalUnit" :options="unitOptions" style="width: 100%" />
             </div>
             <div v-if="errors.intervalValue" class="field-error" style="grid-column: 1 / -1">
@@ -763,30 +775,30 @@ defineExpose({
 
           <div class="form-grid-2">
             <div class="field">
-              <label class="field-label">第一次执行时间（可选）</label>
+              <label class="field-label">{{ $t('taskForm.intervalStart') }}</label>
               <a-date-picker
                 v-model:value="model.intervalStart"
                 show-time
                 format="YYYY-MM-DD HH:mm"
                 value-format="YYYY-MM-DDTHH:mm"
                 style="width: 100%"
-                placeholder="留空 = 从现在开始算"
+                :placeholder="t('taskForm.intervalStartPlaceholder')"
               />
             </div>
             <div class="field" data-error-key="intervalJitter">
-              <label class="field-label">随机抖动（秒，可选）</label>
+              <label class="field-label">{{ $t('taskForm.intervalJitter') }}</label>
               <a-input-number v-model:value="model.intervalJitter" :min="0" style="width: 100%" />
               <div v-if="errors.intervalJitter" class="field-error">{{ errors.intervalJitter }}</div>
             </div>
           </div>
           <p class="field-hint">
-            每隔 N 秒 / 分钟 / 小时 / 天执行一次。第一次执行时间留空 = 从现在开始算；填了就从该时刻起对齐。抖动会给每次再加 0–N 秒随机偏移。
+            {{ $t('taskForm.intervalHint') }}
           </p>
         </template>
 
         <div v-if="preview && preview.next.length" class="field">
           <div class="field-label-row">
-            <span class="field-label">接下来 7 次执行</span>
+            <span class="field-label">{{ $t('taskForm.previewNext') }}</span>
             <span class="muted" style="font-size: 11.5px">{{ previewNote }}</span>
           </div>
           <div class="preview-list">
@@ -797,15 +809,14 @@ defineExpose({
         </div>
 
         <p v-if="timeoutWarning" class="field-hint warn">
-          当前未设置请求超时（requestTimeoutMs = 0）：目标地址一直不返回时，这次执行会一直占着该任务。可在
-          jitter.config.json 里设置 requestTimeoutMs（毫秒，建议 30000）。
+          {{ $t('taskForm.timeoutWarning') }}
         </p>
 
         <div class="field">
           <a-switch v-model:checked="model.runOnStartup" size="small" />
-          <span style="margin-left: 8px">电脑启动后自动执行一次</span>
+          <span style="margin-left: 8px">{{ $t('taskForm.runOnStartup') }}</span>
           <p class="field-hint">
-            默认关闭；只对当前任务生效。Jitter 每次启动后执行一次，仍会检查执行条件，条件不满足就跳过。
+            {{ $t('taskForm.runOnStartupHint') }}
           </p>
         </div>
       </section>
@@ -815,67 +826,66 @@ defineExpose({
         <div class="section-head">
           <span class="section-step">3</span>
           <div>
-            <h3>成功与通知</h3>
-            <p>默认任意 2xx 视为成功；需要时可自定义判定，并在成功时发送通知。</p>
+            <h3>{{ $t('taskForm.sectionSuccess') }}</h3>
+            <p>{{ $t('taskForm.sectionSuccessDesc') }}</p>
           </div>
         </div>
 
         <a-collapse v-model:active-key="expectOpen" ghost>
           <a-collapse-panel key="expect">
             <template #header>
-              <span style="font-weight: 600; font-size: 13px">成功条件</span>
+              <span style="font-weight: 600; font-size: 13px">{{ $t('taskForm.successCondition') }}</span>
               <span class="muted" style="margin-left: 8px; font-size: 12px">{{ expectSummary }}</span>
             </template>
             <div class="form-grid-2">
               <div class="field" data-error-key="expectStatus">
-                <label class="field-label">期望状态码（可选）</label>
+                <label class="field-label">{{ $t('taskForm.expectStatus') }}</label>
                 <a-input
                   v-model:value="model.expectStatus"
-                  placeholder="例如 200"
+                  :placeholder="t('taskForm.expectStatusPlaceholder')"
                   :status="errors.expectStatus ? 'error' : undefined"
                 />
                 <div v-if="errors.expectStatus" class="field-error">{{ errors.expectStatus }}</div>
               </div>
               <div class="field">
-                <label class="field-label">期望响应体（可选，完全相等）</label>
+                <label class="field-label">{{ $t('taskForm.expectBody') }}</label>
                 <a-textarea
                   v-model:value="model.expectBody"
                   :auto-size="{ minRows: 2, maxRows: 4 }"
-                  placeholder='例如 {"code":0}'
+                  :placeholder="t('taskForm.expectBodyPlaceholder')"
                   class="mono"
                 />
               </div>
             </div>
             <div class="field">
-              <label class="field-label">条件表达式（可选）</label>
+              <label class="field-label">{{ $t('taskForm.expectExpr') }}</label>
               <a-textarea
                 v-model:value="model.expectExpr"
                 :auto-size="{ minRows: 2, maxRows: 5 }"
-                placeholder="例如 data.result.remindtype=0"
+                :placeholder="t('taskForm.expectExprPlaceholder')"
                 class="mono"
               />
             </div>
             <p class="field-hint">
-              三项都不填 = 任意 2xx 视为成功；填了则需全部满足。只填表达式时不会额外限制 2xx。
-              支持 = / == / != / &gt; / &lt;、&amp;&amp; / || / !、三元与 $status；路径取不到按不成立处理。
+              {{ $t('taskForm.expectHint') }}
             </p>
           </a-collapse-panel>
         </a-collapse>
 
         <div class="field" style="margin-top: 8px">
           <a-switch v-model:checked="model.notifyEnabled" size="small" />
-          <span style="margin-left: 8px">成功时发送通知</span>
-          <p class="field-hint">只有判定成功才发送；通知失败只记录它自己的结果，不影响任务。</p>
+          <span style="margin-left: 8px">{{ $t('taskForm.notifyOn') }}</span>
+          <p class="field-hint">{{ $t('taskForm.notifyHint') }}</p>
         </div>
 
         <div v-if="model.notifyEnabled" class="field" data-error-key="notifyCurl">
-          <label class="field-label">通知 curl <span class="req">*</span></label>
+          <label class="field-label">{{ $t('taskForm.notifyCurl') }} <span class="req">*</span></label>
           <a-textarea
             v-model:value="model.notifyCurl"
             :status="errors.notifyCurl ? 'error' : undefined"
             :auto-size="{ minRows: 3, maxRows: 8 }"
             class="mono"
-            placeholder="curl -X POST 'https://notify.example/hook' -H 'Content-Type: application/json' -d '{&quot;text&quot;:&quot;签到成功&quot;}'"
+            :placeholder="t('taskForm.notifyCurlPlaceholder')"
           />
           <div v-if="errors.notifyCurl" class="field-error">{{ errors.notifyCurl }}</div>
         </div>
@@ -886,14 +896,14 @@ defineExpose({
         <div class="section-head">
           <span class="section-step">4</span>
           <div>
-            <h3>执行条件（可选）</h3>
-            <p>只在满足条件时执行；不满足会跳过本次并记录原因。「立即执行」不受限制。</p>
+            <h3>{{ $t('taskForm.sectionCondition') }}</h3>
+            <p>{{ $t('taskForm.sectionConditionDesc') }}</p>
           </div>
         </div>
 
         <div class="field">
           <a-switch v-model:checked="precheckOn" size="small" />
-          <span style="margin-left: 8px">只在满足条件时执行</span>
+          <span style="margin-left: 8px">{{ $t('taskForm.precheckOn') }}</span>
         </div>
 
         <ConditionFields

@@ -1,3 +1,4 @@
+# 运行 Rust 主线镜像（根 Dockerfile：前端 bun 构建 + cargo build --release -p jitter-app）
 services:
   jitter:
     build: .
@@ -11,6 +12,7 @@ services:
       JITTER_CONFIG: /app/jitter.config.json
       JITTER_DB_PATH: /app/data/app.db
     volumes:
+      # 数据库与日志（<db 同级>/logs）都持久化在这个卷里。
       - jitter-data:/app/data
       - ./jitter.config.json:/app/jitter.config.json:ro
 

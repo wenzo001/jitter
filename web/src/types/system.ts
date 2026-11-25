@@ -59,8 +59,56 @@ export interface HolidayStatus {
   years: HolidayYearMeta[]
   /** 当年是否有节假日数据：决定「工作日 / 休息日」选项是否可选。 */
   hasCurrentYear: boolean
+  /** 今天（或服务端当前时刻）的归类。 */
+  today?: DayInfo
   refreshed?: number[]
   errors?: string[]
+}
+
+/** 单日归类：法定节假日 / 调休上班 / 普通周末 / 工作日。 */
+export type HolidayDayType = 'holiday' | 'makeup' | 'weekend' | 'workday'
+
+export interface DayInfo {
+  /** YYYY-MM-DD */
+  date: string
+  dayType: HolidayDayType
+  /** 是否上班（工作日与调休上班日为 true）。 */
+  isWorkday: boolean
+  /** 节日名称（法定节假日与调休日有）。 */
+  name: string | null
+  /** 是否依据节假日数据判定；false 表示该年无数据，只按星期推断。 */
+  authoritative: boolean
+  /** 1 = 周一 … 7 = 周日。 */
+  weekday: number
+  /** 星期几（中文）。 */
+  weekdayLabel: string
+}
+
+export interface HolidayMonthResponse {
+  year: number
+  month: number
+  today: DayInfo
+  days: DayInfo[]
+}
+
+export interface DatabaseColumn {
+  name: string
+  decl_type: string
+}
+
+export interface DatabaseTable {
+  name: string
+  columns: DatabaseColumn[]
+  row_count: number
+}
+
+export interface DatabaseRows {
+  table: string
+  columns: DatabaseColumn[]
+  rows: Record<string, unknown>[]
+  total: number
+  limit: number
+  offset: number
 }
 
 export interface BackupEntry {
@@ -126,6 +174,50 @@ export interface MetricsReport {
   overview: MetricsOverview
   tasks: TaskMetrics[]
   window: number
+}
+
+/** 后台健康检查结果。 */
+export interface HealthInfo {
+  ok: boolean
+  /** 服务端当前时间戳（毫秒）。 */
+  now: number
+  version: string
+  /** 已运行时长（毫秒）。 */
+  uptimeMs: number
+  /** 数据库是否可读可写。 */
+  dbOk: boolean
+  dbPath: string
+  /** 运行日志目录。 */
+  logDir: string
+  /** 最近一次服务端错误。 */
+  lastError: { at: number; message: string } | null
+}
+
+/** 一个运行日志文件的元信息。 */
+export interface LogFileInfo {
+  name: string
+  size: number
+  /** 最后修改时间戳（毫秒）。 */
+  modified_at: number
+}
+
+/** 运行日志文件列表。 */
+export interface LogFilesResponse {
+  dir: string
+  retentionDays: number
+  files: LogFileInfo[]
+}
+
+/** 运行日志文件的一段内容。 */
+export interface LogFileChunk {
+  name: string
+  content: string
+  /** 本次读取的起始字节偏移。 */
+  offset: number
+  /** 下一次读取的偏移。 */
+  next_offset: number
+  /** 文件总字节数。 */
+  size: number
 }
 
 export interface CleanupOption {

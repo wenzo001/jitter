@@ -5,7 +5,7 @@
 //! - 暂停是**整自然日**的半开区间 `[from, until)`。
 //! - 精确时间（start === end）是一个宽��为 60 秒的“瞬时窗口”。
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Timelike};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Timelike};
 
 /// 最长可暂停的天数。
 pub const MAX_PAUSE_DAYS: i64 = 15;

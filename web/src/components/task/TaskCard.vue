@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { MenuInfo, MenuProps } from 'antdv-next'
 import type { Task } from '@/types/task'
 import ConditionBadge from './ConditionBadge.vue'
-import { formatTime, formatDay, formatElapsed, formatTimeout, pauseStateOf, calendarDays } from '@/utils/format'
+import {
+  formatTime,
+  formatDay,
+  formatElapsed,
+  formatRelative,
+  formatTimeout,
+  pauseStateOf,
+  calendarDays,
+} from '@/utils/format'
 import { formatSchedule, isCrossMidnight } from '@/utils/schedule'
 import { conditionSummary } from '@/utils/condition'
 
@@ -27,7 +36,28 @@ const emit = defineEmits<{
   move: [task: Task, delta: number]
 }>()
 
+const { t } = useI18n()
+
 const pause = computed(() => (props.task.status === 'active' ? pauseStateOf(props.task) : null))
+
+/** 上一次执行：成功 / 失败 / 未满足成功条件。 */
+const lastRun = computed(() => {
+  const run = props.task.last_run
+  if (!run) return null
+  const meta =
+    run.outcome === 'success'
+      ? { color: 'success', text: t('task.lastSuccess') }
+      : run.outcome === 'condition_miss'
+        ? { color: 'warning', text: t('task.lastConditionMiss') }
+        : { color: 'error', text: t('task.lastFailed') }
+  const source =
+    run.runSource === 'manual'
+      ? t('task.sourceManual')
+      : run.runSource === 'startup'
+        ? t('task.sourceStartup')
+        : t('task.sourceScheduled')
+  return { ...run, ...meta, source }
+})
 
 const timeoutText = computed(() => {
   try {
@@ -40,18 +70,21 @@ const timeoutText = computed(() => {
 
 const footText = computed(() => {
   const task = props.task
-  if (task.status !== 'active') return '调度已停用，历史记录保留'
+  if (task.status !== 'active') return t('task.footDisabled')
   const current = pause.value
-  if (!current) return `下次 ${formatTime(task.next_run_at)}`
+  if (!current) return t('task.footNext', { time: formatTime(task.next_run_at) })
   if (current.started) {
-    return `已暂停 ${calendarDays(current.from, current.until)} 天（${formatDay(
-      current.from,
-    )} 起），${formatTime(current.until)} 恢复`
+    return t('task.footPaused', {
+      days: calendarDays(current.from, current.until),
+      from: formatDay(current.from),
+      until: formatTime(current.until),
+    })
   }
-  return `${formatDay(current.from)} 00:00 起暂停 ${calendarDays(
-    current.from,
-    current.until,
-  )} 天，${formatTime(current.until)} 恢复`
+  return t('task.footPausedFrom', {
+    days: calendarDays(current.from, current.until),
+    from: formatDay(current.from),
+    until: formatTime(current.until),
+  })
 })
 
 function act(name: 'run' | 'edit' | 'test' | 'pause' | 'resumePause' | 'stop' | 'start' | 'remove') {
@@ -85,19 +118,19 @@ function act(name: 'run' | 'edit' | 'test' | 'pause' | 'resumePause' | 'stop' | 
 
 const menu = computed<MenuProps>(() => {
   const task = props.task
-  const items: NonNullable<MenuProps['items']> = [{ key: 'test', label: '试跑（不记录）' }]
+  const items: NonNullable<MenuProps['items']> = [{ key: 'test', label: t('task.menuTest') }]
   if (task.status === 'active') {
-    items.push({ key: 'pause', label: pause.value ? '调整暂停' : '暂停几天' })
-    if (pause.value) items.push({ key: 'resumePause', label: '取消暂停' })
+    items.push({ key: 'pause', label: pause.value ? t('task.menuAdjustPause') : t('task.menuPause') })
+    if (pause.value) items.push({ key: 'resumePause', label: t('task.menuResumePause') })
   }
   items.push({ type: 'divider' })
   items.push(
     task.status === 'active'
-      ? { key: 'stop', label: '停止调度' }
-      : { key: 'start', label: '启用调度' },
+      ? { key: 'stop', label: t('task.menuStop') }
+      : { key: 'start', label: t('task.menuStart') },
   )
   items.push({ type: 'divider' })
-  items.push({ key: 'remove', label: '删除任务', danger: true })
+  items.push({ key: 'remove', label: t('task.menuRemove'), danger: true })
   return { items, onClick: onMenuClick }
 })
 
@@ -116,9 +149,9 @@ function onDragStart(event: DragEvent) {
     class="task-card"
     :class="{ 'is-selected': selected }"
     tabindex="0"
-    :aria-label="`任务 ${task.name}`"
+    :aria-label="$t('task.cardAria', { name: task.name })"
     :aria-current="selected ? 'true' : undefined"
-    title="点击查看这个任务的执行记录"
+    :title="$t('task.cardTitle')"
     @click="emit('select', task.id)"
     @keydown.enter.prevent="emit('select', task.id)"
     @keydown.space.prevent="emit('select', task.id)"
@@ -129,8 +162,8 @@ function onDragStart(event: DragEvent) {
           class="drag-handle"
           type="button"
           draggable="true"
-          title="拖动排序；也可聚焦后按 ↑ / ↓"
-          aria-label="拖动调整任务顺序"
+          :title="$t('task.dragTitle')"
+          :aria-label="$t('task.dragAria')"
           @click.stop
           @dragstart="onDragStart"
           @keydown.up.prevent.stop="emit('move', task, -1)"
@@ -146,34 +179,52 @@ function onDragStart(event: DragEvent) {
           v-if="task.running"
           size="small"
           disabled
-          title="上一次执行还没结束"
+          :title="$t('task.runningTitle')"
         >
-          执行中…
+          {{ $t('task.running') }}
         </a-button>
         <a-button
           v-else
           type="primary"
           size="small"
           :loading="busy"
-          title="真实执行一次：会发请求，满足成功条件会发通知，并写入执行记录"
+          :title="$t('task.runNowTitle')"
           @click="act('run')"
         >
-          立即执行
+          {{ $t('task.runNow') }}
         </a-button>
-        <a-button size="small" @click="act('edit')">编辑</a-button>
+        <a-button size="small" @click="act('edit')">{{ $t('task.edit') }}</a-button>
 
         <a-dropdown :trigger="['click']" :menu="menu" placement="bottomRight">
-          <a-button size="small" @click.stop>更多</a-button>
+          <a-button size="small" @click.stop>{{ $t('task.more') }}</a-button>
         </a-dropdown>
       </div>
     </div>
 
+    <div class="task-last" :class="lastRun ? `is-${lastRun.outcome}` : 'is-empty'">
+      <template v-if="lastRun">
+        <a-tag :color="lastRun.color" class="task-last-tag">{{ lastRun.text }}</a-tag>
+        <span class="task-last-time">{{ formatTime(lastRun.executedAt) }}</span>
+        <span class="task-last-rel">{{ formatRelative(lastRun.executedAt, now, t) }}</span>
+        <span class="sep">·</span>
+        <span class="muted">{{ $t('task.triggeredBy', { source: lastRun.source }) }}</span>
+        <span v-if="lastRun.status !== null" class="sep">·</span>
+        <span v-if="lastRun.status !== null" class="muted">HTTP {{ lastRun.status }}</span>
+        <span v-if="lastRun.durationMs !== null" class="sep">·</span>
+        <span v-if="lastRun.durationMs !== null" class="muted">{{ lastRun.durationMs }} ms</span>
+      </template>
+      <template v-else>
+        <a-tag color="default" class="task-last-tag">{{ $t('task.neverRun') }}</a-tag>
+        <span class="muted">{{ $t('task.noRunRecord') }}</span>
+      </template>
+    </div>
+
     <div class="task-meta">
       <ConditionBadge :task="task" :now="now" />
-      <a-tag v-if="isCrossMidnight(task)" color="purple">跨午夜</a-tag>
-      <a-tag v-if="timeoutText" color="default">超时 {{ timeoutText }}</a-tag>
-      <span>
-        <span class="muted">调度 </span>{{ formatSchedule(task) }}
+      <a-tag v-if="isCrossMidnight(task)" color="purple">{{ $t('task.crossMidnight') }}</a-tag>
+      <a-tag v-if="timeoutText" color="default">{{ $t('task.timeoutTag', { value: timeoutText }) }}</a-tag>
+      <span class="task-meta-schedule">
+        <span class="muted task-meta-label">{{ $t('task.scheduleLabel') }}</span>{{ formatSchedule(task, t) }}
       </span>
     </div>
 
@@ -184,12 +235,12 @@ function onDragStart(event: DragEvent) {
     <div class="task-foot">
       <span>{{ footText }}</span>
       <span class="sep">·</span>
-      <span>{{ task.notify_enabled ? '通知：成功时发送' : '通知：未开启' }}</span>
+      <span>{{ task.notify_enabled ? $t('task.notifyOn') : $t('task.notifyOff') }}</span>
       <span class="sep">·</span>
-      <span>{{ conditionSummary(task) }}</span>
+      <span>{{ conditionSummary(task, t) }}</span>
       <span v-if="task.running" class="sep">·</span>
       <span v-if="task.running" class="muted">
-        已运行 {{ formatElapsed(now - (task.running_since ?? now)) }}
+        {{ $t('task.runningElapsed', { value: formatElapsed(now - (task.running_since ?? now)) }) }}
       </span>
     </div>
   </article>

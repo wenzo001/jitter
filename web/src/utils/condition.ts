@@ -1,14 +1,21 @@
 import type { Task } from '@/types/task'
+import { zhTranslate, type TranslateFn } from '@/locales/current'
 import { precheckCurlOf } from './curl'
 
+/**
+ * 星期几的可选项。
+ *
+ * `localeKey` 是 locale 文件里的键后缀（condition.weekdayMon 等），
+ * 展示文案按当前语言取，不在这里写死。
+ */
 export const WEEKDAYS = [
-  { value: 1, label: '一' },
-  { value: 2, label: '二' },
-  { value: 3, label: '三' },
-  { value: 4, label: '四' },
-  { value: 5, label: '五' },
-  { value: 6, label: '六' },
-  { value: 0, label: '日' },
+  { value: 1, localeKey: 'weekday.mon' },
+  { value: 2, localeKey: 'weekday.tue' },
+  { value: 3, localeKey: 'weekday.wed' },
+  { value: 4, localeKey: 'weekday.thu' },
+  { value: 5, localeKey: 'weekday.fri' },
+  { value: 6, localeKey: 'weekday.sat' },
+  { value: 0, localeKey: 'weekday.sun' },
 ] as const
 
 export interface ConditionRow {
@@ -18,20 +25,23 @@ export interface ConditionRow {
   mono?: boolean
 }
 
-function weekdayText(raw: string | null): string {
+function weekdayText(raw: string | null, t: TranslateFn): string {
   if (!raw) return ''
   const days = raw
     .split(',')
     .map((value) => Number(value))
     .filter((value) => Number.isInteger(value))
   if (days.length === 0) return ''
-  if (days.length === 7) return '每天'
-  const labelOf = (value: number) => WEEKDAYS.find((day) => day.value === value)?.label ?? ''
+  if (days.length === 7) return t('weekday.every')
+  const labelOf = (value: number) => {
+    const day = WEEKDAYS.find((entry) => entry.value === value)
+    return day ? t(day.localeKey) : ''
+  }
   // 周一..周日 的顺序展示，更符合中文习惯
   return [1, 2, 3, 4, 5, 6, 0]
     .filter((value) => days.includes(value))
-    .map((value) => `周${labelOf(value)}`)
-    .join('、')
+    .map((value) => labelOf(value))
+    .join(t('common.listSeparator'))
 }
 
 function curlSummary(raw: string): string {
@@ -40,30 +50,30 @@ function curlSummary(raw: string): string {
 }
 
 /** 任务已配置的执行条件，用于卡片浮层逐项展示。 */
-export function conditionRows(task: Task): ConditionRow[] {
+export function conditionRows(task: Task, t: TranslateFn = zhTranslate): ConditionRow[] {
   const rows: ConditionRow[] = []
-  const weekdays = weekdayText(task.precheck_weekdays)
-  if (weekdays) rows.push({ key: 'weekdays', label: '执行星期', value: weekdays })
+  const weekdays = weekdayText(task.precheck_weekdays, t)
+  if (weekdays) rows.push({ key: 'weekdays', label: t('condition.labelWeekdays'), value: weekdays })
 
   if (task.precheck_time_start && task.precheck_time_end) {
     const cross = task.precheck_time_end < task.precheck_time_start
     rows.push({
       key: 'time',
-      label: '执行时段',
+      label: t('condition.labelTime'),
       value: `${task.precheck_time_start}–${task.precheck_time_end}${
-        cross ? '（跨午夜）' : ''
+        cross ? t('schedule.crossMidnight') : ''
       }`,
     })
   }
 
   if (task.precheck_require_ac === 1) {
-    rows.push({ key: 'ac', label: '电源', value: '仅接通电源（AC）时执行' })
+    rows.push({ key: 'ac', label: t('condition.labelPower'), value: t('condition.valueAc') })
   }
 
   if (task.precheck_ip_pattern) {
     rows.push({
       key: 'ip',
-      label: '本机 IP',
+      label: t('condition.labelIp'),
       value: task.precheck_ip_pattern,
       mono: true,
     })
@@ -72,27 +82,35 @@ export function conditionRows(task: Task): ConditionRow[] {
   if (task.precheck_day_type === 'workday' || task.precheck_day_type === 'offday') {
     rows.push({
       key: 'dayType',
-      label: '执行日期',
-      value: task.precheck_day_type === 'workday' ? '仅工作日（按法定节假日，含调休）' : '仅休息日（按法定节假日，含调休）',
+      label: t('condition.labelDayType'),
+      value:
+        task.precheck_day_type === 'workday'
+          ? t('condition.valueWorkday')
+          : t('condition.valueOffday'),
     })
   }
 
   const curl = precheckCurlOf(task)
   if (curl) {
-    rows.push({ key: 'curl', label: '条件检查', value: curlSummary(curl), mono: true })
+    rows.push({ key: 'curl', label: t('condition.labelCurl'), value: curlSummary(curl), mono: true })
   }
 
   if (task.precheck_expect_status !== null && task.precheck_expect_status !== undefined) {
     rows.push({
       key: 'status',
-      label: '期望状态码',
+      label: t('condition.labelExpectStatus'),
       value: String(task.precheck_expect_status),
       mono: true,
     })
   }
 
   if (task.precheck_expr) {
-    rows.push({ key: 'expr', label: '条件表达式', value: task.precheck_expr, mono: true })
+    rows.push({
+      key: 'expr',
+      label: t('condition.labelExpr'),
+      value: task.precheck_expr,
+      mono: true,
+    })
   }
 
   return rows
@@ -103,9 +121,11 @@ export function hasConfiguredConditions(task: Task): boolean {
 }
 
 /** 卡片底部的短描述。 */
-export function conditionSummary(task: Task): string {
-  if (task.precheck_enabled !== 1) return '无执行条件'
-  const rows = conditionRows(task)
-  if (rows.length === 0) return '执行条件已开启（未限制）'
-  return `执行条件：${rows.map((row) => row.label).join('、')}`
+export function conditionSummary(task: Task, t: TranslateFn = zhTranslate): string {
+  if (task.precheck_enabled !== 1) return t('condition.summaryNone')
+  const rows = conditionRows(task, t)
+  if (rows.length === 0) return t('condition.summaryEnabled')
+  return t('condition.summaryList', {
+    items: rows.map((row) => row.label).join(t('common.listSeparator')),
+  })
 }

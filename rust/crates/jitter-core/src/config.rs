@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use serde_json::Value as Json;
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -150,6 +150,59 @@ pub fn find_config_path(explicit: Option<&str>) -> Option<PathBuf> {
     candidates.into_iter().next()
 }
 
+/// 相对路径的基准目录。
+///
+/// 为什么不按「当前工作目录」算：程序从不同目录启动时 CWD 会变，
+/// 同一个相对 dbPath 就会指向不同的库——最典型的就是在源码仓库根目录运行开发版，
+/// 直接把用户安装版的 `data/` 当成开发库写进去。
+///
+/// 规则：
+/// - 有配置文件 → 配置文件所在目录；
+/// - 没有配置文件 → 可执行文件所在目录（安装版的 `data/` 永远跟着 exe 走，
+///   从任何工作目录启动都指向同一个库）；
+/// - 都没有 → 当前工作目录。
+pub fn base_dir_for(config_path: Option<&Path>) -> PathBuf {
+    if let Some(path) = config_path {
+        let dir = path.parent().unwrap_or_else(|| Path::new(""));
+        return dir_or_cwd(dir);
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
+        return dir;
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// 空目录或 "." 一律按当前工作目录处理。
+fn dir_or_cwd(dir: &Path) -> PathBuf {
+    if dir.as_os_str().is_empty() || dir == Path::new(".") {
+        return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    }
+    if dir.is_absolute() {
+        return dir.to_path_buf();
+    }
+    std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// 数据库路径归一化：绝对路径原样保留，相对路径按 `base` 解析成绝对路径。
+pub fn resolve_db_path_absolute(base: &Path, db_path: &str) -> PathBuf {
+    let trimmed = db_path.trim();
+    if trimmed.is_empty() {
+        return base.join("data").join("app.db");
+    }
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() {
+        return candidate.to_path_buf();
+    }
+    if base.is_absolute() {
+        return base.join(candidate);
+    }
+    dir_or_cwd(base).join(candidate)
+}
+
 /// 线程安全地更新配置的辅助（测试用）。
 pub struct ConfigGuard {
     previous: AppConfig,
@@ -173,4 +226,60 @@ impl Drop for ConfigGuard {
 #[allow(dead_code)]
 fn _assert_json_merge(value: &Json) -> Result<AppConfig, ConfigError> {
     merge_config(&AppConfig::default(), value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_db_path_is_resolved_against_the_base_dir() {
+        let base = Path::new("D:/apps/jitter");
+        let resolved = resolve_db_path_absolute(base, "data/app.db");
+        assert_eq!(
+            resolved,
+            Path::new("D:/apps/jitter").join("data").join("app.db"),
+            "相对路径按基准目录解析，不跟当前工作目录走"
+        );
+    }
+
+    #[test]
+    fn absolute_db_path_is_kept_as_is() {
+        let base = Path::new("D:/apps/jitter");
+        let resolved = resolve_db_path_absolute(base, "E:/other/app.db");
+        assert_eq!(resolved, Path::new("E:/other/app.db"));
+    }
+
+    #[test]
+    fn empty_db_path_falls_back_to_data_app_db_under_base() {
+        let base = Path::new("D:/apps/jitter");
+        let resolved = resolve_db_path_absolute(base, "   ");
+        assert_eq!(resolved, Path::new("D:/apps/jitter").join("data").join("app.db"));
+    }
+
+    #[test]
+    fn base_dir_follows_the_config_file_location() {
+        let base = base_dir_for(Some(Path::new("D:/apps/jitter/jitter.config.json")));
+        assert_eq!(base, Path::new("D:/apps/jitter"));
+    }
+
+    #[test]
+    fn base_dir_without_config_uses_the_executable_directory() {
+        // 没有配置文件时，基准是可执行文件所在目录：安装版的 data/ 永远跟着 exe 走。
+        let base = base_dir_for(None);
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf));
+        if let Some(exe_dir) = exe_dir {
+            assert_eq!(base, exe_dir);
+        }
+    }
+
+    #[test]
+    fn base_dir_of_a_bare_config_name_is_the_current_directory() {
+        // 配置写在当前目录时，基准也应当是当前目录，而不是 exe 目录。
+        let base = base_dir_for(Some(Path::new("jitter.config.json")));
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(base, cwd);
+    }
 }

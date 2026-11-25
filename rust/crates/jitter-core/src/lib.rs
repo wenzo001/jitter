@@ -10,6 +10,7 @@ pub mod executor;
 pub mod guard;
 pub mod holiday;
 pub mod host;
+pub mod logging;
 pub mod metrics;
 pub mod curl_parser;
 pub mod schedule;

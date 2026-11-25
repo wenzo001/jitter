@@ -30,6 +30,11 @@ path = "src/main.rs"
 # 托盘（Windows）：tray-icon + muda 需要本线程跑 Win32 消息循环；
 # macOS/Linux 上无原生事件循环可用，先以纯服务形态发布。
 # muda 必须与 tray-icon 依赖的版本一致（否则 trait 冲突）。
+# windows-sys：启动失败时的系统弹窗（发布版没有控制台，弹窗是唯一出口）。
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.19"
 muda = "0.15"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

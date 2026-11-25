@@ -3,7 +3,6 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
-use jitter_core::config::ConfigGuard;
 use jitter_core::db::{init_db, NewTaskInput};
 use jitter_core::executor::{
     evaluate_precheck, evaluate_success, execute_task_run, PrecheckInput, SuccessInput,

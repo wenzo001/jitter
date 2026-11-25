@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
 
 pub static ACTUAL_PORT: AtomicU16 = AtomicU16::new(0);
 
@@ -43,6 +44,115 @@ fn apply_env_overrides(config: &mut jitter_core::config::AppConfig) {
             config.db_path = db_path;
         }
     }
+}
+
+/// 初始化日志：控制台 + 按天轮转的文件。
+///
+/// 发布版没有控制台窗口，日志文件是唯一能查问题的线索，必须写。
+fn init_tracing(log_dir: &std::path::Path) {
+    let file_writer = jitter_core::logging::DailyLogWriter::new(
+        log_dir.to_path_buf(),
+        jitter_core::logging::retention_days_from_env(),
+    );
+    // RUST_LOG 由标准 EnvFilter 解析（支持级别、目标前缀、span 过滤）。
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    // 控制台与文件各一份；文件写入失败不能影响服务启动。
+    let console = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_target(false)
+        .with_ansi(false);
+    let file = tracing_subscriber::fmt::layer()
+        .with_writer(file_writer)
+        .with_target(false)
+        .with_ansi(false);
+    // 过滤器放在最外层，两层共用；注册失败时忽略（已经初始化过的情况）。
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(console)
+        .with(file)
+        .try_init();
+}
+
+/// panic 兜底：记录到日志文件 + 控制台，绝不让 panic 静默消失。
+///
+/// 配合 release 的 `panic = "unwind"`，panic 只结束当前连接/任务，
+/// 进程继续服务其它功能。
+fn install_panic_hook(log_dir: &std::path::Path) {
+    let dir = log_dir.to_path_buf();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|value| format!("{}:{}", value.file(), value.line()))
+            .unwrap_or_else(|| "未知位置".to_string());
+        let message = match info.payload().downcast_ref::<&str>() {
+            Some(text) => (*text).to_string(),
+            None => match info.payload().downcast_ref::<String>() {
+                Some(text) => text.clone(),
+                None => "未知 panic".to_string(),
+            },
+        };
+        let line = format!(
+            "[{}] PANIC {message}（{location}）",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+        eprintln!("{line}");
+        jitter_core::logging::append_line(&dir, &line);
+    }));
+}
+
+/// 启动失败：写日志 + 弹窗告诉用户怎么办（发布版没有控制台，弹窗是唯一出口）。
+fn fatal_exit(log_dir: &std::path::Path, message: &str) -> ! {
+    let line = format!(
+        "[{}] 启动失败：{message}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    );
+    eprintln!("{line}");
+    jitter_core::logging::append_line(log_dir, &line);
+    show_fatal_dialog(log_dir, message);
+    std::process::exit(1);
+}
+
+/// 致命错误的用户提示：Windows 用系统弹窗，其它平台写 stderr。
+fn show_fatal_dialog(log_dir: &std::path::Path, message: &str) {
+    let hint = format!(
+        "Jitter 启动失败：\n\n{message}\n\n请检查：\n\
+         1) 数据库文件是否被占用或无写入权限（路径：{}）\n\
+         2) 配置文件是否合法（jitter.config.json）\n\
+         3) 端口是否被其它程序占用\n\n\
+         完整日志见：{}",
+        jitter_core::config::get_active_config().db_path,
+        log_dir.join(jitter_core::logging::file_name_for(
+            &jitter_core::logging::today_stamp(now_ms()),
+        ))
+        .display()
+    );
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, MB_ICONERROR, MB_OK, MB_TOPMOST,
+        };
+        let wide: Vec<u16> = hint.encode_utf16().chain(std::iter::once(0)).collect();
+        let title: Vec<u16> = "Jitter 启动失败".encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR | MB_TOPMOST,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("{hint}");
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 
@@ -143,8 +253,9 @@ fn acquire_single_instance() -> bool {
         // 创建失败就不拦，宁可多开也不让程序起不来。
         return true;
     }
-    // 句柄故意泄漏：要让互斥体活到进程结束。
-    std::mem::forget(handle);
+    // 句柄故意不关闭：互斥体要活到进程结束。
+    // （isize 是 Copy 类型，mem::forget 对它没有作用，这里只是明确表达意图。）
+    let _ = handle;
     last_error != ERROR_ALREADY_EXISTS
 }
 
@@ -153,35 +264,78 @@ fn acquire_single_instance() -> bool {
     true
 }
 
-fn main() {
-    tracing_subscriber::fmt()        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
-
-    // 本地小工具：2 个工作线程足够（HTTP 轮询 + 定时器），
-    // 又能保证 DB 操作阻塞时健康检查仍可响应。默认按 CPU 核数开线程太浪费。
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    if let Err(error) = runtime.block_on(run()) {
-        tracing::error!("{error}");
-        std::process::exit(1);
+/// 读取指定路径的配置文件。
+///
+/// 返回 `(配置, 错误信息)`。配置文件读不出来时用默认值继续启动，
+/// 但错误信息要交给调用方显示给用户。
+fn read_config_file(path: &std::path::Path) -> (jitter_core::config::AppConfig, Option<String>) {
+    match jitter_core::config::load_config_from(path) {
+        Ok(Some(loaded)) => (loaded, None),
+        Ok(None) => (jitter_core::config::AppConfig::default(), None),
+        Err(error) => (
+            jitter_core::config::AppConfig::default(),
+            Some(format!("配置文件 {} 读取失败：{error}", path.display())),
+        ),
     }
 }
 
-async fn run() -> anyhow::Result<()> {
-    // 配置：内置默认值 < 配置文件 < 环境变量（与 TS 版一致）。
+fn main() {
+    // 配置：内置默认值 < 配置文件 < 环境变量（与旧 TS 版一致）。
+    // 先读配置是为了知道日志目录（与数据库同级），读失败也要继续用默认值启动。
     let mut config = jitter_core::config::AppConfig::default();
+    let mut config_error: Option<String> = None;
+    let mut config_path: Option<std::path::PathBuf> = None;
     if let Some(path) = jitter_core::config::find_config_path(None) {
-        if let Some(loaded) = jitter_core::config::load_config_from(&path)? {
-            config = loaded;
-        }
-        tracing::info!("配置: {}", path.display());
+        let (loaded, error) = read_config_file(&path);
+        config = loaded;
+        config_error = error;
+        // 无论配置内容读没读成功，**数据目录基准都按这个配置文件所在目录算**：
+        // 否则配置一坏就退回 exe 目录，用默认 dbPath 指向另一个库，用户以为数据丢了。
+        config_path = Some(path);
     }
     apply_env_overrides(&mut config);
+    // 数据库路径归一化成绝对路径。
+    //
+    // 相对路径按「配置文件所在目录 → 可执行文件所在目录」解析，不跟当前工作目录走：
+    // 否则在源码仓库根目录运行开发版时，相对的 "data/app.db" 会直接命中用户安装版
+    // 的真实数据库，开发和正式环境就混在一起了。
+    let base_dir = jitter_core::config::base_dir_for(config_path.as_deref());
+    config.db_path = jitter_core::config::resolve_db_path_absolute(&base_dir, &config.db_path)
+        .to_string_lossy()
+        .to_string();
+    let log_dir = jitter_core::logging::log_dir(&config.db_path);
+    init_tracing(&log_dir);
+    install_panic_hook(&log_dir);
     jitter_core::config::set_active_config(config.clone());
+    if let Some(path) = config_path {
+        tracing::info!("配置: {}", path.display());
+    }
+    tracing::info!("数据目录基准: {}", base_dir.display());
+    if let Some(error) = config_error {
+        // 配置坏了不能让程序起不来，但必须让用户看见：健康检查会把它回报给界面，
+        // 顶部会弹出「后台降级」横幅告诉他去修配置文件。
+        tracing::error!("{error}（已用默认配置继续启动）");
+        crate::api::set_startup_error(&format!(
+            "{error}（已用默认配置继续启动，请检查配置文件）"
+        ));
+    }
 
+    // 本地小工具：2 个工作线程足够（HTTP 轮询 + 定时器），
+    // 又能保证 DB 操作阻塞时健康检查仍可响应。默认按 CPU 核数开线程太浪费。
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => fatal_exit(&log_dir, &format!("无法创建异步运行时：{error}")),
+    };
+    if let Err(error) = runtime.block_on(run(config)) {
+        fatal_exit(&log_dir, &error.to_string());
+    }
+}
+
+async fn run(config: jitter_core::config::AppConfig) -> anyhow::Result<()> {
     // 升级/重启后新进程的启动延迟：等旧进程退出，释放端口与单实例锁。
     let delay = std::env::var("JITTER_STARTUP_DELAY_MS")
         .ok()
@@ -214,6 +368,10 @@ async fn run() -> anyhow::Result<()> {
     let db_path = config.db_path.clone();
     jitter_core::db::init_db(Some(&db_path))?;
     tracing::info!("数据库: {db_path}");
+    tracing::info!(
+        "运行日志: {}",
+        jitter_core::logging::log_dir(&db_path).display()
+    );
 
     // 全局设置：接通电源时防止系统休眠（默认关闭）。
     jitter_core::host::set_prevent_sleep(jitter_core::db::get_prevent_sleep_on_ac());
@@ -273,4 +431,32 @@ async fn run() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(config.shutdown_grace_ms.max(0) as u64)).await;
     remove_runtime_file();
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_broken_config_keeps_its_own_directory_as_the_data_base() {
+        // 配置文件损坏时不能让数据目录基准退回 exe 目录：
+        // 那样会用默认 dbPath 指向另一个库，用户以为数据丢了。
+        let dir = std::env::temp_dir().join(format!("jitter-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("jitter.config.json");
+        std::fs::write(&path, "{ 这不是合法 JSON").expect("write");
+
+        let (config, error) = read_config_file(&path);
+        assert!(error.is_some(), "坏掉的配置必须报错给用户看");
+        assert_eq!(config.db_path, "data/app.db", "读不出来时用默认 dbPath");
+
+        // 关键：基准目录仍然是配置文件所在目录。
+        let base = jitter_core::config::base_dir_for(Some(&path));
+        assert_eq!(base, dir);
+        let resolved = jitter_core::config::resolve_db_path_absolute(&base, &config.db_path);
+        assert_eq!(resolved, dir.join("data").join("app.db"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

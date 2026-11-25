@@ -8,9 +8,9 @@
 mod imp {
     use std::process::Command;
 
-    use muda::{ContextMenu, IsMenuItem, Menu, MenuEvent, MenuItem, CheckMenuItem};
+    use muda::{IsMenuItem, Menu, MenuEvent, MenuItem, CheckMenuItem};
     use tokio_util::sync::CancellationToken;
-    use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
+    use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
 
     /// 启动托盘线程。失败只打日志：托盘是增强件，不阻塞主服务。
     pub fn spawn(port: u16, quit: CancellationToken) {

@@ -3,7 +3,7 @@
 //! 两者都可选，且与前置 curl 组合使用。语义与其余部分一致：
 //! 本地挂钟、分钟精度，结束早于开始的时段跨午夜并归属**开始日**。
 
-use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
+use chrono::{DateTime, Datelike, Local, Timelike};
 use serde_json::Value as Json;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

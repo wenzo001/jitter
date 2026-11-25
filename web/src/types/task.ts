@@ -1,6 +1,24 @@
 export type ScheduleKind = 'daily' | 'interval'
 export type TaskStatus = 'active' | 'stopped' | string
 
+/** 上一次执行的结果归类。 */
+export type RunOutcome = 'success' | 'failed' | 'condition_miss'
+
+export interface TaskLastRun {
+  id: number
+  executedAt: number
+  outcome: RunOutcome
+  /** HTTP 状态码。 */
+  status: number | null
+  durationMs: number | null
+  error: string | null
+  /** 是否满足成功条件（1 = 满足）。 */
+  matched: number | null
+  /** 触发来源：scheduled / manual / startup。 */
+  runSource: string | null
+  kind: string
+}
+
 export interface Task {
   id: string
   name: string
@@ -55,6 +73,8 @@ export interface Task {
   running: boolean
   running_since: number | null
   schedule_error: string | null
+  /** 上一次执行（没有执行过时为 null）。 */
+  last_run: TaskLastRun | null
 }
 
 export interface TaskPayload {

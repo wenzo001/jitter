@@ -295,10 +295,6 @@ impl HeaderMap {
         self.entries.iter().position(|entry| HeaderMap::key(&entry.name) == key)
     }
 
-    fn get(&self, key: &str) -> Option<&HeaderEntry> {
-        self.index_of(key).map(|index| &self.entries[index])
-    }
-
     fn get_mut(&mut self, key: &str) -> Option<&mut HeaderEntry> {
         let index = self.index_of(key)?;
         self.entries.get_mut(index)
@@ -390,6 +386,9 @@ fn safe_decode(value: &str) -> String {
 }
 
 /// Shell 风格的 tokenizer。
+// `started` 在每次 push 后复位，编译器对宏展开里的最后一次赋值判定为「没被读到」
+// （末尾那次 push!() 之后确实不再读），属于误报。
+#[allow(unused_assignments)]
 pub fn tokenize_curl(input: &str) -> Result<Vec<String>, CurlParseError> {
     let chars: Vec<char> = input.chars().collect();
     let mut tokens: Vec<String> = Vec::new();
@@ -713,7 +712,7 @@ fn headers_to_object(map: &HeaderMap) -> Result<JsonMap, CurlParseError> {
     Ok(result)
 }
 
-fn header_message(error: &http::header::InvalidHeaderName) -> &'static str {
+fn header_message(_error: &http::header::InvalidHeaderName) -> &'static str {
     "header 名称非法"
 }
 
@@ -832,7 +831,7 @@ pub fn parse_curl_command(input: &str) -> Result<RequestSpec, CurlParseError> {
     let mut end_of_options = false;
     let mut i = 0usize;
 
-    let mut take_next = |tokens: &[String], i: &mut usize, flag: &str| -> Result<String, CurlParseError> {
+    let take_next = |tokens: &[String], i: &mut usize, flag: &str| -> Result<String, CurlParseError> {
         match tokens.get(*i + 1) {
             Some(value) => {
                 *i += 1;

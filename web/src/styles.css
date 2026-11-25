@@ -73,10 +73,13 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 8px 16px;
+  /* 窄窗口时让「操作区」整体换到第二行，而不是在按钮中间断开。 */
+  flex-wrap: wrap;
 }
 
 .brand {
+  flex: 0 1 auto;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -112,6 +115,12 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 时钟独立成组：宽窗口贴在操作区左边，窄窗口留在第一行右侧。 */
+.topbar-clock {
+  flex: none;
+  margin-left: auto;
 }
 
 .topbar-actions {
@@ -175,6 +184,12 @@ body {
   height: 100%;
 }
 
+/* 每列只有一个面板，让它撑满列高：左右两列看起来一样高，不会一边留白。 */
+.column > .panel {
+  flex: 1;
+  min-height: 0;
+}
+
 .panel {
   display: flex;
   flex-direction: column;
@@ -201,6 +216,27 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: none;
+}
+
+/* 标题 + 副信息归为一段：窄的时候整段按钮一起换行，不会只掉下一个按钮。 */
+.panel-head-main {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.panel-meta {
+  font-size: 12px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.panel-head-main .panel-title {
+  flex: none;
 }
 
 .panel-title {
@@ -335,6 +371,61 @@ body {
   margin-top: 8px;
   font-size: 12px;
   color: var(--muted);
+}
+
+/* 标签与后面的内容之间留一点间距（模板里的空格会被 Vue 折叠掉，所以用样式控制）。 */
+.task-meta-label {
+  margin-right: 4px;
+}
+
+/* 上一次执行：颜色条 + 醒目时间，成功 / 失败一眼可辨。 */
+.task-last {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border-left: 3px solid var(--border);
+  background: #f8fafc;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.task-last.is-success {
+  border-left-color: var(--ok);
+  background: #f1faf5;
+}
+
+.task-last.is-failed {
+  border-left-color: var(--err);
+  background: #fff4f3;
+}
+
+.task-last.is-condition_miss {
+  border-left-color: #d29a2f;
+  background: #fffaf0;
+}
+
+.task-last.is-empty {
+  border-left-color: #cbd2dd;
+  color: var(--muted);
+}
+
+.task-last-time {
+  font-family: var(--mono);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-last-rel {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-last-tag {
+  margin-inline-end: 0;
 }
 
 .task-request {
@@ -590,6 +681,15 @@ body {
   gap: 10px;
   padding: 10px;
   border-top: 1px solid var(--border);
+}
+
+.logs-cap {
+  flex: none;
+  margin: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  text-align: center;
 }
 
 .detail-block {
@@ -881,6 +981,12 @@ body {
 
   .metrics-strip {
     display: none;
+  }
+
+  /* 顶栏固定两段：第一行品牌 + 时钟，第二行一整排操作按钮（不再从中间断开）。 */
+  .topbar-actions {
+    flex: 1 0 100%;
+    justify-content: flex-start;
   }
 }
 
