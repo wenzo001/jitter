@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-25 · v2.1.11 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-25 · v2.1.12 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.11（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.11>。
+**当前版本：v2.1.12（发布中）**，上一版 Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.11>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -237,6 +237,7 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 | JSON / 代码内容改用 `highlight.js`：JSON 缩进 2 空格 + 高亮，脚本按对应语言高亮，长行折行 | `components/common/CodeBlock.vue`（新增，替换 v2.1.10 的 `JsonViewer`） |
 | 代码字体换成 JetBrains Mono（只内嵌 latin 子集 40 KB） | `styles.css`（`@font-face` + `--mono`） |
 | 日历藏掉 antd 的「月 / 年」视图切换（年视图跟我们的按天渲染对不上，切过去是乱的） | `components/dialogs/CalendarDialog.vue`（`.ant-picker-calendar-mode-switch`） |
+| 顶栏「更多」改成鼠标悬停即展开（点击也保留，触屏设备还得靠点击） | `App.vue`（`:trigger="['hover', 'click']"`） |
 
 ### 6.0 v2.1.10：界面精简与信息分层（电脑端优先）
 

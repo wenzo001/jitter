@@ -427,8 +427,8 @@ onMounted(async () => {
             <a-button size="small" type="primary" ghost @click="openGlobalTest">
               {{ $t('topbar.testCurl') }}
             </a-button>
-            <!-- 次要入口收进「更多」：电脑端顶栏只留品牌、时钟和一个主操作。 -->
-            <a-dropdown :trigger="['click']" :menu="moreMenu" placement="bottomRight">
+            <!-- 次要入口收进「更多」：电脑端顶栏只留品牌、时钟和一个主操作。鼠标移上去就展开，点击也保留（触屏用）。 -->
+            <a-dropdown :trigger="['hover', 'click']" :menu="moreMenu" placement="bottomRight">
               <a-button size="small">{{ $t('topbar.more') }}</a-button>
             </a-dropdown>
           </div>
