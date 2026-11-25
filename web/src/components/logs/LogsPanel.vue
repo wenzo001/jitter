@@ -124,24 +124,24 @@ const emptyText = computed(() => {
             {{ kindLabel(log.kind) }}
           </a-tag>
           <span>{{ formatTime(log.executed_at) }}</span>
-          <a-tag :color="statusInfo(log).color">{{ statusInfo(log).text }}</a-tag>
           <span v-if="log.duration_ms !== null" class="muted">{{ log.duration_ms }} ms</span>
-          <a-tag v-if="log.kind === 'task' && log.matched !== null" :color="log.matched ? 'success' : 'default'">
-            {{ log.matched ? $t('logs.matched') : $t('logs.notMatched') }}
-          </a-tag>
-          <a-tag v-if="log.notify" :color="log.notify.error ? 'error' : 'blue'" class="notify-tag">
-            {{ log.notify.error ? $t('logs.notifyFailed') : $t('logs.notified') }}
-          </a-tag>
           <a-tag v-if="log.run_source === 'manual'" color="default">
             {{ $t('logs.sourceManual') }}
           </a-tag>
           <a-tag v-if="log.run_source === 'startup'" color="default">
             {{ $t('logs.sourceStartup') }}
           </a-tag>
-          <!-- 请求地址跟其它信息同一行，宽度不够时才换到下一行并占满。 -->
+          <!-- 请求地址是这一行的「内容」，状态标签统一排在它后面。 -->
           <span v-if="log.request_url" class="log-request" :title="`${log.request_method} ${log.request_url}`">
             {{ log.request_method }} {{ log.request_url }}
           </span>
+          <a-tag :color="statusInfo(log).color">{{ statusInfo(log).text }}</a-tag>
+          <a-tag v-if="log.kind === 'task' && log.matched !== null" :color="log.matched ? 'success' : 'default'">
+            {{ log.matched ? $t('logs.matched') : $t('logs.notMatched') }}
+          </a-tag>
+          <a-tag v-if="log.notify" :color="log.notify.error ? 'error' : 'blue'" class="notify-tag">
+            {{ log.notify.error ? $t('logs.notifyFailed') : $t('logs.notified') }}
+          </a-tag>
           <span class="log-more muted">{{ $t('logs.detailMore') }}</span>
         </div>
         <div v-if="log.error" class="log-error">{{ log.error }}</div>

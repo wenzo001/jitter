@@ -1,3 +1,18 @@
+/*
+ * 代码等宽字体：JetBrains Mono（开源，OFL 许可）。
+ * 只内嵌 latin 子集（约 40 KB），其它字符回落到系统等宽字体。
+ */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2')
+    format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   --bg: #f5f6f8;
   --panel: #ffffff;
@@ -10,7 +25,8 @@
   --warn: #a15c07;
   --err: #b42318;
   --radius: 12px;
-  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', sans-serif;
 }
@@ -667,8 +683,9 @@ body {
 
 .log-request {
   /* 跟其它信息同行，把宽屏剩下的空间用起来；空间不够时整体换到下一行并占满。 */
-  flex: 1 1 320px;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 100%;
   font-family: var(--mono);
   font-size: 12px;
   color: #3b475c;
