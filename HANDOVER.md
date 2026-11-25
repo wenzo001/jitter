@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-25 · v2.1.10 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-25 · v2.1.11 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.10（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.10>。
+**当前版本：v2.1.11（发布中）**，上一版 Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.10>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -159,8 +159,22 @@ antd 会把两个中文字之间自动插一个空格（「更多」渲染成 `�
 ### 4.17 日历的星期表头默认右对齐
 antd 的 `th` 是 `text-align: end`，而 `fullCellRender` 里我们把日期数字放在格子左边，
 两者不对齐，看起来就是「周几往右歪」。
-**修法**：`CalendarDialog.vue` 里 `.cal-panel :deep(.ant-picker-content th) { text-align: left; padding: 0 6px 4px 7px; }`，
+**修法**：`CalendarDialog.vue` 里 `.cal-panel :deep(.ant-picker-panel .ant-picker-body thead th) { text-align: left; padding: 0 6px 4px 7px; }`，
 内边距跟 `.cal-cell`（1px 边框 + 6px padding）对上。
+注意选择器要比 antd 的 `.ant-picker-calendar.ant-picker-calendar-full .ant-picker-panel .ant-picker-body th`（0,4,1）更具体才盖得住。
+
+### 4.18 antd 日历的「年」视图跟 fullCellRender 不兼容
+`fullCellRender` 是按「一个月里的每一天」写的，切到整年网格后每个格子都会渲染错（只剩一堆乱码）。
+**规则**：这个日历只需要按月看，把 antd 的视图切换藏掉：
+`.cal-panel :deep(.ant-picker-calendar-mode-switch) { display: none; }`。
+年份/月份的选择器（`.ant-picker-calendar-year-select` / `-month-select`）保留，还能换年月。
+
+### 4.19 highlight.js 要按需注册语言，不要全量引入
+`import hljs from 'highlight.js'` 会把全部 ~190 种语言打进包里。
+**正确写法**：`import hljs from 'highlight.js/lib/core'` + 逐个 `registerLanguage`
+（json / bash / xml / sql / yaml / javascript / python / powershell / ini / dockerfile），
+再 `import 'highlight.js/styles/github.css'` 取配色（包内没有独立 css 文件，主题在 `styles/` 目录）。
+主题类是 `.hljs-*`，跟组件 scoped 样式冲突时要用 `:deep()` 并把选择器写具体一点。
 
 ---
 
@@ -215,6 +229,15 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 
 ## 六、本轮已经做完的事（可以直接接手）
 
+### 6.0.1 v2.1.11：细节打磨（v2.1.10 发布后的反馈）
+
+| 改动 | 落点 |
+| --- | --- |
+| 执行记录一行的状态 tag（HTTP 状态 / 成功 / 已通知）挪到**请求地址后面**，读起来是「做了什么 → 结果如何」 | `components/logs/LogsPanel.vue`（`.log-head` 顺序）、`styles.css`（`.log-request` 改成 `flex: 0 1 auto`，不然地址会把 tag 顶到下一行） |
+| JSON / 代码内容改用 `highlight.js`：JSON 缩进 2 空格 + 高亮，脚本按对应语言高亮，长行折行 | `components/common/CodeBlock.vue`（新增，替换 v2.1.10 的 `JsonViewer`） |
+| 代码字体换成 JetBrains Mono（只内嵌 latin 子集 40 KB） | `styles.css`（`@font-face` + `--mono`） |
+| 日历藏掉 antd 的「月 / 年」视图切换（年视图跟我们的按天渲染对不上，切过去是乱的） | `components/dialogs/CalendarDialog.vue`（`.ant-picker-calendar-mode-switch`） |
+
 ### 6.0 v2.1.10：界面精简与信息分层（电脑端优先）
 
 本轮只动前端（`web/src/**`），Rust 代码一行没改（只有 `Cargo.toml` 的版本号跟着 bump）。目标是「电脑端体验优先，最多兼容平板端」。
@@ -225,7 +248,7 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 | 任务卡「上次执行」压成一行（结果 tag + 「几小时前」），其余进 title 提示 | `components/task/TaskCard.vue`（新增 `lastRunTitle`） |
 | 调休上班日按工作日标注：主标签「工作」+ 副标签「调休 · 节日名」，图例「工作日」计数含调休 | `components/dialogs/CalendarDialog.vue`（`cellLabel` / `cellNote` / `summary`） |
 | 详情抽屉里通知详情挪到**最下面**，独立成「通知详情」分区 | `components/logs/LogDetailDrawer.vue`（`notify-section`） |
-| JSON 用 `vue-json-pretty` 渲染成可折叠的树（键名/类型分色），不是 JSON 就退回纯文本 | `components/common/JsonViewer.vue`（新增），用在详情抽屉和测试台 |
+| JSON / 代码内容改用 `highlight.js` 渲染：JSON 自动缩进 2 空格 + 高亮，脚本按对应语言高亮，全部用 JetBrains Mono 等宽字体 | `components/common/CodeBlock.vue`（新增），用在详情抽屉和测试台 |
 | 日历星期表头跟日期列对齐（antd 默认右对齐，看着是歪的） | `components/dialogs/CalendarDialog.vue`（`:deep(.ant-picker-content th)`） |
 | 顶栏只留品牌 + 状态位 + 时钟 + 指标 + 「试跑 curl」+「更多」，次要入口和语言切换收进下拉 | `App.vue`（`moreMenu` / `onMoreClick`） |
 | 宽屏铺满（去掉 1500px 上限），执行记录把请求 URL 并进首行 | `styles.css`（`.page` / `.topbar-inner` / `.layout` / `.log-request`）、`components/logs/LogsPanel.vue` |
@@ -308,7 +331,7 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 - 日历中文下月份/星期正常（`Jan/Sun` → `1月/一`）；调休上班日显示「工作」+「调休 · 节日名」，图例「工作日」计数已含调休（2026-02：工作日 16 / 休息日 3 / 法定节假日 9 / 调休上班 2）。
 - 日历星期表头与日期列**偏移 0px**（antd 默认右对齐，已改成左对齐并对齐内边距）。
 - 详情抽屉里「通知详情」在最末尾独立分区，请求/响应各块顺序不变。
-- JSON（请求头/请求体/响应头/响应体/通知响应体）走 `vue-json-pretty` 树状渲染，可折叠。
+- JSON（请求头/请求体/响应头/响应体/通知响应体）走 `highlight.js`：JSON 缩进 2 空格 + 高亮，脚本按语言高亮，JetBrains Mono 等宽字体，长行折行。
 
 
 ---
