@@ -67,9 +67,9 @@ body {
 }
 
 .topbar-inner {
-  max-width: 1500px;
-  margin: 0 auto;
-  padding: 10px 24px;
+  max-width: 100%;
+  margin: 0;
+  padding: 10px clamp(16px, 1.6vw, 32px);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -117,10 +117,21 @@ body {
   text-overflow: ellipsis;
 }
 
+.brand-version {
+  font-size: 12px;
+}
+
+/* 顶栏中间的提示位：操作结果、报错都显示在这里，把按钮区腾给操作。 */
+.topbar-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
 /* 时钟独立成组：宽窗口贴在操作区左边，窄窗口留在第一行右侧。 */
 .topbar-clock {
   flex: none;
-  margin-left: auto;
 }
 
 .topbar-actions {
@@ -145,8 +156,8 @@ body {
 .status-line {
   color: var(--muted);
   font-size: 12.5px;
-  max-width: 34ch;
-  text-align: right;
+  max-width: 52ch;
+  text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -162,14 +173,15 @@ body {
   min-height: 0;
   box-sizing: border-box;
   width: 100%;
-  max-width: 1500px;
-  margin: 0 auto;
-  padding: 18px 24px;
+  /* 宽屏占满：不再限制在 1500px 里，两侧留白是浪费。 */
+  max-width: 100%;
+  margin: 0;
+  padding: 18px clamp(16px, 1.6vw, 32px);
 }
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(400px, 460px) minmax(0, 1fr);
+  grid-template-columns: minmax(360px, 460px) minmax(0, 1fr);
   gap: 18px;
   height: 100%;
   min-height: 0;
@@ -385,7 +397,7 @@ body {
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 8px;
-  padding: 5px 10px;
+  padding: 4px 10px;
   border-radius: 8px;
   border-left: 3px solid var(--border);
   background: #f8fafc;
@@ -413,15 +425,12 @@ body {
   color: var(--muted);
 }
 
-.task-last-time {
-  font-family: var(--mono);
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-}
-
+/* 卡面上「多久之前」是主信息，其余细节在 title 提示里。 */
 .task-last-rel {
-  color: var(--muted);
-  font-size: 12px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .task-last-tag {
@@ -657,13 +666,20 @@ body {
 }
 
 .log-request {
-  margin-top: 5px;
+  /* 跟其它信息同行，把宽屏剩下的空间用起来；空间不够时整体换到下一行并占满。 */
+  flex: 1 1 320px;
+  min-width: 0;
   font-family: var(--mono);
   font-size: 12px;
   color: #3b475c;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.log-more {
+  flex: none;
+  margin-left: auto;
 }
 
 .log-error {
@@ -968,7 +984,27 @@ body {
 }
 
 /* ---------- 响应式 ---------- */
+/* 宽屏（电脑端优先）：任务列给宽一点，日志列吃掉剩余空间，不留大片空白。 */
+@media (min-width: 1600px) {
+  .layout {
+    grid-template-columns: minmax(420px, 560px) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1280px) {
+  /* 副标题是长句，窄下来先让它退场，顶栏保持一行。 */
+  .brand-sub {
+    display: none;
+  }
+}
+
 @media (max-width: 1180px) {
+  .metrics-strip {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
   /* 窄窗口下改为上下两块，各自占一半高度、各自滚动，整页仍不滚动。 */
   .layout {
     grid-template-columns: 1fr;
@@ -977,10 +1013,6 @@ body {
 
   .column {
     height: auto;
-  }
-
-  .metrics-strip {
-    display: none;
   }
 
   /* 顶栏固定两段：第一行品牌 + 时钟，第二行一整排操作按钮（不再从中间断开）。 */
@@ -997,7 +1029,6 @@ body {
     padding-right: 14px;
   }
 
-  .brand-sub,
   .status-line {
     display: none;
   }

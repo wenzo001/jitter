@@ -29,7 +29,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:3000',
+      // 开发时默认打到 3000（安装版）。
+      // 想连开发实例（副本库）就设 JITTER_API_TARGET=http://127.0.0.1:3111，
+      // 免得调试时把请求打到用户的正式库上。
+      '/api': process.env.JITTER_API_TARGET || 'http://127.0.0.1:3000',
     },
   },
   test: {

@@ -40,7 +40,12 @@ const { t } = useI18n()
 
 const pause = computed(() => (props.task.status === 'active' ? pauseStateOf(props.task) : null))
 
-/** 上一次执行：成功 / 失败 / 未满足成功条件。 */
+/**
+ * 上一次执行：成功 / 失败 / 未满足成功条件。
+ *
+ * 卡面上只留「结果 + 多久之前」一行，其余细节（准确时间、触发方式、
+ * 状态码、耗时）放进 title 提示，鼠标悬停才看——这样卡片密度低、一眼扫得完。
+ */
 const lastRun = computed(() => {
   const run = props.task.last_run
   if (!run) return null
@@ -57,6 +62,16 @@ const lastRun = computed(() => {
         ? t('task.sourceStartup')
         : t('task.sourceScheduled')
   return { ...run, ...meta, source }
+})
+
+/** 悬停提示：把「上次执行」的完整信息一次性给全。 */
+const lastRunTitle = computed(() => {
+  const run = lastRun.value
+  if (!run) return ''
+  const parts = [formatTime(run.executedAt), run.source]
+  if (run.status !== null) parts.push(`HTTP ${run.status}`)
+  if (run.durationMs !== null) parts.push(`${run.durationMs} ms`)
+  return parts.join(' · ')
 })
 
 const timeoutText = computed(() => {
@@ -201,17 +216,14 @@ function onDragStart(event: DragEvent) {
       </div>
     </div>
 
-    <div class="task-last" :class="lastRun ? `is-${lastRun.outcome}` : 'is-empty'">
+    <div
+      class="task-last"
+      :class="lastRun ? `is-${lastRun.outcome}` : 'is-empty'"
+      :title="lastRunTitle"
+    >
       <template v-if="lastRun">
         <a-tag :color="lastRun.color" class="task-last-tag">{{ lastRun.text }}</a-tag>
-        <span class="task-last-time">{{ formatTime(lastRun.executedAt) }}</span>
         <span class="task-last-rel">{{ formatRelative(lastRun.executedAt, now, t) }}</span>
-        <span class="sep">·</span>
-        <span class="muted">{{ $t('task.triggeredBy', { source: lastRun.source }) }}</span>
-        <span v-if="lastRun.status !== null" class="sep">·</span>
-        <span v-if="lastRun.status !== null" class="muted">HTTP {{ lastRun.status }}</span>
-        <span v-if="lastRun.durationMs !== null" class="sep">·</span>
-        <span v-if="lastRun.durationMs !== null" class="muted">{{ lastRun.durationMs }} ms</span>
       </template>
       <template v-else>
         <a-tag color="default" class="task-last-tag">{{ $t('task.neverRun') }}</a-tag>

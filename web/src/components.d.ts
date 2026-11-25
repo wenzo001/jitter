@@ -53,6 +53,7 @@ declare module 'vue' {
     DeleteTaskDialog: typeof import('./components/dialogs/DeleteTaskDialog.vue')['default']
     DiagnosticsDialog: typeof import('./components/dialogs/DiagnosticsDialog.vue')['default']
     ErrorBoundary: typeof import('./components/common/ErrorBoundary.vue')['default']
+    JsonViewer: typeof import('./components/common/JsonViewer.vue')['default']
     LogDetailDrawer: typeof import('./components/logs/LogDetailDrawer.vue')['default']
     LogsPanel: typeof import('./components/logs/LogsPanel.vue')['default']
     PauseDialog: typeof import('./components/dialogs/PauseDialog.vue')['default']

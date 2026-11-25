@@ -26,16 +26,25 @@ function infoOf(date: Dayjs): DayInfo | undefined {
   return dayMap.value.get(date.format('YYYY-MM-DD'))
 }
 
-/** 格子里的角标：法定节假日写节日名，其余写短标签。 */
+/**
+ * 格子主标签：这一天的性质。
+ *
+ * 调休上班日落在周末，但它**是工作日**，所以主标签也是「工作」，
+ * 另加一行「调休」注明原因，避免被当成休息日。
+ */
 function cellLabel(date: Dayjs): string {
   const info = infoOf(date)
   if (!info) return ''
   if (info.dayType === 'holiday') return info.name || t('calendar.cellHoliday')
-  if (info.dayType === 'makeup') {
-    return info.name ? t('calendar.cellMakeup', { name: info.name }) : t('calendar.cellMakeupShort')
-  }
   if (info.dayType === 'weekend') return t('calendar.cellWeekend')
   return t('calendar.cellWorkday')
+}
+
+/** 格子副标签：只有调休上班日有。 */
+function cellNote(date: Dayjs): string {
+  const info = infoOf(date)
+  if (!info || info.dayType !== 'makeup') return ''
+  return info.name ? t('calendar.cellMakeup', { name: info.name }) : t('calendar.cellMakeupShort')
 }
 
 function cellClass(date: Dayjs): string {
@@ -52,11 +61,13 @@ function isToday(date: Dayjs): boolean {
 const summary = computed(() => {
   const days = data.value?.days ?? []
   const count = (type: string) => days.filter((day) => day.dayType === type).length
+  const makeup = count('makeup')
   return {
-    workday: count('workday'),
+    // 调休上班日也是工作日，计入工作日（休息日不再重复计它）。
+    workday: count('workday') + makeup,
+    makeup,
     weekend: count('weekend'),
     holiday: count('holiday'),
-    makeup: count('makeup'),
   }
 })
 
@@ -121,7 +132,9 @@ function shiftMonth(delta: number): void {
         <a-tag color="success">{{ $t('calendar.legendWorkday', { count: summary.workday }) }}</a-tag>
         <a-tag color="blue">{{ $t('calendar.legendWeekend', { count: summary.weekend }) }}</a-tag>
         <a-tag color="red">{{ $t('calendar.legendHoliday', { count: summary.holiday }) }}</a-tag>
-        <a-tag color="purple">{{ $t('calendar.legendMakeup', { count: summary.makeup }) }}</a-tag>
+        <a-tag color="purple" :title="$t('calendar.legendMakeupTitle')">
+          {{ $t('calendar.legendMakeup', { count: summary.makeup }) }}
+        </a-tag>
       </div>
     </div>
 
@@ -133,6 +146,7 @@ function shiftMonth(delta: number): void {
           <div class="cal-cell" :class="[cellClass(date), { 'is-today': isToday(date) }]">
             <span class="cal-cell-day">{{ date.date() }}</span>
             <span v-if="cellLabel(date)" class="cal-cell-label">{{ cellLabel(date) }}</span>
+            <span v-if="cellNote(date)" class="cal-cell-note">{{ cellNote(date) }}</span>
           </div>
         </template>
       </a-calendar>
@@ -186,6 +200,21 @@ function shiftMonth(delta: number): void {
   border: 1px solid transparent;
 }
 
+/*
+ * 星期表头要和下面的日期列对齐。
+ * antd 默认把「一 二 三 …」右对齐（text-align: end），
+ * 而我们的日期数字是放在格子左边的，于是表头看着往右偏。
+ * 这里把表头也改成左对齐，内边距跟 .cal-cell 对上（1px 边框 + 6px padding）。
+ *
+ * 选择器要写得比 antd 的更具体：它的
+ * `.ant-picker-calendar.ant-picker-calendar-full .ant-picker-panel .ant-picker-body th`
+ * 是 (0,4,1)，直接写 `.cal-panel :deep(.ant-picker-content th)` (0,3,1) 会被它盖掉。
+ */
+.cal-panel :deep(.ant-picker-panel .ant-picker-body thead th) {
+  text-align: left;
+  padding: 0 6px 4px 7px;
+}
+
 .cal-cell-day {
   font-family: var(--mono);
   font-size: 13px;
@@ -224,9 +253,20 @@ function shiftMonth(delta: number): void {
   border-color: #d9c7ff;
 }
 
+/* 调休上班日是工作日：主标签跟工作日一样用绿色，紫色留给「调休」注解。 */
 .cal-cell.is-makeup .cal-cell-label {
-  color: #722ed1;
+  color: var(--ok);
   font-weight: 600;
+}
+
+.cal-cell-note {
+  font-size: 10.5px;
+  line-height: 1.25;
+  color: #722ed1;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cal-cell.is-uncertain {

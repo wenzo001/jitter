@@ -39,7 +39,7 @@ const enUS: MessageSchema = {
     diagnostics: 'Diagnostics',
     settings: 'Settings',
     testCurl: 'Try curl',
-    language: 'Language',
+    more: 'More',
     languageZh: '中文',
     languageEn: 'English',
   },
@@ -114,7 +114,6 @@ const enUS: MessageSchema = {
     sourceManual: 'Manual',
     sourceStartup: 'Startup',
     sourceScheduled: 'Scheduled',
-    triggeredBy: '{source} trigger',
     neverRun: 'Not run',
     noRunRecord: 'No execution records yet',
     crossMidnight: 'Crosses midnight',
@@ -416,8 +415,11 @@ const enUS: MessageSchema = {
     notMatched: 'Not successful',
     request: 'Request',
     error: 'Error',
-    notifyFailedTitle: 'Notification (failed)',
-    notifySentTitle: 'Notification (sent)',
+    notifyStateSent: 'Sent',
+    notifyStateFailed: 'Failed',
+    notifySectionTitle: 'Notification details',
+    notifySectionHint:
+      'This is the notification triggered by the record above — a separate request from the task run itself.',
     notifyRequest: 'Notification request',
     notifyError: 'Notification error',
     notifyResponse: 'Notification response',
@@ -460,6 +462,8 @@ const enUS: MessageSchema = {
     legendWeekend: 'Days off {count}',
     legendHoliday: 'Statutory holidays {count}',
     legendMakeup: 'Make-up workdays {count}',
+    legendMakeupTitle:
+      'Make-up workdays count as workdays and are already included in the workday count.',
     cellHoliday: 'Statutory holiday',
     cellMakeup: 'Make-up · {name}',
     cellMakeupShort: 'Make-up',
@@ -467,7 +471,7 @@ const enUS: MessageSchema = {
     cellWorkday: 'Work',
     monthTitle: '{month} {year}',
     hint:
-      'Data comes from holiday-cn (Chinese statutory holidays, including make-up workdays): a make-up workday counts as a workday even on a weekend, and a statutory holiday counts as a day off even on a weekday.\nGreyed-out dates mean there is no holiday data for that year, so they are inferred from the weekday only.',
+      'Data comes from holiday-cn (Chinese statutory holidays, including make-up workdays): a make-up workday counts as a workday even on a weekend, and a statutory holiday counts as a day off even on a weekday.\nMake-up workdays are marked as "Work" with a "Make-up" note, and the workday count already includes them.\nGreyed-out dates mean there is no holiday data for that year, so they are inferred from the weekday only.',
   },
   cleanup: {
     title: 'Clean up logs',

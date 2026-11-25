@@ -6,6 +6,13 @@
  * - 切换时同步更新 `<html lang>`，方便屏幕阅读器与浏览器语言判断。
  */
 import { createI18n } from 'vue-i18n'
+// 注册 dayjs 的中文语言包。
+//
+// antdv-next 的日历头（年/月/日选择器）里的月份名与星期名来自 dayjs：
+// `dayjs().locale('zh-cn').localeData().monthsShort()`。
+// 不注册语言包时 dayjs 会静默回退到英文，于是中文界面里出现
+// “Jan Feb Mar…” 和 “Su Mo Tu…”。这里只注册，不改全局 locale。
+import 'dayjs/locale/zh-cn'
 import zhCN from './locales/zh-CN'
 import enUS from './locales/en-US'
 import {

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
+import type { MenuProps } from 'antdv-next'
 import zhCN from 'antdv-next/locale/zh_CN'
 import enUS from 'antdv-next/locale/en_US'
 import { getTask, resumeTask, runTask, startTask, stopTask } from '@/api/tasks'
@@ -80,14 +81,53 @@ const theme = {
 /** antdv-next 组件自带的文案也跟着界面语言切换。 */
 const antLocale = computed(() => (locale.value === 'en-US' ? enUS : zhCN))
 
-const localeOptions = computed(() => [
-  { label: t('topbar.languageZh'), value: 'zh-CN' },
-  { label: t('topbar.languageEn'), value: 'en-US' },
-])
-
 function onLocaleChange(value: unknown): void {
   if (value === 'zh-CN' || value === 'en-US') setLocale(value as Locale)
 }
+
+/** 「更多」菜单：次要入口 + 语言切换。 */
+function onMoreClick(info: { key: string | number }): void {
+  const key = String(info.key)
+  switch (key) {
+    case 'statistics':
+      statsOpen.value = true
+      break
+    case 'database':
+      databaseOpen.value = true
+      break
+    case 'runtimeLogs':
+      runtimeLogsOpen.value = true
+      break
+    case 'diagnostics':
+      diagnosticsOpen.value = true
+      break
+    case 'settings':
+      settingsOpen.value = true
+      break
+    case 'lang-zh':
+      onLocaleChange('zh-CN')
+      break
+    case 'lang-en':
+      onLocaleChange('en-US')
+      break
+  }
+}
+
+const moreMenu = computed<MenuProps>(() => {
+  // 语言项前面给当前语言打个勾：下拉里两项长得一样，不标记的话看不出当前是哪个。
+  const check = (on: boolean) => (on ? '✓ ' : '')
+  const items: NonNullable<MenuProps['items']> = [
+    { key: 'statistics', label: t('topbar.statistics') },
+    { key: 'database', label: t('topbar.database') },
+    { key: 'runtimeLogs', label: t('topbar.runtimeLogs') },
+    { key: 'diagnostics', label: t('topbar.diagnostics') },
+    { key: 'settings', label: t('topbar.settings') },
+    { type: 'divider' },
+    { key: 'lang-zh', label: check(locale.value === 'zh-CN') + t('topbar.languageZh') },
+    { key: 'lang-en', label: check(locale.value === 'en-US') + t('topbar.languageEn') },
+  ]
+  return { items, onClick: onMoreClick }
+})
 
 const formTitle = computed(() =>
   formMode.value === 'edit'
@@ -369,8 +409,11 @@ onMounted(async () => {
           <div class="brand">
             <span class="brand-mark" />
             <span class="brand-name">Jitter</span>
-            <span v-if="app.version" class="muted" style="font-size: 12px">v{{ app.version }}</span>
+            <span v-if="app.version" class="muted brand-version">v{{ app.version }}</span>
             <span class="brand-sub">{{ $t('topbar.subtitle') }}</span>
+          </div>
+          <div class="topbar-status">
+            <span class="status-line" :class="{ 'is-error': app.status.error }">{{ app.status.text }}</span>
           </div>
           <div class="topbar-clock">
             <TopClock
@@ -381,26 +424,13 @@ onMounted(async () => {
           </div>
           <div class="topbar-actions">
             <span v-if="metricsText" class="metrics-strip">{{ metricsText }}</span>
-            <a-button size="small" @click="statsOpen = true">{{ $t('topbar.statistics') }}</a-button>
-            <a-button size="small" @click="databaseOpen = true">{{ $t('topbar.database') }}</a-button>
-            <a-button size="small" @click="runtimeLogsOpen = true">
-              {{ $t('topbar.runtimeLogs') }}
-            </a-button>
-            <a-button size="small" @click="diagnosticsOpen = true">
-              {{ $t('topbar.diagnostics') }}
-            </a-button>
-            <a-button size="small" @click="settingsOpen = true">{{ $t('topbar.settings') }}</a-button>
             <a-button size="small" type="primary" ghost @click="openGlobalTest">
               {{ $t('topbar.testCurl') }}
             </a-button>
-            <a-segmented
-              size="small"
-              class="locale-switch"
-              :value="locale"
-              :options="localeOptions"
-              @update:value="onLocaleChange"
-            />
-            <span class="status-line" :class="{ 'is-error': app.status.error }">{{ app.status.text }}</span>
+            <!-- 次要入口收进「更多」：电脑端顶栏只留品牌、时钟和一个主操作。 -->
+            <a-dropdown :trigger="['click']" :menu="moreMenu" placement="bottomRight">
+              <a-button size="small">{{ $t('topbar.more') }}</a-button>
+            </a-dropdown>
           </div>
         </div>
       </header>
@@ -559,7 +589,5 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.locale-switch {
-  margin-left: 2px;
-}
+/* 顶栏的次要入口都收在「更多」下拉里，这里没有额外样式。 */
 </style>

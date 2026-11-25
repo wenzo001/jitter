@@ -138,10 +138,11 @@ const emptyText = computed(() => {
           <a-tag v-if="log.run_source === 'startup'" color="default">
             {{ $t('logs.sourceStartup') }}
           </a-tag>
-          <span style="margin-left: auto" class="muted">{{ $t('logs.detailMore') }}</span>
-        </div>
-        <div v-if="log.request_url" class="log-request">
-          {{ log.request_method }} {{ log.request_url }}
+          <!-- 请求地址跟其它信息同一行，宽度不够时才换到下一行并占满。 -->
+          <span v-if="log.request_url" class="log-request" :title="`${log.request_method} ${log.request_url}`">
+            {{ log.request_method }} {{ log.request_url }}
+          </span>
+          <span class="log-more muted">{{ $t('logs.detailMore') }}</span>
         </div>
         <div v-if="log.error" class="log-error">{{ log.error }}</div>
         <div v-else-if="log.notify && log.notify.error" class="log-error">
