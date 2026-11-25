@@ -372,26 +372,25 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 
 ## 七之二、本轮最终状态（已实测）
 
-**测试（2026-11-25 实测，v2.1.13）**
+**测试（2026-11-25 实测，v2.1.15）**
 
 | 项目 | 结果 |
 | --- | --- |
 | `cargo test --workspace --jobs 1` | **core 251 项 + app 2 项全绿** |
 | `cargo check --workspace --all-targets --jobs 1` | **0 warning / 0 error** |
 | `bun run typecheck` | 退出码 0 |
-| `bun run test` | **9 文件 / 83 用例全绿**（新增 `tests/condition.test.ts` 覆盖网络条件与环境提示、`tests/copy-task.test.ts` 覆盖复制任务的命名） |
-| 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn；执行条件里能看到「只在已连接网络时执行」，下方提示当前网络 |
+| `bun run test` | **10 文件 / 90 用例全绿**（含 `tests/condition.test.ts`、`tests/copy-task.test.ts`、`tests/log-merge.test.ts`） |
+| 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn；连续跳过记录合并成「× 6」并可展开 |
 
 **发布体积（2026-11-25 实测）**
 
 | 项 | 大小 |
 | --- | --- |
-| `rust/target/release/jitter.exe` | **7,702,528 B（7.34 MB）** |
-| `jitter-windows-x64.zip`（Release） | **3,317,959 B（3.16 MB）** |
+| `rust/target/release/jitter.exe` | **7,706,624 B（7.35 MB）** |
+| `jitter-windows-x64.zip`（Release） | **3,317,329 B（3.16 MB）** |
 | `web/dist/assets/index-*.js` | ≈1,743 kB（gzip ≈488 KB） |
 | `web/dist/assets/jetbrains-mono-latin-wght-normal.woff2` | 40.4 KB |
 
-> 相对 v2.1.12（7,691,264 B）多了约 11 KB：网络探测代码 + 条件字段。
 > release profile 已是 `opt-level="z" + lto + codegen-units=1 + strip=true`，没有进一步空间。
 
 **界面实测结论（v2.1.10 / v2.1.11）**
