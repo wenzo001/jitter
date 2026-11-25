@@ -422,6 +422,10 @@ const enUS: MessageSchema = {
     sourceStartup: 'Startup',
     detailMore: 'Details ›',
     notifyFailedDetail: 'Notification failed: {error}',
+    mergeToggle: 'Merge repeats',
+    mergeHint: 'Consecutive records of the same kind are merged into one; click “× N” to expand them all',
+    mergeExpand: 'Expand all records in this group',
+    mergeCollapse: 'Collapse this group',
   },
   logDetail: {
     title: 'Execution details',

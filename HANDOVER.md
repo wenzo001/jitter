@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-25 · v2.1.14 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-25 · v2.1.15 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.14（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.14>。
+**当前版本：v2.1.15（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.15>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -242,6 +242,26 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 ---
 
 ## 六、本轮已经做完的事（可以直接接手）
+
+### 6.0.4 v2.1.15：执行记录合并显示
+
+用户反馈：连续重复的执行记录（截图里是一串「不在执行时段被跳过」）刷屏，渲染压力大也不好读，
+要求能合并显示，并且**合并后还能点开看**。
+
+| 改动 | 落点 |
+| --- | --- |
+| 归组规则：相邻且「结构性字段」完全一致才算同型；错误文本只把**第一个**时间戳抹掉（「当前 18:55」→「当前 \<now\>」），后面的时间窗保持原样 | `web/src/utils/log-merge.ts`（`logGroupKey` / `normalizeLogError` / `groupLogs`） |
+| 记录行抽成组件，主行与展开后的子行共用 | `web/src/components/logs/LogRow.vue`（新增） |
+| 面板头部加「合并重复记录」开关（默认开，偏好存 localStorage），行上显示「× N」，点它展开 / 收起 | `web/src/components/logs/LogsPanel.vue` |
+| 合并组展开区用浅底 + 左边线区分 | `web/src/styles.css`（`.log-group` / `.log-group-body` / `.merge-tag`） |
+| 单测覆盖归一化、同因合并、不同窗口不合并、中间断开、耗时不影响归组 | `web/tests/log-merge.test.ts` |
+
+**约定**：
+- **只合并相邻**记录；中间夹了一条别的类型就断开分组。
+- 归组键**不含耗时和记录 id**——它们每次都在变，带上就永远合并不了。
+- 合并只影响显示：记录一条不少，展开后每条都能单独看详情。
+- 跳过原因里的时间窗（「不在执行时段 23:55–01:05 内」）必须留在归组键里，
+  只抹掉「当前 HH:MM」这一个时间戳，否则不同的时段会被误并成一组。
 
 ### 6.0.3 v2.1.14：复制任务
 

@@ -648,6 +648,16 @@ body {
   margin-left: auto;
 }
 
+.logs-merge-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 /* ---------- 日志 ---------- */
 .log-list {
   display: flex;
@@ -655,6 +665,33 @@ body {
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
+}
+
+/* 合并后的记录组：主行 + 展开后的其余记录。 */
+.log-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.log-group-body {
+  background: #fafbfd;
+  border-left: 2px solid #e3e8f0;
+}
+
+.log-group-body .log-item:last-child {
+  border-bottom: none;
+}
+
+/* 「× N」标记：可点开 / 收起。 */
+.merge-tag {
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+}
+
+.merge-tag.is-expanded {
+  background: #e6f4ff;
+  border-color: #91caff;
 }
 
 .log-item {

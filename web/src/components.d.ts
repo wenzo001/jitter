@@ -55,6 +55,7 @@ declare module 'vue' {
     DiagnosticsDialog: typeof import('./components/dialogs/DiagnosticsDialog.vue')['default']
     ErrorBoundary: typeof import('./components/common/ErrorBoundary.vue')['default']
     LogDetailDrawer: typeof import('./components/logs/LogDetailDrawer.vue')['default']
+    LogRow: typeof import('./components/logs/LogRow.vue')['default']
     LogsPanel: typeof import('./components/logs/LogsPanel.vue')['default']
     PauseDialog: typeof import('./components/dialogs/PauseDialog.vue')['default']
     RuntimeLogsDialog: typeof import('./components/dialogs/RuntimeLogsDialog.vue')['default']

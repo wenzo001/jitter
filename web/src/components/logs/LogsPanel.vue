@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useStorage } from '@vueuse/core'
 import type { LogSummary } from '@/types/task'
-import { BACKEND_MARKERS } from '@/api/client'
 import { useLogsStore } from '@/stores/logs'
 import { useTasksStore } from '@/stores/tasks'
 import { useAppStore } from '@/stores/app'
 import { formatTime } from '@/utils/format'
 import { formatSchedule } from '@/utils/schedule'
+import { groupLogs } from '@/utils/log-merge'
+import LogRow from './LogRow.vue'
 import LogDetailDrawer from './LogDetailDrawer.vue'
 
 const emit = defineEmits<{
@@ -22,6 +24,11 @@ const app = useAppStore()
 
 const detailOpen = ref(false)
 const detailId = ref<number | null>(null)
+
+/** 合并连续的同型记录（默认开）：省渲染，也更好读。 */
+const mergeEnabled = useStorage('jitter.mergeLogs', true)
+/** 已展开的合并组（存组 key）。 */
+const expandedGroups = ref<string[]>([])
 
 const selectedTask = computed(() => tasks.selectedTask)
 
@@ -39,6 +46,8 @@ const meta = computed(() => {
 watch(
   () => tasks.selectedId,
   async (id) => {
+    // 换任务时收起展开的组，别把上一个任务的展开状态带过来。
+    expandedGroups.value = []
     try {
       await logs.load(id, { reset: true, pageSize: app.config.logsPageSize })
     } catch (error) {
@@ -70,24 +79,21 @@ function openDetail(log: LogSummary) {
   detailOpen.value = true
 }
 
-function kindLabel(kind: string): string {
-  if (kind === 'missed') return t('logs.kindMissed')
-  if (kind === 'skipped') return t('logs.kindSkipped')
-  return t('logs.kindTask')
+/** 合并后的分组：关掉合并时每条记录自成一组。 */
+const groups = computed(() =>
+  mergeEnabled.value
+    ? groupLogs(logs.logs)
+    : logs.logs.map((log) => ({ key: String(log.id), items: [log] })),
+)
+
+function isExpanded(key: string): boolean {
+  return expandedGroups.value.includes(key)
 }
 
-function statusInfo(log: LogSummary): { text: string; color: string } {
-  if (log.kind === 'missed') return { text: t('logs.statusNotRun'), color: 'orange' }
-  if (log.kind === 'skipped') return { text: t('logs.statusSkipped'), color: 'orange' }
-  if (log.error && log.error.startsWith(BACKEND_MARKERS.timeout)) {
-    return { text: t('logs.statusTimeout'), color: 'orange' }
-  }
-  if (log.aborted) return { text: t('logs.statusAborted'), color: 'error' }
-  if (log.error) return { text: t('logs.statusError'), color: 'error' }
-  if (log.response_status === null) return { text: t('logs.statusNoResponse'), color: 'default' }
-  const status = log.response_status
-  const color = status >= 200 && status < 300 ? 'success' : status < 400 ? 'warning' : 'error'
-  return { text: String(status), color }
+function toggleGroup(key: string) {
+  expandedGroups.value = isExpanded(key)
+    ? expandedGroups.value.filter((item) => item !== key)
+    : [...expandedGroups.value, key]
 }
 
 const emptyText = computed(() => {
@@ -109,6 +115,10 @@ const emptyText = computed(() => {
         <span v-if="meta" class="muted panel-meta">{{ meta }}</span>
       </div>
       <div class="panel-actions">
+        <label class="logs-merge-toggle" :title="$t('logs.mergeHint')">
+          <a-switch size="small" :checked="mergeEnabled" @change="mergeEnabled = $event" />
+          <span class="muted">{{ $t('logs.mergeToggle') }}</span>
+        </label>
         <a-button size="small" type="text" @click="emit('cleanup')">{{ $t('logs.cleanup') }}</a-button>
         <a-button size="small" type="text" @click="refresh">{{ $t('common.refresh') }}</a-button>
       </div>
@@ -118,35 +128,22 @@ const emptyText = computed(() => {
       {{ logs.loading ? $t('common.loading') : emptyText }}
     </div>
     <div v-else class="log-list">
-      <div v-for="log in logs.logs" :key="log.id" class="log-item" @click="openDetail(log)">
-        <div class="log-head">
-          <a-tag :color="log.kind === 'missed' || log.kind === 'skipped' ? 'orange' : 'default'">
-            {{ kindLabel(log.kind) }}
-          </a-tag>
-          <span>{{ formatTime(log.executed_at) }}</span>
-          <span v-if="log.duration_ms !== null" class="muted">{{ log.duration_ms }} ms</span>
-          <a-tag v-if="log.run_source === 'manual'" color="default">
-            {{ $t('logs.sourceManual') }}
-          </a-tag>
-          <a-tag v-if="log.run_source === 'startup'" color="default">
-            {{ $t('logs.sourceStartup') }}
-          </a-tag>
-          <!-- 请求地址是这一行的「内容」，状态标签统一排在它后面。 -->
-          <span v-if="log.request_url" class="log-request" :title="`${log.request_method} ${log.request_url}`">
-            {{ log.request_method }} {{ log.request_url }}
-          </span>
-          <a-tag :color="statusInfo(log).color">{{ statusInfo(log).text }}</a-tag>
-          <a-tag v-if="log.kind === 'task' && log.matched !== null" :color="log.matched ? 'success' : 'default'">
-            {{ log.matched ? $t('logs.matched') : $t('logs.notMatched') }}
-          </a-tag>
-          <a-tag v-if="log.notify" :color="log.notify.error ? 'error' : 'blue'" class="notify-tag">
-            {{ log.notify.error ? $t('logs.notifyFailed') : $t('logs.notified') }}
-          </a-tag>
-          <span class="log-more muted">{{ $t('logs.detailMore') }}</span>
-        </div>
-        <div v-if="log.error" class="log-error">{{ log.error }}</div>
-        <div v-else-if="log.notify && log.notify.error" class="log-error">
-          {{ $t('logs.notifyFailedDetail', { error: log.notify.error }) }}
+      <div v-for="group in groups" :key="group.key" class="log-group">
+        <LogRow
+          :log="group.items[0]"
+          :merge-count="group.items.length"
+          :expanded="isExpanded(group.key)"
+          @select="openDetail(group.items[0])"
+          @toggle="toggleGroup(group.key)"
+        />
+        <div v-if="group.items.length > 1 && isExpanded(group.key)" class="log-group-body">
+          <LogRow
+            v-for="log in group.items.slice(1)"
+            :key="log.id"
+            class="log-item-sub"
+            :log="log"
+            @select="openDetail(log)"
+          />
         </div>
       </div>
     </div>
