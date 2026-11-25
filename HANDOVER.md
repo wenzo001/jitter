@@ -351,6 +351,7 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 | 项 | 大小 |
 | --- | --- |
 | `rust/target/release/jitter.exe` | **7,702,528 B（7.34 MB）** |
+| `jitter-windows-x64.zip`（Release） | **3,317,959 B（3.16 MB）** |
 | `web/dist/assets/index-*.js` | ≈1,743 kB（gzip ≈488 KB） |
 | `web/dist/assets/jetbrains-mono-latin-wght-normal.woff2` | 40.4 KB |
 
