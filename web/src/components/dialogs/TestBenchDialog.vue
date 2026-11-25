@@ -9,7 +9,7 @@ import { useAppStore } from '@/stores/app'
 import { formatShortTime, formatTime } from '@/utils/format'
 import { describeHostEnvironment } from '@/utils/environment'
 import ConditionFields from '@/components/task/ConditionFields.vue'
-import JsonViewer from '@/components/common/JsonViewer.vue'
+import CodeBlock from '@/components/common/CodeBlock.vue'
 
 const props = defineProps<{ open: boolean }>()
 
@@ -412,7 +412,7 @@ defineExpose({ openWith })
               </div>
               <div v-if="step.response" class="detail-block">
                 <h4>{{ $t('testbench.responseBody') }}</h4>
-                <JsonViewer :text="step.response.body" :empty="$t('testbench.emptyBody')" />
+                <CodeBlock :text="step.response.body" :empty="$t('testbench.emptyBody')" />
                 <div v-if="step.response.truncated" class="muted" style="font-size: 12px">
                   {{ $t('testbench.truncated') }}
                 </div>

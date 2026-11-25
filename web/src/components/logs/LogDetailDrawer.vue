@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { LogDetail, LogSummary } from '@/types/task'
 import { useLogsStore } from '@/stores/logs'
-import JsonViewer from '@/components/common/JsonViewer.vue'
+import CodeBlock from '@/components/common/CodeBlock.vue'
 
 const props = defineProps<{
   open: boolean
@@ -87,11 +87,11 @@ function notifySummary(notify: LogSummary): string {
       </div>
       <div v-if="detail.request_headers" class="detail-block">
         <h4>{{ $t('logDetail.requestHeaders') }}</h4>
-        <JsonViewer :text="detail.request_headers" />
+        <CodeBlock :text="detail.request_headers" />
       </div>
       <div v-if="detail.request_body !== null" class="detail-block">
         <h4>{{ $t('logDetail.requestBody') }}</h4>
-        <JsonViewer :text="detail.request_body" :empty="$t('logDetail.empty')" />
+        <CodeBlock :text="detail.request_body" :empty="$t('logDetail.empty')" />
       </div>
       <div v-if="detail.response_status !== null" class="detail-block">
         <h4>{{ $t('logDetail.responseStatus') }}</h4>
@@ -99,11 +99,11 @@ function notifySummary(notify: LogSummary): string {
       </div>
       <div v-if="detail.response_headers" class="detail-block">
         <h4>{{ $t('logDetail.responseHeaders') }}</h4>
-        <JsonViewer :text="detail.response_headers" />
+        <CodeBlock :text="detail.response_headers" />
       </div>
       <div v-if="detail.response_body !== null" class="detail-block">
         <h4>{{ $t('logDetail.responseBody') }}</h4>
-        <JsonViewer :text="detail.response_body" :empty="$t('logDetail.empty')" />
+        <CodeBlock :text="detail.response_body" :empty="$t('logDetail.empty')" />
       </div>
 
       <!-- 通知是另一条独立的请求，放到最后并单独分区，别和任务执行混在一起。 -->
@@ -129,7 +129,7 @@ function notifySummary(notify: LogSummary): string {
         </div>
         <div v-if="detail.notify.response_body !== null && detail.notify.response_body !== undefined" class="detail-block">
           <h4>{{ $t('logDetail.notifyBody') }}</h4>
-          <JsonViewer :text="detail.notify.response_body" :empty="$t('logDetail.empty')" />
+          <CodeBlock :text="detail.notify.response_body" :empty="$t('logDetail.empty')" />
         </div>
       </section>
     </template>
