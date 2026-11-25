@@ -213,21 +213,32 @@ pub fn is_off_day(now_ms: i64) -> Option<bool> {
     let datetime = Local.timestamp_millis_opt(now_ms).single()?;
     let year = datetime.year();
     let date = format!("{:04}-{:02}-{:02}", datetime.year(), datetime.month(), datetime.day());
-    // 节假日文件按「国务院公告年份」归档，12 月的日期可能记录在下一年的文件里
-    //（例如 2018-12-29 的调休上班在 2019.json 中），所以相邻年份也要查。
     let current = year_data(year);
-    for candidate in [year, year + 1, year - 1] {
-        let Some(data) = year_data(candidate) else {
+    if let Some(is_off) = lookup_listed_day(&date, year, year_data) {
+        return Some(is_off);
+    }
+    // 列表外的日期按星期判断；当年数据缺失时无法判断。
+    current.as_ref()?;
+    use chrono::Weekday;
+    Some(matches!(datetime.weekday(), Weekday::Sat | Weekday::Sun))
+}
+
+/// 节假日文件按「国务院公告年份」归档，12 月的日期可能记录在下一年的文件里
+///（例如 2018-12-29 的调休上班在 2019.json 中），所以下一年也要查。
+fn lookup_listed_day(
+    date: &str,
+    year: i32,
+    fetch: impl Fn(i32) -> Option<Arc<HolidayYear>>,
+) -> Option<bool> {
+    for candidate in [year, year + 1] {
+        let Some(data) = fetch(candidate) else {
             continue;
         };
         if let Some(day) = data.days.iter().find(|day| day.date == date) {
             return Some(day.is_off_day);
         }
     }
-    // 列表外的日期按星期判断；当年数据缺失时无法判断。
-    current.as_ref()?;
-    use chrono::Weekday;
-    Some(matches!(datetime.weekday(), Weekday::Sat | Weekday::Sun))
+    None
 }
 
 /// 内存缓存优先，其次回查数据库。
@@ -275,6 +286,37 @@ pub fn list_years() -> Vec<HolidayYearMeta> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn table(year: i32, days: &[(&str, bool)]) -> HolidayYear {
+        HolidayYear {
+            year,
+            days: days
+                .iter()
+                .map(|(date, is_off)| HolidayDay {
+                    name: String::new(),
+                    date: (*date).to_string(),
+                    is_off_day: *is_off,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn listed_day_is_found_in_the_next_year_table() {
+        let mut tables: HashMap<i32, HolidayYear> = HashMap::new();
+        // 公告年份归档：2034-12-30 的调休上班记录在 2035 年的文件里。
+        tables.insert(2035, table(2035, &[("2034-12-30", false)]));
+        let fetch = |year: i32| tables.get(&year).cloned().map(Arc::new);
+
+        assert_eq!(lookup_listed_day("2034-12-30", 2034, fetch), Some(false));
+        assert_eq!(lookup_listed_day("2034-12-31", 2034, fetch), None);
+    }
 }
 
 // ---------------------------------------------------------------------------
