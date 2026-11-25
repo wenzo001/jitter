@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.11（发布中）**，上一版 Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.10>。
+**当前版本：v2.1.11（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.11>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -296,7 +296,7 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 ## 七、还没做完的事（接手从这里开始）
 
 1. **用户自己的实例还没更新**：新界面要重启 `D:\下载\Compressed\jitter.exe` 才生效，
-   **必须先问用户**再动（v2.1.10 的 Release 已发布，安装版还是旧的）。
+   **必须先问用户**再动（v2.1.11 的 Release 已发布，安装版还是旧的）。
 2. **未实跑验证的**：`docker build`（本机没有 docker 命令），Dockerfile 改动后没跑过。
 3. **本地 vite dev server 起不来**（`bun run dev` 后台无响应），本机调试只能走
    `bun run build` + `cargo build --release` + 副本实例，别在 dev server 上浪费时间。
@@ -310,28 +310,31 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 | `cargo test --workspace --jobs 1` | **core 250 项 + app 2 项全绿** |
 | `cargo check --workspace --all-targets --jobs 1` | **0 warning / 0 error** |
 | `bun run typecheck` | 退出码 0 |
-| `bun run test` | **7 文件 / 70 用例全绿**（含 5 条新增的 JsonViewer 用例） |
+| `bun run test` | **7 文件 / 72 用例全绿**（含 7 条新增的 CodeBlock 用例） |
 | 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn |
 
 **发布体积（2026-11-25 实测）**
 
 | 项 | 大小 |
 | --- | --- |
-| `rust/target/release/jitter.exe` | **7,621,632 B（7.27 MB）** |
-| `jitter-windows-x64.zip`（Release） | **3.11 MB** |
-| `web/dist/assets/index-*.js` | ≈1,700 kB（gzip ≈470 KB） |
+| `rust/target/release/jitter.exe` | **7,691,264 B（7.33 MB）** |
+| `jitter-windows-x64.zip`（Release） | **3.16 MB** |
+| `web/dist/assets/index-*.js` | ≈1,740 kB（gzip ≈487 KB） |
+| `web/dist/assets/jetbrains-mono-latin-wght-normal.woff2` | 40.4 KB |
 
-> 相对 v2.1.9（7,597,056 B）多了约 24 KB：`vue-json-pretty` 的代价，可以接受。
+> 相对 v2.1.10（7,621,632 B）多了约 70 KB：`highlight.js`（10 种语言）+ JetBrains Mono latin 子集。
 > release profile 已是 `opt-level="z" + lto + codegen-units=1 + strip=true`，没有进一步空间。
 
-**界面实测结论（v2.1.10）**
+**界面实测结论（v2.1.10 / v2.1.11）**
 - 顶栏单行：品牌 + 版本、状态位、时钟、指标、「试跑 curl」、「更多」；次要入口与语言切换都在「更多」下拉里，当前语言前带 ✓。
 - 1920 宽屏下左右两栏铺满可用宽度，右侧执行记录不再只剩半屏。
 - 任务卡「上次执行」单行（结果 tag + 「几小时前」），完整信息在悬停提示里。
 - 日历中文下月份/星期正常（`Jan/Sun` → `1月/一`）；调休上班日显示「工作」+「调休 · 节日名」，图例「工作日」计数已含调休（2026-02：工作日 16 / 休息日 3 / 法定节假日 9 / 调休上班 2）。
 - 日历星期表头与日期列**偏移 0px**（antd 默认右对齐，已改成左对齐并对齐内边距）。
+- 日历只保留「月」视图，antd 的「月 / 年」切换已藏掉（年视图跟按天渲染对不上）。
 - 详情抽屉里「通知详情」在最末尾独立分区，请求/响应各块顺序不变。
 - JSON（请求头/请求体/响应头/响应体/通知响应体）走 `highlight.js`：JSON 缩进 2 空格 + 高亮，脚本按语言高亮，JetBrains Mono 等宽字体，长行折行。
+- 执行记录一行：任务 → 时间 → 耗时 → 触发方式 → 请求地址 → 状态标签（HTTP 状态 / 成功 / 已通知）→ 「详情 ›」。
 
 
 ---
