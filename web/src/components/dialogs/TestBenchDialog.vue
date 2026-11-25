@@ -6,9 +6,10 @@ import type { ConditionModel } from '@/types/form'
 import { emptyCondition } from '@/types/form'
 import { getTestRun, listTestRuns, runTestBench } from '@/api/testbench'
 import { useAppStore } from '@/stores/app'
-import { formatShortTime, formatTime, prettyJson } from '@/utils/format'
+import { formatShortTime, formatTime } from '@/utils/format'
 import { describeHostEnvironment } from '@/utils/environment'
 import ConditionFields from '@/components/task/ConditionFields.vue'
+import JsonViewer from '@/components/common/JsonViewer.vue'
 
 const props = defineProps<{ open: boolean }>()
 
@@ -411,7 +412,7 @@ defineExpose({ openWith })
               </div>
               <div v-if="step.response" class="detail-block">
                 <h4>{{ $t('testbench.responseBody') }}</h4>
-                <pre>{{ step.response.body ? prettyJson(step.response.body) : $t('testbench.emptyBody') }}</pre>
+                <JsonViewer :text="step.response.body" :empty="$t('testbench.emptyBody')" />
                 <div v-if="step.response.truncated" class="muted" style="font-size: 12px">
                   {{ $t('testbench.truncated') }}
                 </div>

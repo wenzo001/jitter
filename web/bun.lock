@@ -11,6 +11,7 @@
         "pinia": "^4.1.0",
         "vue": "^3.5.46",
         "vue-i18n": "^11.4.23",
+        "vue-json-pretty": "^2.6.0",
       },
       "devDependencies": {
         "@antdv-next/auto-import-resolver": "^1.2.0",
@@ -484,6 +485,8 @@
     "vue-component-type-helpers": ["vue-component-type-helpers@3.3.14", "https://registry.npmmirror.com/vue-component-type-helpers/-/vue-component-type-helpers-3.3.14.tgz", {}, "sha512-Pq3+OnbCiPCHk0R7KSZrx+j/XXaUn2kSQ1epxq60w8CPbByLjC1EJgV51n4WY851sTXUVzsNMuitywdkdVyKjA=="],
 
     "vue-i18n": ["vue-i18n@11.4.23", "https://registry.npmmirror.com/vue-i18n/-/vue-i18n-11.4.23.tgz", { "dependencies": { "@intlify/core-base": "11.4.23", "@intlify/devtools-types": "11.4.23", "@intlify/shared": "11.4.23", "@vue/devtools-api": "^6.5.0" }, "peerDependencies": { "vue": "^3.0.0" } }, "sha512-O+H2L/LF9xzklv2PZEqYAaG0rrbQokm6aX6/gPDxdtokBSDhKm+lvEPVbC3hXdvKpN5ICSBWigIkJ06AzCs3Lw=="],
+
+    "vue-json-pretty": ["vue-json-pretty@2.6.0", "https://registry.npmmirror.com/vue-json-pretty/-/vue-json-pretty-2.6.0.tgz", { "peerDependencies": { "vue": ">=3.0.0" } }, "sha512-glz1aBVS35EO8+S9agIl3WOQaW2cJZW192UVKTuGmryx01ZvOVWc4pR3t+5UcyY4jdOfBUgVHjcpRpcnjRhCAg=="],
 
     "vue-tsc": ["vue-tsc@3.3.14", "https://registry.npmmirror.com/vue-tsc/-/vue-tsc-3.3.14.tgz", { "dependencies": { "@volar/typescript": "2.4.30", "@vue/language-core": "3.3.14" }, "peerDependencies": { "typescript": ">=5.0.0" }, "bin": { "vue-tsc": "./bin/vue-tsc.js" } }, "sha512-URAu2H9AuMZMg9GCgnqbaHHHd8pBZRAwNV2e2yYS8VDsoTVXHiOSo663OS6DkEvauQ2yixn5TPFJ9WV9QIspkA=="],
 
