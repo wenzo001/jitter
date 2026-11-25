@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-25 · v2.1.13 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-25 · v2.1.14 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.13（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.13>。
+**当前版本：v2.1.14（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.14>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -243,6 +243,22 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 
 ## 六、本轮已经做完的事（可以直接接手）
 
+### 6.0.3 v2.1.14：复制任务
+
+用户需求：能复制一条已经建好的任务，再新建一条。
+
+| 改动 | 落点 |
+| --- | --- |
+| 任务卡「更多」新增「复制任务」菜单项 | `web/src/components/task/TaskCard.vue`（`act('copy')` → `emit('copy')`） |
+| 列表把 copy 事件往上抛 | `web/src/components/task/TaskList.vue` |
+| 表单新增 `loadDraft(task)`：用 `formModelFromTask` 整份填好，**清掉 editingId**（提交走 create 而不是 update），名字加「 - 副本」 | `web/src/components/task/TaskForm.vue` |
+| App 层：拉完整任务 → `loadDraft` → 弹窗标题「复制任务」 | `web/src/App.vue`（`formMode` 多了 `'copy'`） |
+| 复制后的默认名字（超 200 字截断原名、按码点切不切坏 emoji） | `web/src/types/form.ts`（`copiedTaskName`） |
+| 中英文文案 | `locales/zh-CN.ts` / `en-US.ts`（`task.menuCopy` / `task.copyTitle` / `task.copiedStatus` / `taskForm.copySuffix`） |
+
+**约定**：复制是**纯前端**行为，不加后端接口——复制的本质是「用旧任务填新建表单」。
+复制来的内容就是这次的起点，所以 `baseline` 也按复制后的内容算，**不改动不算「有未保存的修改」**。
+
 ### 6.0.2 v2.1.13：新增执行条件「已连接网络」
 
 用户需求：执行条件里加一条「已连接网络」（连着 WiFi **或**插了网线都算），
@@ -343,7 +359,7 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 | `cargo test --workspace --jobs 1` | **core 251 项 + app 2 项全绿** |
 | `cargo check --workspace --all-targets --jobs 1` | **0 warning / 0 error** |
 | `bun run typecheck` | 退出码 0 |
-| `bun run test` | **8 文件 / 79 用例全绿**（新增 `tests/condition.test.ts` 覆盖网络条件与环境提示） |
+| `bun run test` | **9 文件 / 83 用例全绿**（新增 `tests/condition.test.ts` 覆盖网络条件与环境提示、`tests/copy-task.test.ts` 覆盖复制任务的命名） |
 | 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn；执行条件里能看到「只在已连接网络时执行」，下方提示当前网络 |
 
 **发布体积（2026-11-25 实测）**

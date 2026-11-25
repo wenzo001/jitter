@@ -90,6 +90,8 @@ const zhCN = {
     edit: '编辑',
     editTitle: '编辑任务 · {name}',
     editingStatus: '正在编辑任务「{name}」',
+    copyTitle: '复制任务',
+    copiedStatus: '已复制任务「{name}」的配置，改个名字就能创建新任务',
     orderSaved: '任务顺序已保存',
     empty: '还没有任务。点右上角「新建任务」，把 curl 粘进来，先试跑确认能通，再选择执行时间保存。',
     runNow: '立即执行',
@@ -98,6 +100,7 @@ const zhCN = {
     runningTitle: '上一次执行还没结束',
     more: '更多',
     menuTest: '试跑（不记录）',
+    menuCopy: '复制任务',
     menuPause: '暂停几天',
     menuAdjustPause: '调整暂停',
     menuResumePause: '取消暂停',
@@ -144,6 +147,8 @@ const zhCN = {
   taskForm: {
     saveChanges: '保存修改',
     createTask: '创建任务',
+    /** 复制任务时给原名加的后缀。 */
+    copySuffix: ' - 副本',
     sectionRequest: '请求',
     sectionRequestDesc: '把 curl 粘进来，或手动填写 URL / 方法 / 头 / 体。不确定能否跑通？先点「先试跑」。',
     name: '任务名称',

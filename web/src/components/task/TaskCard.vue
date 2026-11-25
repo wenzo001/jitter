@@ -27,6 +27,8 @@ const emit = defineEmits<{
   select: [id: string]
   run: [task: Task]
   edit: [task: Task]
+  /** 复制任务：把整份配置复制一份作为新任务。 */
+  copy: [task: Task]
   test: [task: Task]
   pause: [task: Task]
   resumePause: [task: Task]
@@ -102,13 +104,18 @@ const footText = computed(() => {
   })
 })
 
-function act(name: 'run' | 'edit' | 'test' | 'pause' | 'resumePause' | 'stop' | 'start' | 'remove') {
+function act(
+  name: 'run' | 'edit' | 'copy' | 'test' | 'pause' | 'resumePause' | 'stop' | 'start' | 'remove',
+) {
   switch (name) {
     case 'run':
       emit('run', props.task)
       break
     case 'edit':
       emit('edit', props.task)
+      break
+    case 'copy':
+      emit('copy', props.task)
       break
     case 'test':
       emit('test', props.task)
@@ -134,6 +141,7 @@ function act(name: 'run' | 'edit' | 'test' | 'pause' | 'resumePause' | 'stop' | 
 const menu = computed<MenuProps>(() => {
   const task = props.task
   const items: NonNullable<MenuProps['items']> = [{ key: 'test', label: t('task.menuTest') }]
+  items.push({ key: 'copy', label: t('task.menuCopy') })
   if (task.status === 'active') {
     items.push({ key: 'pause', label: pause.value ? t('task.menuAdjustPause') : t('task.menuPause') })
     if (pause.value) items.push({ key: 'resumePause', label: t('task.menuResumePause') })
@@ -150,7 +158,16 @@ const menu = computed<MenuProps>(() => {
 })
 
 function onMenuClick(info: MenuInfo) {
-  act(String(info.key) as 'test' | 'pause' | 'resumePause' | 'stop' | 'start' | 'remove')
+  act(
+    String(info.key) as
+      | 'test'
+      | 'copy'
+      | 'pause'
+      | 'resumePause'
+      | 'stop'
+      | 'start'
+      | 'remove',
+  )
 }
 
 function onDragStart(event: DragEvent) {

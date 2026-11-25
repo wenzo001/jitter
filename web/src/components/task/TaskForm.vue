@@ -2,7 +2,7 @@
 import type { Task } from '@/types/task'
 import type { TaskFormModel, FormErrors } from '@/types/form'
 import type { TaskPayload, SchedulePreviewResponse } from '@/types/task'
-import { emptyFormModel, formModelFromTask } from '@/types/form'
+import { emptyFormModel, formModelFromTask, copiedTaskName } from '@/types/form'
 import { createTask, updateTask, previewSchedule } from '@/api/tasks'
 import { useAppStore } from '@/stores/app'
 import { useTasksStore } from '@/stores/tasks'
@@ -161,6 +161,34 @@ function loadTask(task: Task) {
     baseline.value = JSON.stringify(model.value)
     if (hasExpected(model.value)) expectOpen.value = ['expect']
     precheckOn.value = task.precheck_enabled === 1
+    schedulePreview()
+  }
+  if (dirty.value) {
+    askThen(
+      t('taskForm.switchTargetTitle'),
+      t('taskForm.switchTargetContent'),
+      t('taskForm.switchTargetOk'),
+      apply,
+    )
+    return
+  }
+  apply()
+}
+
+/** 从任务卡「复制任务」进入：整份配置照搬，作为**新任务**创建。 */
+function loadDraft(task: Task) {
+  const apply = () => {
+    const draft = formModelFromTask(task)
+    draft.name = copiedTaskName(draft.name, t('taskForm.copySuffix'))
+    model.value = draft
+    // 新任务：不带 id，提交时走 create 而不是 update。
+    editingId.value = null
+    editingName.value = ''
+    errors.value = {}
+    expectOpen.value = hasExpected(model.value) ? ['expect'] : []
+    precheckOn.value = task.precheck_enabled === 1
+    // 复制来的内容就是这次的起点：不改动不算「有未保存的修改」。
+    baseline.value = JSON.stringify(model.value)
     schedulePreview()
   }
   if (dirty.value) {
@@ -587,6 +615,7 @@ function applyTest(config: TestBenchConfig) {
 
 defineExpose({
   loadTask,
+  loadDraft,
   resetIfEditing,
   isDirty: dirty,
   applyTestConfig: applyTest,

@@ -85,6 +85,17 @@ export function conditionFromTask(task: Task): ConditionModel {
   }
 }
 
+/**
+ * 复制任务时的默认名字：原名 + 副本后缀。
+ *
+ * 任务名上限 200 字（后端校验），超长时截断**原名**，后缀一定保留。
+ */
+export function copiedTaskName(name: string, suffix: string, max = 200): string {
+  const chars = [...name.trim()]
+  const room = Math.max(0, max - [...suffix].length)
+  return `${chars.slice(0, room).join('')}${suffix}`
+}
+
 export function emptyFormModel(): TaskFormModel {
   return {
     name: '',

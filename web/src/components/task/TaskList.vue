@@ -14,6 +14,7 @@ const emit = defineEmits<{
   select: [id: string]
   run: [task: Task]
   edit: [task: Task]
+  copy: [task: Task]
   test: [task: Task]
   pause: [task: Task]
   resumePause: [task: Task]
@@ -120,6 +121,7 @@ function moveBy(task: Task, delta: number) {
         @select="emit('select', $event)"
         @run="emit('run', $event)"
         @edit="emit('edit', $event)"
+        @copy="emit('copy', $event)"
         @test="emit('test', $event)"
         @pause="emit('pause', $event)"
         @resume-pause="emit('resumePause', $event)"

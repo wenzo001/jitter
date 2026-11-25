@@ -88,6 +88,8 @@ const enUS: MessageSchema = {
     edit: 'Edit',
     editTitle: 'Edit task · {name}',
     editingStatus: 'Editing task “{name}”',
+    copyTitle: 'Duplicate task',
+    copiedStatus: 'Copied the configuration of task “{name}”; change the name to create the new task',
     orderSaved: 'Task order saved',
     empty:
       'No tasks yet. Click “New task” in the top right, paste your curl, try it once to make sure it works, then pick a schedule and save.',
@@ -98,6 +100,7 @@ const enUS: MessageSchema = {
     runningTitle: 'The previous run has not finished yet',
     more: 'More',
     menuTest: 'Try it (no record)',
+    menuCopy: 'Duplicate task',
     menuPause: 'Pause for a few days',
     menuAdjustPause: 'Adjust pause',
     menuResumePause: 'Cancel pause',
@@ -145,6 +148,8 @@ const enUS: MessageSchema = {
   taskForm: {
     saveChanges: 'Save changes',
     createTask: 'Create task',
+    /** Suffix appended to the original name when duplicating a task. */
+    copySuffix: ' (copy)',
     sectionRequest: 'Request',
     sectionRequestDesc:
       'Paste your curl, or fill in the URL / method / headers / body by hand. Not sure it works? Try it first.',

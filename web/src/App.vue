@@ -54,8 +54,8 @@ const diagnosticsOpen = ref(false)
 const runtimeLogsOpen = ref(false)
 
 const formOpen = ref(false)
-/** 弹窗标题由「新建 / 编辑」和任务名拼出来，随语言实时变化。 */
-const formMode = ref<'create' | 'edit'>('create')
+/** 弹窗标题由「新建 / 复制 / 编辑」和任务名拼出来，随语言实时变化。 */
+const formMode = ref<'create' | 'copy' | 'edit'>('create')
 const formTaskName = ref('')
 
 const pauseOpen = ref(false)
@@ -129,11 +129,11 @@ const moreMenu = computed<MenuProps>(() => {
   return { items, onClick: onMoreClick }
 })
 
-const formTitle = computed(() =>
-  formMode.value === 'edit'
-    ? t('task.editTitle', { name: formTaskName.value })
-    : t('task.create'),
-)
+const formTitle = computed(() => {
+  if (formMode.value === 'edit') return t('task.editTitle', { name: formTaskName.value })
+  if (formMode.value === 'copy') return t('task.copyTitle')
+  return t('task.create')
+})
 
 const metricsText = computed(() => {
   const overview = app.metrics?.overview
@@ -190,6 +190,21 @@ async function editTask(task: Task) {
     taskFormRef.value?.loadTask(data.task)
     formOpen.value = true
     app.setStatus(t('task.editingStatus', { name: task.name }))
+  } catch (error) {
+    app.setStatus(error instanceof Error ? error.message : String(error), true)
+  }
+}
+
+/** 复制任务：把已有任务的整份配置复制一份，作为新任务创建。 */
+async function copyTask(task: Task) {
+  try {
+    const data = await getTask(task.id)
+    if (!data?.task) return
+    formMode.value = 'copy'
+    formTaskName.value = ''
+    taskFormRef.value?.loadDraft(data.task)
+    formOpen.value = true
+    app.setStatus(t('task.copiedStatus', { name: task.name }))
   } catch (error) {
     app.setStatus(error instanceof Error ? error.message : String(error), true)
   }
@@ -509,6 +524,7 @@ onMounted(async () => {
                   @select="selectTask"
                   @run="onRun"
                   @edit="editTask"
+                  @copy="copyTask"
                   @test="testTask"
                   @pause="openPause"
                   @resume-pause="action($event, 'resumePause')"
