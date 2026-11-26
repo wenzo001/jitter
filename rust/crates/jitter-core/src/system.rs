@@ -10,9 +10,6 @@ use serde::Serialize;
 
 pub const APP_NAME: &str = "Jitter";
 
-/// 自启注册项的固定 id。
-const AUTOSTART_ID: &str = "jitter";
-
 pub fn app_version() -> &'static str {
     crate::VERSION
 }
@@ -63,12 +60,11 @@ pub fn get_binary_path() -> Option<PathBuf> {
 }
 
 /// 配置文件 / 数据库所在目录。
+///
+/// **按实例隔离**：生产实例是 `%APPDATA%\Jitter`（与旧版一致），
+/// 开发实例是 `%APPDATA%\Jitter-dev`。见 [`crate::instance`]。
 pub fn get_config_dir() -> PathBuf {
-    match std::env::consts::OS {
-        "windows" => env_or("APPDATA", home_dir().join("AppData").join("Roaming")).join(APP_NAME),
-        "macos" => home_dir().join("Library").join("Application Support").join(APP_NAME),
-        _ => env_or("XDG_CONFIG_HOME", home_dir().join(".config")).join("jitter"),
-    }
+    crate::instance::instance_config_dir()
 }
 
 /// 用户数据目录（与配置目录同构，仅为对齐 TS 版 SystemInfo 的语义）。
@@ -91,6 +87,8 @@ pub struct AutostartEntry {
 }
 
 /// 自启注册项是输入的纯函数（三平台都可单测，不碰真实系统）。
+///
+/// 默认实例（生产）的注册项与旧版逐字节相同。
 pub fn build_autostart_entry(
     platform: &str,
     binary_path: &str,
@@ -98,7 +96,34 @@ pub fn build_autostart_entry(
     app_data: Option<&str>,
     xdg_config_home: Option<&str>,
 ) -> AutostartEntry {
+    build_autostart_entry_for(
+        platform,
+        binary_path,
+        home,
+        app_data,
+        xdg_config_home,
+        crate::instance::DEFAULT_INSTANCE,
+    )
+}
+
+/// 自启注册项（按实例区分）。
+///
+/// 不同实例注册**不同的文件**，所以开发实例点「开机自启」不会覆盖生产实例的注册项。
+/// - Windows：`Jitter.cmd` / `Jitter-dev.cmd`
+/// - macOS：`com.jitter.app.plist` / `com.jitter-dev.app.plist`
+/// - Linux：`jitter.desktop` / `jitter-dev.desktop`
+pub fn build_autostart_entry_for(
+    platform: &str,
+    binary_path: &str,
+    home: &str,
+    app_data: Option<&str>,
+    xdg_config_home: Option<&str>,
+    instance: &str,
+) -> AutostartEntry {
     let home_path = Path::new(home);
+    // 注册项的 id 与文件名按实例区分：生产沿用旧名，开发用带后缀的名字。
+    let autostart_id = crate::instance::autostart_id_for(instance);
+    let file_stem = crate::instance::autostart_file_stem_for(instance);
 
     // 自启条目必须固定工作目录：否则从 Startup 目录启动时，相对的
     // data/app.db 会落到别处，和手动启动的数据分叉。
@@ -124,7 +149,7 @@ pub fn build_autostart_entry(
             .join("Start Menu")
             .join("Programs")
             .join("Startup")
-            .join(format!("{APP_NAME}.cmd"));
+            .join(format!("{file_stem}.cmd"));
         // Startup 目录会执行 .cmd；`start` 让进程脱离控制台窗口，
         // `/D` 把工作目录钉在程序所在目录。
         // 两个坑都在开机阶段才暴露：
@@ -148,14 +173,14 @@ start \"\" /D \"{work_dir}\" \"%exe%\" --background\r\n"
     }
 
     if platform == "darwin" {
-        let path = home_path.join("Library").join("LaunchAgents").join(format!("com.{AUTOSTART_ID}.app.plist"));
+        let path = home_path.join("Library").join("LaunchAgents").join(format!("com.{autostart_id}.app.plist"));
         let content = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
 <plist version=\"1.0\">\n\
 <dict>\n\
   <key>Label</key>\n\
-  <string>com.{AUTOSTART_ID}.app</string>\n\
+  <string>com.{autostart_id}.app</string>\n\
   <key>ProgramArguments</key>\n\
   <array>\n\
     <string>{binary_path}</string>\n\
@@ -178,7 +203,7 @@ start \"\" /D \"{work_dir}\" \"%exe%\" --background\r\n"
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home_path.join(".config"));
-    let path = xdg.join("autostart").join(format!("{AUTOSTART_ID}.desktop"));
+    let path = xdg.join("autostart").join(format!("{autostart_id}.desktop"));
     let content = format!(
         "[Desktop Entry]\n\
 Type=Application\n\
@@ -200,7 +225,7 @@ fn env_value(key: &str) -> Option<String> {
 
 fn current_autostart_entry_owned() -> AutostartEntry {
     let home = home_dir();
-    build_autostart_entry(
+    build_autostart_entry_for(
         platform(),
         &get_binary_path()
             .unwrap_or_else(|| PathBuf::from("jitter"))
@@ -208,6 +233,7 @@ fn current_autostart_entry_owned() -> AutostartEntry {
         &home.to_string_lossy(),
         env_value("APPDATA").as_deref(),
         env_value("XDG_CONFIG_HOME").as_deref(),
+        &crate::instance::instance_name(),
     )
 }
 
@@ -244,6 +270,10 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
 pub struct SystemInfo {
     pub name: &'static str,
     pub version: String,
+    /// 当前实例名（`prod` / `dev` / …）。界面用它显示「这是哪个实例」。
+    pub instance: String,
+    /// 是否是默认（生产）实例。
+    pub default_instance: bool,
     pub platform: String,
     pub arch: String,
     pub compiled: bool,
@@ -268,6 +298,8 @@ pub fn get_system_info(port: u16, db_path: &str) -> SystemInfo {
     SystemInfo {
         name: APP_NAME,
         version: app_version().to_string(),
+        instance: crate::instance::instance_name(),
+        default_instance: crate::instance::is_default_instance(),
         platform: platform().to_string(),
         arch: arch().to_string(),
         compiled: true,

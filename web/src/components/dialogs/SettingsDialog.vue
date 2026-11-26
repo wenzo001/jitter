@@ -673,6 +673,15 @@ function openCleanup() {
             <span class="value">{{ app.system?.url ?? '—' }}</span>
           </div>
           <div class="settings-line">
+            <span class="label">{{ $t('settings.labelInstance') }}</span>
+            <span class="value">
+              {{ app.system?.instance ?? 'prod' }}
+              <span class="muted" style="font-size: 12px">
+                {{ app.isDefaultInstance ? $t('settings.instanceProdHint') : $t('settings.instanceDevHint') }}
+              </span>
+            </span>
+          </div>
+          <div class="settings-line">
             <span class="label">{{ $t('settings.labelInstallDir') }}</span>
             <span class="value">
               {{ app.system?.install_dir ?? app.system?.binary_path ?? $t('settings.sourceDir') }}

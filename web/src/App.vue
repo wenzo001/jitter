@@ -452,6 +452,13 @@ onMounted(async () => {
             <span class="brand-mark" />
             <span class="brand-name">Jitter</span>
             <span v-if="app.version" class="muted brand-version">v{{ app.version }}</span>
+            <span
+              v-if="!app.isDefaultInstance"
+              class="brand-instance"
+              :title="$t('topbar.instanceDevHint')"
+            >
+              {{ $t('topbar.instanceBadge', { name: app.instance }) }}
+            </span>
             <span class="brand-sub">{{ $t('topbar.subtitle') }}</span>
           </div>
           <div class="topbar-status">

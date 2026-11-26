@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-26 · v2.1.17 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-26 · v2.1.18 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.17（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.17>。
+**当前版本：v2.1.18（未发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.17>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -36,11 +36,15 @@ rust/
     holiday.rs          中国法定节假日（含调休上班日）
     logging.rs          运行日志落盘 / 按天轮转 / 清理
     backup.rs / updater.rs / host.rs / system.rs / testbench.rs / metrics
+    instance.rs          实例隔离：实例名 → 配置目录 / 自启项 / 互斥体名
+    probe.rs             只读探针（SQLITE_OPEN_READ_ONLY 打开生产库读数据）
   crates/jitter-app/    可执行程序
-    main.rs             启动顺序、panic 兜底、启动失败弹窗、tracing 初始化
+    main.rs             启动顺序、panic 兜底、启动失败弹窗、tracing 初始化、probe 分流
     api.rs              全部 HTTP 路由
     scheduler.rs        调度器（定时器 + 执行编排）
     tray.rs             Windows 托盘（macOS / Linux 为空实现）
+    probe_cli.rs        `jitter probe` 子命令（只读查生产库）
+scripts/                dev-instance.ps1：起隔离开发实例
 web/                   前端（Vue 3 + TS + antdv-next + Vite + Pinia + vue-i18n + vueuse）
   src/api/              请求封装（client.ts 是统一入口）
   src/components/       组件
@@ -68,6 +72,12 @@ web/                   前端（Vue 3 + TS + antdv-next + Vite + Pinia + vue-i18
    `resolve_db_path_absolute`）。这条是为了避免"在仓库根目录跑开发版，把用户正式库 `data/app.db` 直接写坏"。
    仓库根 `jitter.config.json` 是**开发/容器默认配置**：`port` 3111、`dbPath` `.tmp/dev/app.db`，
    改它之前先确认 Docker 的 `PORT` / `JITTER_DB_PATH` 环境变量没被绕过。
+9. **生产实例的路径必须与旧版逐字节相同**（`instance.rs` 里 `DEFAULT_INSTANCE = "prod"`）：
+   配置目录仍叫 `Jitter`、自启项仍叫 `Jitter.cmd`。升级不能动用户已有的设置与自启注册。
+10. **只读探针必须用连接层的只读标志**（`SQLITE_OPEN_READ_ONLY`），
+    不是「代码里不写 INSERT」。后者拦不住误操作，前者从连接上就拒绝写。
+11. **不要用 `JITTER_ALLOW_MULTI_INSTANCE=1` 起开发实例**：那只绕过互斥体，
+    隔离不了 runtime 文件和开机自启注册项，会直接破坏用户正式实例。走 `scripts\dev-instance.ps1`。
 
 ---
 
@@ -218,19 +228,24 @@ Windows 本机编译务必 `set CARGO_PROFILE_DEV_DEBUG=0`，否则会 os error 
 
 ### 界面回归怎么测
 
-起一个**副本实例**（绝不能动用户自己的 `data/app.db`）：
+起一个**隔离开发实例**（绝不能动用户自己的 `data/app.db`）：
 
-```bash
-# 1) 复制真实库并把任务置为 stopped，避免真的发请求
+```powershell
+# v2.1.18 起：一律用这个脚本（实例名 dev，端口 3111，库在 .tmp\dev\app.db）
 cd D:/fwd/code/Jitter
-bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.status='stopped'
-
-# 2) 用副本配置启动（端口 3111）
-#    JITTER_CONFIG=.tmp/preview/jitter.config.json
-#    JITTER_ALLOW_MULTI_INSTANCE=1   （用户自己的实例在跑，不设会被单实例锁拦下）
-#    JITTER_DB_PATH=.tmp/preview/app.db
-#    & rust/target/debug/jitter.exe
+.\scripts\dev-instance.ps1
 ```
+
+想看真实数据（但**只读**）就另开一个探针，不要把生产库挂到跑着的实例上：
+
+```powershell
+.\rust\target\release\jitter.exe probe --db "D:\下载\Compressed\data\app.db" `
+    --logs "D:\下载\Compressed\data\logs" --limit 20
+```
+
+> ⚠️ v2.1.17 之前那段手工设 `JITTER_ALLOW_MULTI_INSTANCE=1` + `JITTER_CONFIG` / `JITTER_DB_PATH`
+> 的做法**已经不要再用**：那些全局共享状态（runtime 文件、开机自启注册项、互斥体）当时都是共用的，
+> 手工起实例会直接踩到用户的正式实例（尤其会把正式实例的 `Startup\Jitter.cmd` 覆盖成开发版路径）。
 
 然后用内置浏览器打开 `http://127.0.0.1:3111` 逐个点：顶栏时钟 / 日历 / 数据库 / 运行日志 / 诊断 / 设置 /
 任务表单 / 试跑 curl / 任务卡「更多」/「立即执行」，
@@ -239,9 +254,89 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 > 用户自己还有一个真实实例在跑：`D:\下载\Compressed\jitter.exe`（端口 3000/3001）。
 > **不要擅自重启它**，需要时先问用户。
 
+### ⚠️ 起开发实例一律用 `scripts\dev-instance.ps1`（v2.1.18 起）
+
+```powershell
+.\scripts\dev-instance.ps1                    # 实例名 dev，端口 3111，库 .tmp\dev\app.db
+.\scripts\dev-instance.ps1 -Instance test -Port 3112
+```
+
+**不要再手动设 `JITTER_ALLOW_MULTI_INSTANCE=1` 起开发实例**——v2.1.18 之前那些全局共享状态
+（runtime 文件、开机自启注册项、互斥体）都是共用的，手工起实例会踩到用户正式实例：
+
+- 开发实例退出时把 `%APPDATA%\Jitter\jitter.runtime.json` 删掉 → 正式实例的端口记录没了；
+- **开发实例在设置里点一次「开机自启」，就把正式实例的 `Startup\Jitter.cmd` 覆盖成开发版路径**
+  → 用户开机自启会跑开发版，且界面上完全看不出来。
+
+现在 `JITTER_INSTANCE` 把这些按实例隔开了（详见 `rust/crates/jitter-core/src/instance.rs`）：
+
+| 共享状态 | 生产（`prod`） | 开发（`dev`） |
+| --- | --- | --- |
+| 配置 / 运行时文件 | `%APPDATA%\Jitter\` | `%APPDATA%\Jitter-dev\` |
+| 开机自启注册项 | `Startup\Jitter.cmd` | `Startup\Jitter-dev.cmd` |
+| 单实例互斥体 | `Local\JitterSingleInstance-prod` | `Local\JitterSingleInstance-dev` |
+
+**生产实例的路径与升级前逐字节相同**（配置目录仍叫 `Jitter`、自启项仍叫 `Jitter.cmd`），
+升级不会动到用户已有的设置。唯一变化是互斥体名统一加了 `-prod` 后缀——
+这样「每个实例各自互斥、实例之间互不干扰」才自洽。
+
+### 只读看生产数据：`jitter probe`（v2.1.18 起）
+
+```powershell
+& rust\target\release\jitter.exe probe --db "D:\下载\Compressed\data\app.db" `
+    --logs "D:\下载\Compressed\data\logs" --limit 20
+```
+
+只读打开（`SQLITE_OPEN_READ_ONLY`），输出任务列表、设置、最近执行记录、运行日志尾部。
+**不会修改** `app.db` / `app.db-wal` / `app.db-shm`（连 mtime 都不变），正式实例可以照常在跑。
+实现见 `rust/crates/jitter-core/src/probe.rs` 与 `rust/crates/jitter-app/src/probe_cli.rs`。
+
 ---
 
 ## 六、本轮已经做完的事（可以直接接手）
+
+### 6.0.7 v2.1.18：实例隔离 + 只读探针（`jitter probe`）
+
+用户需求：开发测试用的实例要和正式实例**完全分开、互不影响**，并且开发者要能**只读**查看生产数据来排查问题。
+
+**问题根因**：旧版假设「一台机器只有一个实例」，三类全局状态写死在同一个地方，
+开发实例一碰就会破坏正式实例：
+
+| 共享状态 | 旧路径 | 旧版冲突后果 |
+| --- | --- | --- |
+| 配置 / 运行时文件 | `%APPDATA%\Jitter\jitter.runtime.json` | 开发实例覆盖正式实例的端口记录；开发实例退出时把它删掉 |
+| 开机自启注册 | `Startup\Jitter.cmd` | **开发实例点一次「开机自启」，就把正式实例的注册覆盖成开发版路径**，界面上完全看不出来 |
+| 单实例互斥体 | `Local\JitterSingleInstance` | 开发实例只能靠 `JITTER_ALLOW_MULTI_INSTANCE=1` 绕过，多开就乱 |
+
+**解法**：用环境变量 `JITTER_INSTANCE` 声明实例名（默认 `prod`），把上面三类状态全部按实例派生。
+
+| 改动 | 落点 |
+| --- | --- |
+| 新增实例模块：实例名规范化 + 配置目录 / 运行时文件 / 自启文件名 / 互斥体名派生 | `rust/crates/jitter-core/src/instance.rs`（新增） |
+| 配置目录改为按实例派生（生产仍是 `%APPDATA%\Jitter`） | `system.rs`（`get_config_dir`） |
+| 自启注册项按实例命名（Windows `Jitter.cmd` / `Jitter-dev.cmd`；macOS `com.jitter.app.plist` / `com.jitter-dev.app.plist`；Linux `jitter.desktop` / `jitter-dev.desktop`） | `system.rs`（`build_autostart_entry_for`） |
+| 互斥体名按实例派生（`Local\JitterSingleInstance-prod` / `-dev`） | `rust/crates/jitter-app/src/main.rs` |
+| `SystemInfo` 增加 `instance` / `default_instance` 字段 | `system.rs`、`api.rs` |
+| 只读探针核心：`SQLITE_OPEN_READ_ONLY` 打开 + 读任务 / 设置 / 最近记录 / 运行日志尾部（表名走白名单防注入） | `rust/crates/jitter-core/src/probe.rs`（新增） |
+| 新增 `probe` CLI 子命令（**在 `main()` 最开头分流**：不起服务、不占端口、不抢互斥体、不初始化自己的数据库） | `rust/crates/jitter-app/src/probe_cli.rs`（新增） |
+| 顶栏显示实例标记（仅非默认实例显示橙色「实例 dev」） | `web/src/App.vue`、`web/src/styles.css`、`web/src/stores/app.ts` |
+| 设置页「运行信息」增加「实例」行 | `web/src/components/dialogs/SettingsDialog.vue`、`web/src/types/system.ts` |
+| 一键起隔离开发实例的脚本 | `scripts/dev-instance.ps1`（新增） |
+| 集成测试：自启项按实例隔离、生产路径与旧版逐字节一致、互斥体名按实例隔离 | `rust/crates/jitter-core/tests/system_updater.rs`（新增 3 个） |
+| 前端单测：实例标记的显示条件 | `web/tests/instance-badge.test.ts`（新增） |
+
+**约定**：
+- **生产实例的路径必须与旧版逐字节相同**（配置目录仍叫 `Jitter`、自启项仍叫 `Jitter.cmd`），
+  升级不动用户已有设置。唯一的行为变化是互斥体名统一加了 `-prod` 后缀——
+  这是有意的：生产沿用旧名而开发用新名的话，「按实例互斥」不自洽。
+- 实例名规范化：只保留字母数字 / `-` / `_`，其它字符换成 `-`，截断 32 字符，全非法回落 `prod`
+  （绝不能变成空名字，否则路径会塌回生产目录）。
+- **只读必须做在连接层**（`SQLITE_OPEN_READ_ONLY`），不是「代码里不写 INSERT」——
+  后者拦不住误操作，前者从连接上就拒绝写。
+- 探针**不能起服务**：它在 `main()` 最开头分流，避免占端口、抢互斥体、
+  甚至初始化自己的数据库把生产库当自己的写。
+- 开发实例一律用 `scripts\dev-instance.ps1` 起，不要再手工设 `JITTER_ALLOW_MULTI_INSTANCE=1`
+  （那只绕过了互斥体，隔离不了 runtime 文件和自启注册）。
 
 ### 6.0.6 v2.1.17：日志清理分层 + 每个任务单独设保留时长
 
@@ -409,23 +504,25 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 
 ## 七、还没做完的事（接手从这里开始）
 
-1. **用户自己的实例还没更新**：新界面要重启 `D:\下载\Compressed\jitter.exe` 才生效，
-   **必须先问用户**再动（v2.1.11 的 Release 已发布，安装版还是旧的）。
+1. **用户自己的实例的更新**：安装版带产品自带的检查升级机制，会自动升级（当前已是 2.1.17）。
+   v2.1.18 发布后由用户自己点更新即可；**不要擅自重启 `D:\下载\Compressed\jitter.exe`**。
 2. **未实跑验证的**：`docker build`（本机没有 docker 命令），Dockerfile 改动后没跑过。
 3. **本地 vite dev server 起不来**（`bun run dev` 后台无响应），本机调试只能走
-   `bun run build` + `cargo build --release` + 副本实例，别在 dev server 上浪费时间。
+   `bun run build` + `cargo build --release` + `scripts\dev-instance.ps1` 起的隔离实例，
+   别在 dev server 上浪费时间。
 
 ## 七之二、本轮最终状态（已实测）
 
-**测试（2026-11-26 实测，v2.1.17）**
+**测试（2026-11-26 实测，v2.1.18）**
 
 | 项目 | 结果 |
 | --- | --- |
-| `cargo test --workspace --jobs 1` | **core 253 项 + app 2 项全绿**（含 `cleanup_logs_can_target_a_single_task` / `prune_logs_respects_per_task_retention`） |
-| `cargo check --workspace --all-targets --jobs 1` | **0 warning / 0 error** |
+| `cargo test -p jitter-core --jobs 1` | **全绿**（新增 `autostart_entries_are_isolated_per_instance` / `production_instance_paths_match_the_legacy_layout` / `mutex_names_are_isolated_per_instance`） |
+| `cargo test --workspace --jobs 1` | core + app 全绿 |
 | `bun run typecheck` | 退出码 0 |
-| `bun run test` | **13 文件 / 107 用例全绿**（新增 `tests/log-retention.test.ts`、`tests/cleanup-scope.test.ts`） |
-| 浏览器实测（副本实例 3111） | 见下方 v2.1.17 实测结论 |
+| `bun run test` | **14 文件 / 110 用例全绿**（新增 `tests/instance-badge.test.ts`） |
+| `cargo build --release -p jitter-app --jobs 1` | 成功（含新前端产物） |
+| 浏览器实测（dev 实例 3111） | 见下方 v2.1.18 实测结论 |
 
 **发布体积（2026-11-26 实测）**
 
@@ -440,6 +537,36 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 | `web/dist/assets/jetbrains-mono-latin-wght-normal.woff2` | 40.4 KB |
 
 > release profile 已是 `opt-level="z" + lto + codegen-units=1 + strip=true`，没有进一步空间。
+
+**实例隔离实测结论（v2.1.18）**
+
+- 以 `JITTER_INSTANCE=dev` 起实例：`config_dir` = `%APPDATA%\Jitter\Jitter-dev`、
+  `autostart_path` = `Startup\Jitter-dev.cmd`、runtime 文件独立（端口 3111 / PID 独立）。
+- **正式实例的 runtime 文件一字未动**：仍是 `{"port":3000,"pid":40004}`，3000 端口照常响应。
+- **最关键的一条**：在 dev 实例的设置里点「开机自启」，
+  正式实例的 `Startup\Jitter.cmd`（298 B，mtime 8:43:56）**一个字节都没变**；
+  新增的是 `Jitter-dev.cmd`（334 B，指向开发版 exe）。关掉 dev 自启后只剩正式的那份。
+- dev 实例退出后，正式实例的 runtime 文件仍在、3000 仍正常。
+- `scripts\dev-instance.ps1` 实际跑通（脚本里曾把 health 接口的 `url` 字段取错，已修）。
+
+**只读探针实测结论（v2.1.18）**
+
+- 对正式库跑 `probe --db "D:\下载\Compressed\data\app.db" --logs "…\data\logs" --limit 5`，
+  正常输出 4 个任务、364 条记录（其中 258 条出错）、全局设置、任务明细、最近记录、运行日志尾部。
+- **探针前后 `app.db`(684032 B) / `app.db-wal`(4169472 B) / `app.db-shm`(32768 B)
+  的大小与 mtime 全部不变**，正式实例全程照常在跑。
+- 探针不占端口、不抢互斥体、不初始化自己的数据库。
+
+**界面实测结论（v2.1.18，dev 实例 3111）**
+- 顶栏版本号旁出现橙色「实例 dev」标记；正式实例不显示（默认实例不标）。
+- 设置页「运行信息」区有「实例」行，显示
+  `dev （非生产实例，配置 / 数据 / 开机自启都与生产实例互相独立）`。
+- 设置页同时显示 dev 实例自己的安装目录 / 数据文件 / 开机自启文件路径，都是 dev 专属的。
+- 页面 0 console error / 0 warn。
+
+> ✅ **副本实例的副作用已根治**：v2.1.17 之前所有实例共用 `%APPDATA%\Jitter\jitter.runtime.json`，
+> 副本实例启动会覆盖它、退出时会删掉它，测完还得手工改回 `{"port":3000,"pid":<用户实例PID>}`。
+> v2.1.18 起配置目录按实例隔离，这个坑不复存在。
 
 **界面实测结论（v2.1.17，副本实例 3111）**
 - 任务表单第 5 段「日志保留」正常渲染，下拉共 8 项：跟随全局设置 / 保留 1、7、30、90、180、365 天 / 永久保留。

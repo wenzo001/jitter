@@ -137,6 +137,24 @@ body {
   font-size: 12px;
 }
 
+/*
+ * 非生产实例的标记。
+ *
+ * 用醒目橙色 + 描边：一眼就要看出「这个界面对应的不是生产实例」，
+ * 免得在开发实例上误以为自己在操作生产数据。
+ */
+.brand-instance {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: #b34700;
+  background: #fff3e6;
+  border: 1px solid #ffbb7a;
+  white-space: nowrap;
+}
+
 /* 顶栏中间的提示位：操作结果、报错都显示在这里，把按钮区腾给操作。 */
 .topbar-status {
   flex: 1 1 auto;

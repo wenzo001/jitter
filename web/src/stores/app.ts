@@ -116,6 +116,12 @@ export const useAppStore = defineStore('app', () => {
 
   const version = computed(() => system.value?.version ?? '')
 
+  /** 当前实例名（`prod` / `dev` / …）。非默认实例在顶栏显示一个醒目的标记。 */
+  const instance = computed(() => system.value?.instance ?? 'prod')
+
+  /** 是否是默认（生产）实例。 */
+  const isDefaultInstance = computed(() => system.value?.default_instance ?? true)
+
   /** 状态行文案；语言切换后「就绪」也会跟着变。 */
   const status = computed(() =>
     statusState.value ?? { text: translate('status.ready'), error: false },
@@ -240,6 +246,8 @@ export const useAppStore = defineStore('app', () => {
     status,
     banner,
     version,
+    instance,
+    isDefaultInstance,
     setStatus,
     setBanner,
     loadConfig,

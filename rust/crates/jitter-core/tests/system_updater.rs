@@ -1,3 +1,4 @@
+use jitter_core::instance;
 use jitter_core::system;
 use jitter_core::updater;
 
@@ -66,6 +67,88 @@ fn linux_autostart_entry_writes_desktop_file() {
 fn linux_autostart_entry_respects_xdg_config_home() {
     let entry = system::build_autostart_entry("linux", "/opt/jitter/jitter", "/home/tester", None, Some("/custom/config"));
     assert!(posix(&entry.path).starts_with("/custom/config/autostart/"));
+}
+
+/// **实例隔离的核心保证**：不同实例注册**不同的自启文件**。
+///
+/// 这条曾经是个真坑：开发实例在设置里点一次「开机自启」，
+/// 就会把生产实例的 `Jitter.cmd` 覆盖成开发版的路径——
+/// 用户界面上只看到一个开关，完全看不出自己改了什么。
+#[test]
+fn autostart_entries_are_isolated_per_instance() {
+    let prod = system::build_autostart_entry_for(
+        "win32",
+        r"C:\Apps\Jitter\jitter.exe",
+        r"C:\Users\tester",
+        Some(r"C:\Users\tester\AppData\Roaming"),
+        None,
+        "prod",
+    );
+    let dev = system::build_autostart_entry_for(
+        "win32",
+        r"D:\repo\rust\target\release\jitter.exe",
+        r"C:\Users\tester",
+        Some(r"C:\Users\tester\AppData\Roaming"),
+        None,
+        "dev",
+    );
+
+    assert!(posix(&prod.path).ends_with("Startup/Jitter.cmd"));
+    assert!(posix(&dev.path).ends_with("Startup/Jitter-dev.cmd"));
+    assert_ne!(prod.path, dev.path, "两个实例不能共用同一个自启文件");
+
+    // 各自指向自己的 exe。
+    assert!(prod.content.contains(r#"set "exe=C:\Apps\Jitter\jitter.exe""#));
+    assert!(dev.content.contains(r#"set "exe=D:\repo\rust\target\release\jitter.exe""#));
+
+    // macOS / Linux 同理。
+    let mac_prod = system::build_autostart_entry_for("darwin", "/a/jitter", "/Users/t", None, None, "prod");
+    let mac_dev = system::build_autostart_entry_for("darwin", "/b/jitter", "/Users/t", None, None, "dev");
+    assert!(posix(&mac_prod.path).ends_with("com.jitter.app.plist"));
+    assert!(posix(&mac_dev.path).ends_with("com.jitter-dev.app.plist"));
+
+    let linux_prod = system::build_autostart_entry_for("linux", "/a/jitter", "/home/t", None, None, "prod");
+    let linux_dev = system::build_autostart_entry_for("linux", "/b/jitter", "/home/t", None, None, "dev");
+    assert!(posix(&linux_prod.path).ends_with("jitter.desktop"));
+    assert!(posix(&linux_dev.path).ends_with("jitter-dev.desktop"));
+}
+
+/// 生产实例的路径必须与旧版逐字节相同：升级不能动到用户已有的配置与自启。
+#[test]
+fn production_instance_paths_match_the_legacy_layout() {
+    // 自启文件名没变。
+    let entry = system::build_autostart_entry("win32", r"C:\Apps\Jitter\jitter.exe", r"C:\Users\tester", Some(r"C:\Users\tester\AppData\Roaming"), None);
+    assert!(posix(&entry.path).ends_with("Startup/Jitter.cmd"));
+
+    // 配置目录没变（生产仍是 %APPDATA%\Jitter，不是 Jitter-prod）。
+    let prod_dir = instance::config_dir_for("prod");
+    assert_eq!(
+        prod_dir.file_name().unwrap().to_string_lossy(),
+        "Jitter",
+        "生产实例的配置目录名不能变"
+    );
+
+    // 开发实例则是独立的子目录。
+    let dev_dir = instance::config_dir_for("dev");
+    assert_eq!(dev_dir.file_name().unwrap().to_string_lossy(), "Jitter-dev");
+    assert_ne!(prod_dir, dev_dir);
+}
+
+/// 互斥体名按实例区分：不同实例互不阻塞，同一实例仍然只允许一个。
+#[test]
+fn mutex_names_are_isolated_per_instance() {
+    assert_eq!(
+        instance::mutex_name_for("prod"),
+        "Local\\JitterSingleInstance-prod"
+    );
+    assert_eq!(
+        instance::mutex_name_for("dev"),
+        "Local\\JitterSingleInstance-dev"
+    );
+    assert_ne!(
+        instance::mutex_name_for("prod"),
+        instance::mutex_name_for("dev")
+    );
 }
 
 #[test]

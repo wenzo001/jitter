@@ -33,6 +33,9 @@ const enUS: MessageSchema = {
   },
   topbar: {
     subtitle: 'Test it first, then schedule it · call curl by second / minute / hour / day',
+    instanceBadge: 'Instance {name}',
+    instanceDevHint:
+      'This is not the production instance; its configuration, data and autostart entry are independent from it.',
     statistics: 'Stats',
     database: 'Database',
     runtimeLogs: 'Runtime logs',
@@ -661,6 +664,9 @@ const enUS: MessageSchema = {
     labelVersion: 'Version',
     labelMode: 'Run mode',
     labelUrl: 'Address',
+    labelInstance: 'Instance',
+    instanceProdHint: '(production instance)',
+    instanceDevHint: '(not the production instance; configuration, data and autostart are independent)',
     labelInstallDir: 'Install directory',
     labelDataFile: 'Data file',
     modeCompiled: 'Installed single-file program',

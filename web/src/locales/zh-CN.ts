@@ -37,6 +37,8 @@ const zhCN = {
   },
   topbar: {
     subtitle: '先测通，再定时 · 按秒 / 分 / 时 / 天调用 curl',
+    instanceBadge: '实例 {name}',
+    instanceDevHint: '这是一个非生产实例，它的配置、数据与开机自启都与生产实例互相独立。',
     statistics: '统计',
     database: '数据库',
     runtimeLogs: '运行日志',
@@ -642,6 +644,9 @@ const zhCN = {
     labelVersion: '版本',
     labelMode: '运行模式',
     labelUrl: '访问地址',
+    labelInstance: '实例',
+    instanceProdHint: '（生产实例）',
+    instanceDevHint: '（非生产实例，配置 / 数据 / 开机自启都与生产实例互相独立）',
     labelInstallDir: '安装目录',
     labelDataFile: '数据文件',
     modeCompiled: '已安装的单文件程序',

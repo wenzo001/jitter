@@ -5,6 +5,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod api;
+mod probe_cli;
 mod scheduler;
 mod tray;
 
@@ -237,6 +238,9 @@ fn open_existing_instance() {
 }
 
 /// 抢一个命名互斥体；返回 false 表示已有实例在运行。
+///
+/// 互斥体名**按实例区分**（`Local\JitterSingleInstance-prod` / `-dev`），
+/// 所以不同实例各自互斥、实例之间互不干扰。
 #[cfg(windows)]
 fn acquire_single_instance() -> bool {
     #[link(name = "kernel32")]
@@ -245,7 +249,9 @@ fn acquire_single_instance() -> bool {
         fn GetLastError() -> u32;
     }
     const ERROR_ALREADY_EXISTS: u32 = 183;
-    let mut name: Vec<u16> = "Local\\JitterSingleInstance".encode_utf16().collect();
+    let mut name: Vec<u16> = jitter_core::instance::single_instance_mutex_name()
+        .encode_utf16()
+        .collect();
     name.push(0);
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
     let last_error = unsafe { GetLastError() };
@@ -280,6 +286,13 @@ fn read_config_file(path: &std::path::Path) -> (jitter_core::config::AppConfig, 
 }
 
 fn main() {
+    // `jitter probe` 是只读诊断工具：必须在任何实例初始化之前分流出去。
+    // 它不起服务、不占端口、不抢互斥体、不碰本机自己的数据库。
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("probe") {
+        std::process::exit(probe_cli::run(&args[2..]));
+    }
+
     // 配置：内置默认值 < 配置文件 < 环境变量（与旧 TS 版一致）。
     // 先读配置是为了知道日志目录（与数据库同级），读失败也要继续用默认值启动。
     let mut config = jitter_core::config::AppConfig::default();

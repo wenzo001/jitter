@@ -17,6 +17,10 @@ export interface Settings {
 export interface SystemInfo {
   name: string
   version: string
+  /** 当前实例名（`prod` / `dev` / …）：界面用它显示「这是哪个实例」。 */
+  instance: string
+  /** 是否是默认（生产）实例。 */
+  default_instance: boolean
   platform: string
   arch: string
   compiled: boolean

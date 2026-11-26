@@ -4,7 +4,7 @@ Jitter 是一个常驻本机的定时小工具：把浏览器里「复制为 cUR
 
 适合谁用：想「每天某个时段自动做一次请求」的人（打卡、签到、领券、报数），以及想「每隔 N 分钟 / 小时轮询一次接口、按返回内容决定要不要通知自己」的人。
 
-当前版本：2.1.17
+当前版本：2.1.18
 
 ## 能做什么
 
@@ -424,7 +424,47 @@ cargo build --release -p jitter-app --jobs 1
   这是为了避免"在源码仓库根目录跑开发版，相对的 `data/app.db` 直接命中正式库"这种事故。
 - 仓库根的 `jitter.config.json` 是**开发 / 容器用的默认配置**：`dbPath` 指向 `.tmp/dev/app.db`，`port` 是 3111。
 - Docker 用 `JITTER_DB_PATH` / `PORT` 环境变量覆盖，行为不变。
-- 想同时跑两个实例，设 `JITTER_ALLOW_MULTI_INSTANCE=1`。
+
+### 多实例：每个实例一份，互不影响
+
+设 `JITTER_INSTANCE`（实例名，默认 `prod`）就能起一个和正式实例**完全隔离**的实例。
+可以同时跑，端口、配置、数据、开机自启各占各的：
+
+| 共享的东西 | 生产实例（`prod`） | 开发实例（`JITTER_INSTANCE=dev`） |
+| --- | --- | --- |
+| 端口 | 3000 | 自己指定（建议 3111） |
+| 配置 / 运行时文件 | `%APPDATA%\Jitter\` | `%APPDATA%\Jitter-dev\` |
+| 开机自启注册项 | `Startup\Jitter.cmd` | `Startup\Jitter-dev.cmd` |
+| 单实例互斥体 | `JitterSingleInstance-prod` | `JitterSingleInstance-dev` |
+| 数据库 / 日志 | 由 `dbPath` 决定 | 由 `dbPath` 决定 |
+
+非默认实例在顶栏会挂一个橙色「实例 dev」标记，设置页「运行信息 → 实例」也能看到当前实例名——
+一眼就能分清自己在哪个实例上，不会误以为在操作生产数据。
+
+仓库里带了现成的启动脚本：
+
+```powershell
+.\scripts\dev-instance.ps1                      # 起一个 dev 实例（端口 3111，库在 .tmp\dev\）
+.\scripts\dev-instance.ps1 -Instance test -Port 3112
+```
+
+> **注意**：开发实例的「开机自启」开关只影响它自己的 `Jitter-dev.cmd`，
+> 不会碰正式实例的 `Jitter.cmd`。正式实例的路径与升级前逐字节相同，升级不会动到它已有的设置。
+
+### 只读查看生产数据：`jitter probe`
+
+排查线上问题时想看正式实例的数据，但绝不能改它。用 `probe` 子命令——
+它**只读**打开数据库（连接层就拒绝写操作），不起服务、不占端口、不碰任何文件：
+
+```powershell
+jitter.exe probe --db "D:\下载\Compressed\data\app.db" --logs "D:\下载\Compressed\data\logs"
+```
+
+输出包含：任务列表（含各自的调度、日志条数、保留天数、最近错误）、全局设置、
+最近的执行记录、运行日志目录的文件列表和最新文件的尾部。
+
+整个过程**不会修改**数据库的 `app.db` / `app.db-wal` / `app.db-shm`（连修改时间都不变），
+正式实例可以照常在跑。`--limit` 控制显示多少条执行记录（默认 20）。
 
 启动后可以在「设置 → 常规 → 运行信息 → 数据文件」或 `/api/health` 的 `dbPath` 字段确认当前连的是哪个库。
 
@@ -445,7 +485,8 @@ cd web && bun run typecheck && bun run test && bun run build
 | `HOST` | 覆盖监听地址 | `127.0.0.1` |
 | `JITTER_DB_PATH` | 覆盖数据库路径（同时决定 `logs/` 与 `backups/` 的位置） | `data/app.db` |
 | `JITTER_CONFIG` | 指定配置文件路径 | 按「启动目录 → 可执行文件旁」查找 `jitter.config.json` |
-| `JITTER_ALLOW_MULTI_INSTANCE` | 设为 `1` 允许同时运行多个实例（默认只允许一个） | 关闭 |
+| `JITTER_ALLOW_MULTI_INSTANCE` | 设为 `1` 允许**同名**实例重复运行（默认只允许一个） | 关闭 |
+| `JITTER_INSTANCE` | 实例名；决定配置目录、开机自启项与互斥体，从而隔离多个实例 | `prod` |
 | `JITTER_STARTUP_DELAY_MS` | 启动前等待的毫秒数，用于升级 / 重启后等旧进程退出（上限 10000） | 0 |
 | `JITTER_LOG_DAYS` | 运行日志文件保留天数（1–365） | 14 |
 | `JITTER_UPDATE_REPO` | 检查升级使用的 GitHub 仓库 | `wenzo001/jitter` |
