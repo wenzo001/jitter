@@ -482,6 +482,20 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
     };
     let run_on_startup = to_boolean(object.get("run_on_startup"));
 
+    // 这个任务自己的日志保留天数：null / 缺省 = 跟随全局设置，0 = 永久保留。
+    let log_retention_days = match object.get("log_retention_days") {
+        None | Some(Json::Null) => None,
+        Some(value) => {
+            let Some(days) = value.as_i64() else {
+                return Err("日志保留天数必须是数字（null 表示跟随全局设置）".to_string());
+            };
+            if !(0..=3650).contains(&days) {
+                return Err("日志保留天数必须在 0（永久）到 3650 天之间".to_string());
+            }
+            Some(days)
+        }
+    };
+
     if precheck_enabled {
         let has_local = precheck_weekdays.is_some()
             || precheck_time.is_some()
@@ -531,6 +545,7 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         precheck_require_network,
         precheck_ip_pattern,
         precheck_day_type,
+        log_retention_days,
         run_on_startup,
     })
 }
@@ -894,9 +909,9 @@ async fn list_logs(
     Path(id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if db::get_task(&id).ok().flatten().is_none() {
+    let Some(task) = db::get_task(&id).ok().flatten() else {
         return not_found();
-    }
+    };
     let config = get_active_config();
     let limit = params
         .get("limit")
@@ -924,8 +939,10 @@ async fn list_logs(
     }
 
     // 保留窗口之外的日志不查询、不渲染。
-    let retention_days = db::get_effective_retention_days(config.log_retention_days)
+    // 窗口按任务算：任务单独设置过天数就用它自己的，否则用全局的。
+    let global_retention = db::get_effective_retention_days(config.log_retention_days)
         .unwrap_or(config.log_retention_days);
+    let retention_days = task.log_retention_days.unwrap_or(global_retention);
     let since = if retention_days > 0 {
         Some(executor::now_ms() - retention_days * 24 * 60 * 60 * 1000)
     } else {
@@ -1174,6 +1191,12 @@ async fn cleanup_logs(AxumJson(body): AxumJson<Json>) -> Response {
     let wants_all = body.get("all") == Some(&Json::Bool(true));
     let days = body.get("days").filter(|value| !value.is_null());
     let confirm = body.get("confirm").cloned().unwrap_or(Json::Null);
+    // 清理范围：None = 全部任务，Some(task_id) = 只清这个任务。
+    let task_id = match body.get("task_id").filter(|value| !value.is_null()) {
+        Some(Json::String(text)) if !text.trim().is_empty() => Some(text.trim().to_string()),
+        Some(_) => return bad_request("task_id 必须是非空字符串"),
+        None => None,
+    };
     const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
     if wants_all && days.is_some() {
@@ -1184,7 +1207,7 @@ async fn cleanup_logs(AxumJson(body): AxumJson<Json>) -> Response {
         if confirm != Json::from("DELETE_ALL") {
             return bad_request("全部清除需要二次确认：confirm 必须为 \"DELETE_ALL\"");
         }
-        return match db::cleanup_logs(None) {
+        return match db::cleanup_logs(None, task_id.as_deref()) {
             Ok(outcome) => AxumJson(outcome).into_response(),
             Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
         };
@@ -1223,7 +1246,7 @@ async fn cleanup_logs(AxumJson(body): AxumJson<Json>) -> Response {
         }
         None => Some(executor::now_ms() - days * DAY_MS),
     };
-    match db::cleanup_logs(cutoff) {
+    match db::cleanup_logs(cutoff, task_id.as_deref()) {
         Ok(outcome) => AxumJson(outcome).into_response(),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
     }
@@ -1237,9 +1260,13 @@ fn tier_list() -> String {
         .join(" / ")
 }
 
-async fn cleanup_preview() -> Response {
-    // 与 TS 版一致：预览对象直接作为响应体。
-    match db::get_log_cleanup_preview(executor::now_ms()) {
+/// 清理预检：`?task_id=xxx` 只统计这个任务，不带则是全部任务。
+async fn cleanup_preview(Query(query): Query<std::collections::HashMap<String, String>>) -> Response {
+    let task_id = query
+        .get("task_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    match db::get_log_cleanup_preview(executor::now_ms(), task_id.as_deref()) {
         Ok(preview) => AxumJson(preview).into_response(),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
     }

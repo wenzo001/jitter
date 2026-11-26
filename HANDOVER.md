@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-25 · v2.1.16 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-26 · v2.1.17 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -243,6 +243,36 @@ bun .tmp/preview/prepare.js      # VACUUM INTO '.tmp/preview/app.db' + tasks.sta
 
 ## 六、本轮已经做完的事（可以直接接手）
 
+### 6.0.6 v2.1.17：日志清理分层 + 每个任务单独设保留时长
+
+用户需求（三条）：
+1. 选中某个任务后点「清理日志」→ 清理的是**该单个任务**的日志；
+2. 设置里可以**清理全部任务**的日志；
+3. 支持**每个任务单独设置日志保留时长**（某任务只留 1 天，某任务留一个月甚至更久），
+   并且清理 / 保留的交互要清晰，让用户知道怎么操作。
+
+| 改动 | 落点 |
+| --- | --- |
+| `tasks` 表新增 `log_retention_days INTEGER`（只走迁移 `ensure_column`，NULL = 跟随全局，0 = 永久） | `rust/crates/jitter-core/src/db.rs`（`TaskRow` / `NewTaskInput` / `TaskColumns` / INSERT `?41` / UPDATE `?41`） |
+| 保留清理**逐任务**按有效天数删：任务自定义优先于全局，0 = 永久保留 | `db.rs`（`prune_logs`） |
+| 清理预检 / 清理支持按任务范围（`task_id` 可选）；`all:true` + `task_id` = 清空该任务全部日志 | `db.rs`（`count_logs` / `get_log_cleanup_preview` / `cleanup_logs`）、`api.rs`（`/api/logs/cleanup`） |
+| 清理范围 id 一律走**参数化** SQL（`count_logs` 改写为 `Vec<Box<dyn ToSql>>` + `params_from_iter`，不再拼 where 子句） | `db.rs` |
+| API 解析任务级 `log_retention_days`（null/缺省 = None；数字须 0..=3650，否则 400） | `api.rs` |
+| **查询窗口也按任务算**：任务自设的保留期决定这条任务能看到多旧的记录（否则设了 30 天却只显示全局 10 天） | `api.rs`（`list_logs`） |
+| 任务表单新增第 5 段「日志保留」：跟随全局设置 / 保留 N 天 / 永久保留 | `web/src/components/task/TaskForm.vue`、`web/src/utils/log-retention.ts`（新增） |
+| 清理弹窗加「清理范围」切换（只清这个任务 / 清理全部任务），顶部用 alert 明示当前范围，切换范围重拉预检 | `web/src/components/dialogs/CleanupLogsDialog.vue`、`web/src/utils/cleanup-scope.ts`（新增） |
+| 执行记录面板按钮改成「清理本任务日志」（没选中任务时禁用） | `web/src/components/logs/LogsPanel.vue` |
+| 设置里按钮改成「清理全部任务日志」 | `web/src/components/dialogs/SettingsDialog.vue` |
+| 任务卡上挂保留策略标签（「日志保留 30 天」/「日志永久保留」）；没单独设置的不显示 | `web/src/components/task/TaskCard.vue` |
+| 单测：任务级清理、任务级保留天数、前端选项与范围映射 | `rust/crates/jitter-core/tests/db.rs`、`web/tests/log-retention.test.ts`、`web/tests/cleanup-scope.test.ts`（新增） |
+
+**约定**：
+- 语义统一：**`null` = 跟随全局设置，`0` = 永久保留，`N` = N 天**。前端下拉用 `'inherit'` ↔ `null` 映射。
+- `prune_logs` **必须逐任务**处理：全局规则不能把「保留更久」那条任务的旧日志删掉，所以不能先按全局一刀切。
+- 保留期同时管**删除**和**查询窗口**：只改删除会出现「设了 30 天但界面只显示 10 天」的割裂。
+- 清理范围 id 一律参数化，不拼进 SQL 字符串。
+- 弹窗打开时抑制一次 `scope` 的 watch，避免同一次打开拉两遍预检。
+
 ### 6.0.5 v2.1.16：跳过 / 错过的记录不可点详情
 
 用户反馈：跳过（skipped）和错过（missed）的记录本来就没发过请求，点「详情 ›」打开抽屉里也没有内容，
@@ -387,23 +417,23 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 
 ## 七之二、本轮最终状态（已实测）
 
-**测试（2026-11-25 实测，v2.1.16）**
+**测试（2026-11-26 实测，v2.1.17）**
 
 | 项目 | 结果 |
 | --- | --- |
-| `cargo test --workspace --jobs 1` | **core 251 项 + app 2 项全绿** |
+| `cargo test --workspace --jobs 1` | **core 253 项 + app 2 项全绿**（含 `cleanup_logs_can_target_a_single_task` / `prune_logs_respects_per_task_retention`） |
 | `cargo check --workspace --all-targets --jobs 1` | **0 warning / 0 error** |
 | `bun run typecheck` | 退出码 0 |
-| `bun run test` | **11 文件 / 94 用例全绿**（含 `tests/log-row.test.ts`：跳过 / 错过不可点详情） |
-| 浏览器实测（副本实例 3111） | 页面 0 console error / 0 warn；点跳过行不发请求、不开抽屉，末尾显示「无详情」 |
+| `bun run test` | **13 文件 / 107 用例全绿**（新增 `tests/log-retention.test.ts`、`tests/cleanup-scope.test.ts`） |
+| 浏览器实测（副本实例 3111） | 见下方 v2.1.17 实测结论 |
 
 **发布体积（2026-11-25 实测）**
 
 | 项 | 大小 |
 | --- | --- |
-| `rust/target/release/jitter.exe` | **7,706,624 B（7.35 MB）** |
-| `jitter-windows-x64.zip`（Release） | **3,318,382 B（3.16 MB）** |
-| `web/dist/assets/index-*.js` | ≈1,743 kB（gzip ≈488 KB） |
+| `rust/target/release/jitter.exe` | **7,706,624 B（7.35 MB）**（v2.1.16；v2.1.17 待 CI 出包） |
+| `jitter-windows-x64.zip`（Release） | **3,318,382 B（3.16 MB）**（v2.1.16） |
+| `web/dist/assets/index-*.js` | ≈1,753 kB（gzip ≈491 KB，v2.1.17） |
 | `web/dist/assets/jetbrains-mono-latin-wght-normal.woff2` | 40.4 KB |
 
 > release profile 已是 `opt-level="z" + lto + codegen-units=1 + strip=true`，没有进一步空间。

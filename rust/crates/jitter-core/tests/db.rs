@@ -395,14 +395,87 @@ fn cleanup_logs_vacuums_and_reports() {
         })
         .expect("log");
     }
-    let outcome = cleanup_logs(Some(1003)).expect("cleanup");
+    let outcome = cleanup_logs(Some(1003), None).expect("cleanup");
     assert_eq!(outcome.deleted, 3);
     assert_eq!(outcome.remaining, 2);
     assert_eq!(outcome.cutoff, Some(1003));
 
-    let all = cleanup_logs(None).expect("cleanup all");
+    let all = cleanup_logs(None, None).expect("cleanup all");
     assert_eq!(all.deleted, 2);
     assert_eq!(all.remaining, 0);
+    cleanup(&path);
+    close_db();
+}
+
+/// 清理可以只针对一个任务：别的任务的日志不动。
+#[test]
+fn cleanup_logs_can_target_a_single_task() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = format!("{dir}\\app.db");
+    let _ = fs::remove_file(&path);
+    init_db(Some(&path)).expect("init");
+    create_task(&task_input("one"), "t1", 1000).expect("create");
+    create_task(&task_input("two"), "t2", 1000).expect("create");
+    for index in 0..3i64 {
+        insert_log(&NewLogInput {
+            task_id: "t1".into(),
+            executed_at: 1000 + index,
+            ..Default::default()
+        })
+        .expect("log");
+        insert_log(&NewLogInput {
+            task_id: "t2".into(),
+            executed_at: 2000 + index,
+            ..Default::default()
+        })
+        .expect("log");
+    }
+
+    let outcome = cleanup_logs(None, Some("t1")).expect("cleanup");
+    assert_eq!(outcome.deleted, 3);
+    assert_eq!(outcome.remaining, 0, "剩余按这个任务算");
+    assert_eq!(list_logs("t1", 100, None).expect("list").len(), 0);
+    assert_eq!(list_logs("t2", 100, None).expect("list").len(), 3, "别的任务不受影响");
+    cleanup(&path);
+    close_db();
+}
+
+/// 任务级保留天数：单独设置的任务按自己的天数留，其它任务跟随全局。
+#[test]
+fn prune_logs_respects_per_task_retention() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = format!("{dir}\\app.db");
+    let _ = fs::remove_file(&path);
+    init_db(Some(&path)).expect("init");
+
+    let mut long_lived = task_input("long");
+    long_lived.log_retention_days = Some(30);
+    create_task(&long_lived, "t1", 1000).expect("create");
+    create_task(&task_input("short"), "t2", 1000).expect("create");
+
+    let now = 40 * 86_400_000;
+    // 日志落在第 20 天：比全局 10 天老，但比这个任务自己的 30 天新。
+    for index in 0..2i64 {
+        insert_log(&NewLogInput {
+            task_id: "t1".into(),
+            executed_at: 20 * 86_400_000 + index,
+            ..Default::default()
+        })
+        .expect("log");
+        insert_log(&NewLogInput {
+            task_id: "t2".into(),
+            executed_at: 20 * 86_400_000 + index,
+            ..Default::default()
+        })
+        .expect("log");
+    }
+
+    // 全局保留 10 天：t2 跟着删，t1 自己设了 30 天所以留着。
+    prune_logs(now, 10, 0).expect("prune");
+    assert_eq!(list_logs("t1", 100, None).expect("list").len(), 2, "任务级保留更久");
+    assert_eq!(list_logs("t2", 100, None).expect("list").len(), 0, "跟随全局被清理");
     cleanup(&path);
     close_db();
 }

@@ -64,6 +64,8 @@ export interface Task {
   precheck_require_ac: number
   /** 必须已连接网络（WiFi 或网线）才执行；0 = 不限制。 */
   precheck_require_network: number
+  /** 这个任务自己的日志保留天数；null = 跟随全局设置，0 = 永久保留。 */
+  log_retention_days: number | null
   precheck_ip_pattern: string | null
   /** 工作日 / 休息日条件：workday / offday；null 表示不限制。 */
   precheck_day_type: 'workday' | 'offday' | null
@@ -109,6 +111,8 @@ export interface TaskPayload {
   precheck_require_ac?: boolean
   /** 必须已连接网络（WiFi 或网线）才执行。 */
   precheck_require_network?: boolean
+  /** 这个任务的日志保留天数；不传 / null = 跟随全局设置，0 = 永久保留。 */
+  log_retention_days?: number | null
   /** 工作日 / 休息日条件（法定节假日数据判断）。 */
   precheck_day_type?: 'workday' | 'offday'
   precheck_expect_status?: number

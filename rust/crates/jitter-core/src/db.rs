@@ -195,6 +195,8 @@ pub struct TaskRow {
     pub precheck_day_type: Option<String>,
     /// 必须已连接网络（WiFi / 网线）才执行；0 = 不限制。
     pub precheck_require_network: i64,
+    /// 这个任务的日志保留天数；NULL = 跟随全局设置，0 = 永久保留。
+    pub log_retention_days: Option<i64>,
     pub run_on_startup: i64,
     pub expect_status: Option<i64>,
     pub expect_body: Option<String>,
@@ -248,6 +250,7 @@ fn map_task(row: &Row<'_>) -> rusqlite::Result<TaskRow> {
         precheck_ip_pattern: row.get("precheck_ip_pattern")?,
         precheck_day_type: row.get("precheck_day_type")?,
         precheck_require_network: row.get("precheck_require_network")?,
+        log_retention_days: row.get("log_retention_days")?,
         run_on_startup: row.get("run_on_startup")?,
         expect_status: row.get("expect_status")?,
         expect_body: row.get("expect_body")?,
@@ -392,6 +395,8 @@ pub struct NewTaskInput {
     pub precheck_require_ac: bool,
     /// 必须已连接网络（WiFi 或网线）才执行。
     pub precheck_require_network: bool,
+    /// 这个任务的日志保留天数：None = 跟随全局设置，Some(0) = 永久保留。
+    pub log_retention_days: Option<i64>,
     pub precheck_ip_pattern: Option<String>,
     /// `workday`（仅工作日）/ `offday`（仅休息日）；None 表示不限制。
     pub precheck_day_type: Option<String>,
@@ -410,6 +415,7 @@ struct TaskColumns {
     require_network: bool,
     ip_pattern: Option<String>,
     day_type: Option<String>,
+    log_retention_days: Option<i64>,
 }
 
 fn task_columns(input: &NewTaskInput) -> TaskColumns {
@@ -478,6 +484,10 @@ fn task_columns(input: &NewTaskInput) -> TaskColumns {
         require_network: guard_enabled && input.precheck_require_network,
         ip_pattern,
         day_type,
+        // 只接受 0（永久）或 1–3650 天，其余按“跟随全局”处理。
+        log_retention_days: input
+            .log_retention_days
+            .filter(|days| (0..=3650).contains(days)),
     }
 }
 
@@ -798,6 +808,7 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
         "precheck_require_network",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    ensure_column(conn, "tasks", "log_retention_days", "INTEGER")?;
     ensure_column(
         conn,
         "tasks",
@@ -893,10 +904,10 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
               precheck_body, precheck_options, precheck_expect_status, precheck_expr,
               precheck_weekdays, precheck_time_start, precheck_time_end,
               precheck_require_ac, precheck_require_network, precheck_ip_pattern, precheck_day_type,
-              expect_status, expect_body, expect_expr, run_on_startup
+              expect_status, expect_body, expect_expr, log_retention_days, run_on_startup
             ) VALUES (
               ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-              ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49
+              ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50
             )",
             params![
                 id,
@@ -949,6 +960,7 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
                 input.expect_status,
                 input.expect_body,
                 input.expect_expr,
+                columns.log_retention_days,
                 if input.run_on_startup { 1 } else { 0 },
             ],
         )?;
@@ -982,8 +994,8 @@ pub fn update_task_config(
               precheck_require_ac = ?34, precheck_require_network = ?35,
               precheck_ip_pattern = ?36, precheck_day_type = ?37,
               expect_status = ?38, expect_body = ?39, expect_expr = ?40,
-              run_on_startup = ?41, updated_at = ?42
-             WHERE id = ?43",
+              log_retention_days = ?41, run_on_startup = ?42, updated_at = ?43
+             WHERE id = ?44",
             params![
                 input.name,
                 input.curl_command,
@@ -1027,6 +1039,7 @@ pub fn update_task_config(
                 input.expect_status,
                 input.expect_body,
                 input.expect_expr,
+                columns.log_retention_days,
                 if input.run_on_startup { 1 } else { 0 },
                 now,
                 id,
@@ -1451,11 +1464,30 @@ const LOG_BYTES_EXPR: &str = "(
   length(coalesce(error, '')) + 64
 )";
 
+/// 统计日志条数 / 体积 / 时间范围。
+///
+/// `task_id` 限定某个任务，`cutoff` 限定「早于某个时刻」；
+/// 两者都是**参数化**的（任务 id 来自接口，不能拼进 SQL）。
 fn count_logs(
     conn: &Connection,
-    where_clause: &str,
+    task_id: Option<&str>,
     cutoff: Option<i64>,
 ) -> Result<LogCountRow, DbError> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(id) = task_id {
+        clauses.push(format!("task_id = ?{}", values.len() + 1));
+        values.push(Box::new(id.to_string()));
+    }
+    if let Some(value) = cutoff {
+        clauses.push(format!("executed_at < ?{}", values.len() + 1));
+        values.push(Box::new(value));
+    }
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
     let sql = format!(
         "SELECT count(*) AS count,
                 coalesce(sum({LOG_BYTES_EXPR}), 0) AS bytes,
@@ -1463,24 +1495,18 @@ fn count_logs(
                 max(executed_at) AS newest
          FROM logs {where_clause}"
     );
-    let row = match cutoff {
-        Some(value) => conn.query_row(&sql, params![value], |row| {
+    let row = conn.query_row(
+        &sql,
+        rusqlite::params_from_iter(values.iter().map(|value| value.as_ref())),
+        |row| {
             Ok(LogCountRow {
                 count: row.get(0)?,
                 bytes: row.get(1)?,
                 oldest: row.get(2)?,
                 newest: row.get(3)?,
             })
-        })?,
-        None => conn.query_row(&sql, [], |row| {
-            Ok(LogCountRow {
-                count: row.get(0)?,
-                bytes: row.get(1)?,
-                oldest: row.get(2)?,
-                newest: row.get(3)?,
-            })
-        })?,
-    };
+        },
+    )?;
     Ok(row)
 }
 
@@ -1506,15 +1532,20 @@ pub struct LogCleanupPreview {
 }
 
 /// 只读预览：cutoff 基于 logs.executed_at（epoch ms）。
-pub fn get_log_cleanup_preview(now: i64) -> Result<LogCleanupPreview, DbError> {
+///
+/// `task_id` 限定只统计某一个任务的日志；None = 全部任务。
+pub fn get_log_cleanup_preview(
+    now: i64,
+    task_id: Option<&str>,
+) -> Result<LogCleanupPreview, DbError> {
     // 先在锁外取文件大小：db_path() 也要拿同一把锁，持锁调用会自死锁。
     let storage = get_log_storage_usage();
     with_db(|conn, _| {
-        let totals = count_logs(conn, "", None)?;
+        let totals = count_logs(conn, task_id, None)?;
         let mut options = Vec::new();
         for days in LOG_CLEANUP_DAYS {
             let cutoff = now - days * DAY_MS;
-            let row = count_logs(conn, "WHERE executed_at < ?", Some(cutoff))?;
+            let row = count_logs(conn, task_id, Some(cutoff))?;
             options.push(LogCleanupOption {
                 days,
                 label: cleanup_label(days),
@@ -1548,7 +1579,10 @@ pub struct LogPruneOutcome {
     pub by_count: i64,
 }
 
-/// 保留清理：删超过 `retention_days` 的日志，和每任务只留最新的 `max_rows_per_task` 条。
+/// 保留清理：删超过保留期的日志，和每任务只留最新的 `max_rows_per_task` 条。
+///
+/// 保留期**按任务算**：任务单独设置过天数就用它自己的，否则用全局的 `retention_days`；
+/// 0 表示永久保留。必须逐任务处理——全局规则不能把「保留更久」的任务的旧日志删掉。
 pub fn prune_logs(
     now: i64,
     retention_days: i64,
@@ -1557,15 +1591,30 @@ pub fn prune_logs(
     with_db(|conn, _| {
         let mut by_age = 0i64;
         let mut by_count = 0i64;
-        if retention_days > 0 {
-            let cutoff = now - retention_days * DAY_MS;
-            by_age = conn.execute(
+        let task_days: Vec<(String, Option<i64>)> = {
+            let mut statement = conn.prepare("SELECT id, log_retention_days FROM tasks")?;
+            let mapped = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+                })?
+                .filter_map(|result| result.ok())
+                .collect();
+            mapped
+        };
+        for (id, days_override) in task_days {
+            let days = days_override.unwrap_or(retention_days);
+            if days <= 0 {
+                // 0 = 永久保留这个任务的日志。
+                continue;
+            }
+            let cutoff = now - days * DAY_MS;
+            by_age += conn.execute(
                 "DELETE FROM logs
                   WHERE id IN (SELECT id FROM logs
-                                WHERE executed_at < ?1
+                                WHERE task_id = ?1 AND executed_at < ?2
                                 ORDER BY executed_at
-                                LIMIT ?2)",
-                params![cutoff, PRUNE_BATCH_ROWS],
+                                LIMIT ?3)",
+                params![id, cutoff, PRUNE_BATCH_ROWS],
             )? as i64;
         }
         if max_rows_per_task > 0 {
@@ -1731,14 +1780,23 @@ pub struct LogCleanupOutcome {
 }
 
 /// 删除旧日志（或全部），然后 VACUUM 并截断 WAL，让文件真正变小。
-pub fn cleanup_logs(cutoff: Option<i64>) -> Result<LogCleanupOutcome, DbError> {
+///
+/// `task_id` 限定只清某个任务的日志；None = 全部任务。
+pub fn cleanup_logs(cutoff: Option<i64>, task_id: Option<&str>) -> Result<LogCleanupOutcome, DbError> {
     let before = get_log_storage_usage();
     let (deleted, vacuum_error) = with_db(|conn, _| {
-        let deleted = match cutoff {
-            None => conn.execute("DELETE FROM logs", [])?,
-            Some(value) => {
+        let deleted = match (cutoff, task_id) {
+            (None, None) => conn.execute("DELETE FROM logs", [])?,
+            (None, Some(id)) => {
+                conn.execute("DELETE FROM logs WHERE task_id = ?1", params![id])?
+            }
+            (Some(value), None) => {
                 conn.execute("DELETE FROM logs WHERE executed_at < ?1", params![value])?
             }
+            (Some(value), Some(id)) => conn.execute(
+                "DELETE FROM logs WHERE task_id = ?1 AND executed_at < ?2",
+                params![id, value],
+            )?,
         } as i64;
         let mut vacuum_error = None;
         let result = (|| -> rusqlite::Result<()> {
@@ -1758,7 +1816,11 @@ pub fn cleanup_logs(cutoff: Option<i64>) -> Result<LogCleanupOutcome, DbError> {
     let after = get_log_storage_usage();
     Ok(LogCleanupOutcome {
         deleted,
-        remaining: count_remaining()?,
+        // 只清某个任务时，“剩余”按这个任务的条数算，其它任务不受影响。
+        remaining: match task_id {
+            Some(id) => with_db(|conn, _| Ok(count_logs(conn, Some(id), None)?.count))?,
+            None => count_remaining()?,
+        },
         cutoff,
         storage_before: before,
         storage_after: after,

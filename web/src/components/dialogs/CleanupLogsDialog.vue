@@ -1,13 +1,25 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { CleanupPreview, CleanupResult } from '@/types/system'
 import { cleanupLogs, cleanupPreview } from '@/api/system'
 import { BACKEND_MARKERS } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import { formatBytes, formatTime } from '@/utils/format'
+import {
+  cleanupRequestBody,
+  defaultCleanupScope,
+  effectiveCleanupTaskId,
+  type CleanupScope,
+} from '@/utils/cleanup-scope'
 
-const props = defineProps<{ open: boolean }>()
+const props = defineProps<{
+  open: boolean
+  /** 限定清理某个任务；为空表示「全部任务」。 */
+  taskId?: string | null
+  /** 任务名（界面上显示范围用）。 */
+  taskName?: string
+}>()
 const emit = defineEmits<{
   'update:open': [value: boolean]
   done: []
@@ -24,6 +36,19 @@ const confirmed = ref(false)
 const allInput = ref('')
 const error = ref('')
 const result = ref<CleanupResult | null>(null)
+/** 清理范围：只清当前任务，还是清全部任务。 */
+const scope = ref<CleanupScope>('all')
+/** 打开弹窗时抑制 scope 的 watch，避免同一次打开拉两遍预检。 */
+let suppressScopeWatch = false
+
+/** 实际生效的任务范围：选「全部任务」时不带 task_id。 */
+const effectiveTaskId = computed(() => effectiveCleanupTaskId(scope.value, props.taskId))
+
+const scopeLabel = computed(() =>
+  scope.value === 'task' && props.taskName
+    ? t('cleanup.scopeTask', { name: props.taskName })
+    : t('cleanup.scopeAll'),
+)
 
 const isAll = computed(() => selected.value === 'all')
 
@@ -45,10 +70,15 @@ const impact = computed(() => {
   if (!selectedOption.value || !preview.value) return t('cleanup.impactNone')
   const count = selectedOption.value.count
   if (isAll.value) {
-    return t('cleanup.impactAll', {
-      count,
-      size: formatBytes(selectedOption.value.bytes),
-    })
+    return scope.value === 'task'
+      ? t('cleanup.impactAllTask', {
+          count,
+          size: formatBytes(selectedOption.value.bytes),
+        })
+      : t('cleanup.impactAll', {
+          count,
+          size: formatBytes(selectedOption.value.bytes),
+        })
   }
   const remaining = Math.max(0, preview.value.total_count - count)
   return t('cleanup.impactSome', {
@@ -58,31 +88,49 @@ const impact = computed(() => {
   })
 })
 
+/** 拉一次当前范围的预检。 */
+async function loadPreview() {
+  view.value = 'loading'
+  preview.value = null
+  selected.value = null
+  confirmed.value = false
+  allInput.value = ''
+  error.value = ''
+  try {
+    const data = await cleanupPreview(effectiveTaskId.value)
+    preview.value = data
+    const first = data.options.find((option) => option.count > 0)
+    selected.value = first ? first.days : null
+    view.value = 'content'
+  } catch (err) {
+    error.value = t('cleanup.statFailed', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    view.value = 'error'
+  }
+}
+
 watch(
   () => props.open,
   async (open) => {
     if (!open) return
-    view.value = 'loading'
-    preview.value = null
-    selected.value = null
-    confirmed.value = false
-    allInput.value = ''
-    error.value = ''
+    // 从任务面板进来默认只清这个任务；从设置进来默认清全部任务。
+    // scope 的 watch 在下一轮 flush 才跑，这里先把它压住，避免同一次打开拉两遍预检。
+    suppressScopeWatch = true
+    scope.value = defaultCleanupScope(props.taskId)
     result.value = null
-    try {
-      const data = await cleanupPreview()
-      preview.value = data
-      const first = data.options.find((option) => option.count > 0)
-      selected.value = first ? first.days : null
-      view.value = 'content'
-    } catch (err) {
-      error.value = t('cleanup.statFailed', {
-        error: err instanceof Error ? err.message : String(err),
-      })
-      view.value = 'error'
-    }
+    await nextTick()
+    await loadPreview()
+    suppressScopeWatch = false
   },
 )
+
+// 切换范围要重新拉预检：两边的条数、占用都不一样。
+watch(scope, async () => {
+  if (!props.open || suppressScopeWatch) return
+  result.value = null
+  await loadPreview()
+})
 
 function choose(value: number | 'all') {
   selected.value = value
@@ -95,21 +143,11 @@ async function execute() {
   view.value = 'running'
   error.value = ''
   try {
-    const body =
+    const cutoff =
       selected.value === 'all'
-        ? { all: true, confirm: 'DELETE_ALL' }
-        : {
-            days: selected.value,
-            confirm: true,
-            ...(Number.isInteger(
-              preview.value.options.find((entry) => entry.days === selected.value)?.cutoff,
-            )
-              ? {
-                  cutoff: preview.value.options.find((entry) => entry.days === selected.value)
-                    ?.cutoff,
-                }
-              : {}),
-          }
+        ? null
+        : preview.value.options.find((entry) => entry.days === selected.value)?.cutoff
+    const body = cleanupRequestBody(scope.value, effectiveTaskId.value, selected.value, cutoff)
     const data = await cleanupLogs(body)
     result.value = data
     view.value = 'result'
@@ -198,6 +236,26 @@ async function execute() {
     </template>
 
     <template v-else-if="preview">
+      <!-- 先说清楚这次清的是谁，避免误删。 -->
+      <div class="field" style="margin-bottom: 12px">
+        <label class="field-label">{{ $t('cleanup.scopeLabel') }}</label>
+        <a-radio-group
+          :value="scope"
+          style="display: flex; flex-direction: column; gap: 6px; width: 100%"
+          @update:value="scope = $event as 'task' | 'all'"
+        >
+          <a-radio value="task" :disabled="!taskId" style="width: 100%">
+            {{ taskName ? $t('cleanup.scopeTask', { name: taskName }) : $t('cleanup.scopeTaskNone') }}
+            <span class="muted" style="margin-left: 8px">{{ $t('cleanup.scopeTaskHint') }}</span>
+          </a-radio>
+          <a-radio value="all" style="width: 100%">
+            {{ $t('cleanup.scopeAll') }}
+            <span class="muted" style="margin-left: 8px">{{ $t('cleanup.scopeAllHint') }}</span>
+          </a-radio>
+        </a-radio-group>
+        <a-alert :message="scopeLabel" type="info" show-icon style="margin-top: 8px" />
+      </div>
+
       <a-descriptions :column="2" size="small" bordered style="margin-bottom: 12px">
         <a-descriptions-item :label="$t('cleanup.labelTotalCount')">
           {{ $t('common.countUnit', { count: preview.total_count }) }}
@@ -236,7 +294,9 @@ async function execute() {
             :disabled="option.count === 0"
             style="width: 100%"
           >
-            {{ $t('cleanup.keepRecent', { label: option.label }) }}
+            {{ scope === 'task'
+              ? $t('cleanup.keepRecentTask', { label: option.label })
+              : $t('cleanup.keepRecent', { label: option.label }) }}
             <span class="muted" style="margin-left: 8px">
               {{
                 option.count === 0
@@ -249,7 +309,7 @@ async function execute() {
             </span>
           </a-radio>
           <a-radio value="all" :disabled="preview.all.count === 0" style="width: 100%">
-            {{ $t('cleanup.clearAll') }}
+            {{ scope === 'task' ? $t('cleanup.clearAllTask') : $t('cleanup.clearAllAll') }}
             <span class="muted" style="margin-left: 8px">
               {{
                 preview.all.count === 0

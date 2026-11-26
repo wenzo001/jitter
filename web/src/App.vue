@@ -47,6 +47,9 @@ const testRef = ref<InstanceType<typeof TestBenchDialog> | null>(null)
 const statsOpen = ref(false)
 const settingsOpen = ref(false)
 const cleanupOpen = ref(false)
+/** 清理范围：null = 全部任务，否则只清这个任务。 */
+const cleanupTaskId = ref<string | null>(null)
+const cleanupTaskName = ref('')
 const globalTestOpen = ref(false)
 const calendarOpen = ref(false)
 const databaseOpen = ref(false)
@@ -366,6 +369,30 @@ async function onCleanupDone() {
   if (tasks.selectedId) await refreshLogs(true)
 }
 
+/**
+ * 从执行记录面板进来：默认只清理当前选中的任务。
+ *
+ * 没选中任务时不打开弹窗——「清理日志」是针对某个任务的操作，
+ * 全部任务的清理由设置里的入口负责，避免误删。
+ */
+function openCleanupForTask() {
+  const task = tasks.selectedTask
+  if (!task) {
+    app.setStatus(t('logs.cleanupNeedSelect'), true)
+    return
+  }
+  cleanupTaskId.value = task.id
+  cleanupTaskName.value = task.name
+  cleanupOpen.value = true
+}
+
+/** 从设置进来：默认清理全部任务的日志。 */
+function openCleanupAll() {
+  cleanupTaskId.value = null
+  cleanupTaskName.value = ''
+  cleanupOpen.value = true
+}
+
 // 轮询与可见性交给 vueuse：定时器随组件卸载自动清理，
 // 页面切到后台时自动跳过轮询，回到前台立刻补一次刷新。
 const { pause: pauseTick, resume: resumeTick } = useIntervalFn(() => tasks.tick(), 1000)
@@ -537,7 +564,7 @@ onMounted(async () => {
             </section>
 
             <section class="column">
-              <LogsPanel @cleanup="cleanupOpen = true" />
+              <LogsPanel @cleanup="openCleanupForTask" />
             </section>
           </div>
         </ErrorBoundary>
@@ -574,13 +601,18 @@ onMounted(async () => {
 
     <PauseDialog v-model:open="pauseOpen" :task="pauseTarget" @saved="onPauseSaved" />
     <DeleteTaskDialog v-model:open="deleteOpen" :task="deleteTarget" @deleted="onDeleted" />
-    <CleanupLogsDialog v-model:open="cleanupOpen" @done="onCleanupDone" />
+    <CleanupLogsDialog
+      v-model:open="cleanupOpen"
+      :task-id="cleanupTaskId"
+      :task-name="cleanupTaskName"
+      @done="onCleanupDone"
+    />
     <StatsDialog v-model:open="statsOpen" />
     <CalendarDialog v-model:open="calendarOpen" />
     <DatabaseDialog v-model:open="databaseOpen" />
     <RuntimeLogsDialog v-model:open="runtimeLogsOpen" />
     <DiagnosticsDialog v-model:open="diagnosticsOpen" @open-logs="runtimeLogsOpen = true" />
-    <SettingsDialog v-model:open="settingsOpen" @cleanup="cleanupOpen = true" />
+    <SettingsDialog v-model:open="settingsOpen" @cleanup="openCleanupAll" />
     <TestBenchDialog v-model:open="globalTestOpen" ref="testRef" @apply="applyGlobalTest" />
 
     <ConfirmDialog

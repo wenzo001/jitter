@@ -77,8 +77,10 @@ export function readRuntimeLog(name: string, offset = 0, limit = 64 * 1024): Pro
   )
 }
 
-export function cleanupPreview(): Promise<CleanupPreview> {
-  return request('/api/logs/cleanup/preview')
+/** 清理预检：带 taskId 时只统计这个任务的日志。 */
+export function cleanupPreview(taskId?: string | null): Promise<CleanupPreview> {
+  const query = taskId ? `?task_id=${encodeURIComponent(taskId)}` : ''
+  return request(`/api/logs/cleanup/preview${query}`)
 }
 
 export function cleanupLogs(body: unknown): Promise<CleanupResult> {

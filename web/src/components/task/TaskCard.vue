@@ -104,6 +104,18 @@ const footText = computed(() => {
   })
 })
 
+/**
+ * 这个任务自己的日志保留策略。
+ *
+ * null = 跟随全局设置（不显示，避免每张卡都挂一个没信息量的标签）；
+ * 0 = 永久保留；N = 保留 N 天。
+ */
+const retentionTag = computed(() => {
+  const days = props.task.log_retention_days
+  if (days === null || days === undefined) return null
+  if (days === 0) return { color: 'default', text: t('task.retentionTagForever') }
+  return { color: 'default', text: t('task.retentionTagDays', { days }) }
+})
 function act(
   name: 'run' | 'edit' | 'copy' | 'test' | 'pause' | 'resumePause' | 'stop' | 'start' | 'remove',
 ) {
@@ -252,6 +264,7 @@ function onDragStart(event: DragEvent) {
       <ConditionBadge :task="task" :now="now" />
       <a-tag v-if="isCrossMidnight(task)" color="purple">{{ $t('task.crossMidnight') }}</a-tag>
       <a-tag v-if="timeoutText" color="default">{{ $t('task.timeoutTag', { value: timeoutText }) }}</a-tag>
+      <a-tag v-if="retentionTag" color="default">{{ retentionTag.text }}</a-tag>
       <span class="task-meta-schedule">
         <span class="muted task-meta-label">{{ $t('task.scheduleLabel') }}</span>{{ formatSchedule(task, t) }}
       </span>

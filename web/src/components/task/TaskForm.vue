@@ -9,6 +9,11 @@ import { useTasksStore } from '@/stores/tasks'
 import { formatShortTime, formatClockSecond, hhmm } from '@/utils/format'
 import { headersTextToJson, requestToCurl } from '@/utils/curl'
 import { describeHostEnvironment, describeHostNetwork } from '@/utils/environment'
+import {
+  logRetentionOptions as logRetentionOptionsOf,
+  logRetentionValue as logRetentionValueOf,
+  parseLogRetention,
+} from '@/utils/log-retention'
 import ConditionFields from './ConditionFields.vue'
 import TestBenchDialog from '@/components/dialogs/TestBenchDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -98,6 +103,20 @@ const expectSummary = computed(() => {
 
 const envText = computed(() => describeHostEnvironment(app.environment, t))
 const networkText = computed(() => describeHostNetwork(app.environment, t))
+
+/**
+ * 日志保留天数的可选项。
+ *
+ * 值用字符串 'inherit' 表示「跟随全局设置」，数字表示天数（0 = 永久保留）；
+ * 表单模型里存的是 `number | null`（null = 跟随全局）。
+ */
+const logRetentionOptions = computed(() => logRetentionOptionsOf(t))
+
+const logRetentionValue = computed(() => logRetentionValueOf(model.value.logRetentionDays))
+
+function setLogRetention(value: unknown) {
+  model.value.logRetentionDays = parseLogRetention(value)
+}
 
 /** 节假日数据就绪：当年数据存在，「仅工作日 / 仅休息日」选项才可选。 */
 const holidayReady = computed(() => app.holiday?.hasCurrentYear === true)
@@ -512,6 +531,9 @@ function buildPayload(): TaskPayload {
   }
 
   if (value.notifyEnabled) payload.notify_curl = value.notifyCurl.trim()
+
+  // null = 跟随全局设置；0 = 永久保留。
+  payload.log_retention_days = value.logRetentionDays
 
   if (value.expectStatus.trim()) payload.expect_status = Number(value.expectStatus.trim())
   if (value.expectBody !== '') payload.expect_body = value.expectBody
@@ -957,6 +979,28 @@ defineExpose({
             any: errors.condAny ?? '',
           }"
         />
+      </section>
+
+      <!-- 5. 日志保留 -->
+      <section class="form-section">
+        <div class="section-head">
+          <span class="section-step">5</span>
+          <div>
+            <h3>{{ $t('taskForm.sectionLogRetention') }}</h3>
+            <p>{{ $t('taskForm.sectionLogRetentionDesc') }}</p>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">{{ $t('taskForm.logRetentionLabel') }}</label>
+          <a-select
+            :value="logRetentionValue"
+            :options="logRetentionOptions"
+            style="width: 260px"
+            @update:value="setLogRetention"
+          />
+          <p class="field-hint">{{ $t('taskForm.logRetentionHint') }}</p>
+        </div>
       </section>
     </form>
 

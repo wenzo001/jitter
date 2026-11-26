@@ -41,6 +41,8 @@ export interface TaskFormModel {
   expectStatus: string
   expectBody: string
   expectExpr: string
+  /** 这个任务的日志保留天数：null = 跟随全局设置，0 = 永久保留。 */
+  logRetentionDays: number | null
   conditions: ConditionModel
 }
 
@@ -121,6 +123,7 @@ export function emptyFormModel(): TaskFormModel {
     expectStatus: '',
     expectBody: '',
     expectExpr: '',
+    logRetentionDays: null,
     conditions: emptyCondition(),
   }
 }
@@ -173,6 +176,10 @@ export function formModelFromTask(task: Task): TaskFormModel {
   model.expectBody = task.expect_body ?? ''
   model.expectExpr = task.expect_expr ?? ''
   model.runOnStartup = task.run_on_startup === 1
+  model.logRetentionDays =
+    task.log_retention_days === null || task.log_retention_days === undefined
+      ? null
+      : task.log_retention_days
   model.conditions = conditionFromTask(task)
   return model
 }

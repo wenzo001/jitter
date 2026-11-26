@@ -552,7 +552,7 @@ function openCleanup() {
             <a-button type="primary" size="small" :loading="settingsBusy" @click="saveRetention">
               {{ $t('common.save') }}
             </a-button>
-            <a-button size="small" @click="openCleanup">{{ $t('settings.cleanupNow') }}</a-button>
+            <a-button size="small" @click="openCleanup">{{ $t('settings.cleanupAll') }}</a-button>
           </div>
           <p class="field-hint" style="margin-top: 6px">
             {{ $t('settings.retentionHint') }}

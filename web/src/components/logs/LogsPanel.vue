@@ -13,6 +13,7 @@ import LogRow from './LogRow.vue'
 import LogDetailDrawer from './LogDetailDrawer.vue'
 
 const emit = defineEmits<{
+  /** 清理日志：默认只清当前选中的任务。 */
   cleanup: []
 }>()
 
@@ -119,7 +120,15 @@ const emptyText = computed(() => {
           <a-switch size="small" :checked="mergeEnabled" @change="mergeEnabled = $event" />
           <span class="muted">{{ $t('logs.mergeToggle') }}</span>
         </label>
-        <a-button size="small" type="text" @click="emit('cleanup')">{{ $t('logs.cleanup') }}</a-button>
+        <a-button
+          size="small"
+          type="text"
+          :disabled="!selectedTask"
+          :title="selectedTask ? $t('logs.cleanupTaskLogsHint') : $t('logs.cleanupNeedSelect')"
+          @click="emit('cleanup')"
+        >
+          {{ selectedTask ? $t('logs.cleanupTaskLogs') : $t('logs.cleanup') }}
+        </a-button>
         <a-button size="small" type="text" @click="refresh">{{ $t('common.refresh') }}</a-button>
       </div>
     </div>
