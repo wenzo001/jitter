@@ -120,11 +120,13 @@ fn production_instance_paths_match_the_legacy_layout() {
     let entry = system::build_autostart_entry("win32", r"C:\Apps\Jitter\jitter.exe", r"C:\Users\tester", Some(r"C:\Users\tester\AppData\Roaming"), None);
     assert!(posix(&entry.path).ends_with("Startup/Jitter.cmd"));
 
-    // 配置目录没变（生产仍是 %APPDATA%\Jitter，不是 Jitter-prod）。
+    // 配置目录没变（生产仍是平台默认目录，不是 Jitter-prod）。
+    // 各平台默认目录名不同（Windows / macOS 是 `Jitter`，Linux 是 `jitter`），
+    // 所以比的是「等于平台默认名」，不能写死字面量 `Jitter`。
     let prod_dir = instance::config_dir_for("prod");
     assert_eq!(
         prod_dir.file_name().unwrap().to_string_lossy(),
-        "Jitter",
+        instance::base_config_dir_name(),
         "生产实例的配置目录名不能变"
     );
 

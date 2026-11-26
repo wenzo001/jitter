@@ -156,6 +156,19 @@ fn base_config_dir() -> PathBuf {
     }
 }
 
+/// 平台默认配置目录的**目录名**（不含实例后缀）。
+///
+/// 生产实例用的就是它，开发实例在它后面接 `-<实例名>`。
+///
+/// 各平台默认目录名并不一样（Windows / macOS 是 `Jitter`，Linux 是 `jitter`），
+/// 所以断言「生产目录名等于它」比断言字面量 `Jitter` 跨平台都对。
+pub fn base_config_dir_name() -> String {
+    base_config_dir()
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
 fn home_dir() -> PathBuf {
     if std::env::consts::OS == "windows" {
         if let Ok(profile) = env::var("USERPROFILE") {
@@ -237,9 +250,11 @@ mod tests {
         let prod = config_dir_for("prod");
         let dev = config_dir_for("dev");
         assert_ne!(prod, dev);
-        // 生产目录名不带后缀，开发目录名带后缀。
-        assert!(prod.file_name().unwrap().to_string_lossy().contains("Jitter"));
-        assert!(!prod.file_name().unwrap().to_string_lossy().contains("Jitter-"));
+        // 生产目录就是平台默认目录（不带实例后缀）。
+        // 注意各平台默认目录名不同：Windows / macOS 是 `Jitter`，Linux 是 `jitter`，
+        // 所以这里比的是「等于平台默认名」，不能写死字面量。
+        assert_eq!(prod.file_name(), base_config_dir().file_name());
+        // 开发目录在默认名后面接 `-<实例名>`。
         assert_eq!(dev.file_name().unwrap().to_string_lossy(), "Jitter-dev");
     }
 }
