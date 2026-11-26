@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.18（未发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.17>。
+**当前版本：v2.1.18（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.18>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -199,6 +199,32 @@ Linux 上类型看 `/sys/class/net/<name>/type`（1 = 以太网）和 `wireless`
 在 `executor.rs` 与 `testbench.rs` 里都是任一失败即 early return）。
 但**一个条件内部的多值是「或」**：星期多选、本机 IP 多模式、WiFi / 网线二选一都属于该条件自身的备选。
 前端文案也按这个口径写（`condition.conjunctionHint` / `condition.badgeNote`），不要改成含糊的「满足其一」。
+
+### 4.22 跨平台断言别写死目录名
+
+v2.1.18 第一次发 CI 时挂在 `ubuntu-latest`：`instance` 的单测断言
+「生产配置目录名包含 `Jitter`」——**Linux 上是 `$XDG_CONFIG_HOME/jitter`（小写）**，Windows / macOS 才是 `Jitter`。
+
+写死字面量的断言只在本机（Windows）绿，CI 上才炸。正确写法是断言**语义**：
+「生产目录名 == 平台默认目录名」（`instance::base_config_dir_name()`），
+而不是断言它等于某个字符串。
+
+> 顺带记住：**本机测试全绿 ≠ CI 会绿**。CI 里跑 `cargo test -p jitter-core`（含跨平台集成测试），
+> 改动路径、目录名、平台分支时要想一遍另外两个平台。
+
+### 4.23 Windows 发布版是 GUI 子系统程序，probe 的输出行为和别的程序不一样
+
+`main.rs` 顶上那行 `#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]`
+是为了双击 exe 不弹黑窗口。代价是**发布版的 `jitter.exe` 是 GUI 子系统程序**：
+
+- 直接在终端跑 `jitter.exe probe ...`：**输出正常显示**（stdout 句柄继承自父进程，写入有效）；
+- 重定向到文件 `jitter.exe probe ... > probe.txt`：**完整写入**（实测 1698 B，exit=0）；
+- 但 `$x = & jitter.exe probe ...` 这种**捕获到变量**的写法拿不到任何东西——
+  PowerShell 对 GUI 子系统程序不等待、也不接管它的输出。
+
+排查时要么直接看屏幕，要么重定向到文件。别在脚本里指望 `$(...)` 捕获。
+Rust 侧的 `stdout.is_terminal()` 在 GUI 程序里也会返回 `false`（没 AttachConsole），
+别拿它判断「输出到哪去了」。
 
 ---
 
@@ -524,19 +550,27 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 | `cargo build --release -p jitter-app --jobs 1` | 成功（含新前端产物） |
 | 浏览器实测（dev 实例 3111） | 见下方 v2.1.18 实测结论 |
 
-**发布体积（2026-11-26 实测）**
+**发布体积（2026-11-26 实测，Release v2.1.18）**
 
 | 项 | 大小 |
 | --- | --- |
-| `jitter-windows-x64.zip`（Release v2.1.17） | **3,326,092 B（3.17 MB）** |
-| `jitter-linux-x64.zip` | 3,195,934 B |
-| `jitter-macos-x64.zip` | 3,047,403 B |
-| `jitter-macos-arm64.zip` | 2,982,814 B |
-| `jitter-linux-arm64.zip` | 3,168,326 B |
-| `web/dist/assets/index-*.js` | ≈1,753 kB（gzip ≈491 KB，v2.1.17） |
+| `jitter-windows-x64.zip` | **3,343,878 B（3.19 MB）** |
+| `jitter-linux-x64.zip` | 3,212,063 B |
+| `jitter-macos-x64.zip` | 3,062,332 B |
+| `jitter-macos-arm64.zip` | 2,997,386 B |
+| `jitter-linux-arm64.zip` | 3,184,898 B |
+| `web/dist/assets/index-*.js` | ≈1,753 kB（gzip ≈491 KB） |
 | `web/dist/assets/jetbrains-mono-latin-wght-normal.woff2` | 40.4 KB |
 
 > release profile 已是 `opt-level="z" + lto + codegen-units=1 + strip=true`，没有进一步空间。
+> 发布包解出来的 `jitter.exe` 是 7,744,512 B。
+
+**发布产物实测（v2.1.18）**
+
+- 从 Release 下载 `jitter-windows-x64.zip` + `.sha256`，**sha256 完全一致**
+  （`e3e3f85ea5496e0a32b04a56622eff52bf43f09d7946beabc3aa51ba81fc0b17`）。
+- 解压出的 `jitter.exe` 对生产库跑 `probe`：exit=0，输出完整（1698 B），
+  生产库 `app.db` / `app.db-wal` / `app.db-shm` 指纹不变，生产实例 3000 端口照常响应。
 
 **实例隔离实测结论（v2.1.18）**
 

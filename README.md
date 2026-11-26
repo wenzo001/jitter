@@ -466,6 +466,16 @@ jitter.exe probe --db "D:\下载\Compressed\data\app.db" --logs "D:\下载\Compr
 整个过程**不会修改**数据库的 `app.db` / `app.db-wal` / `app.db-shm`（连修改时间都不变），
 正式实例可以照常在跑。`--limit` 控制显示多少条执行记录（默认 20）。
 
+> **在 PowerShell 里怎么用**：直接在终端敲这条命令就能看到输出。
+> 但**不要**写成 `$x = & jitter.exe probe ...`——Windows 发布版是 GUI 子系统程序
+> （双击不弹黑窗口），PowerShell 不会等它、也捕获不到它的输出。
+> 要筛选就重定向到文件再查：
+>
+> ```powershell
+> jitter.exe probe --db "D:\下载\Compressed\data\app.db" > probe.txt
+> Select-String -Path probe.txt -Pattern "最近错误"
+> ```
+
 启动后可以在「设置 → 常规 → 运行信息 → 数据文件」或 `/api/health` 的 `dbPath` 字段确认当前连的是哪个库。
 
 ### 测试
