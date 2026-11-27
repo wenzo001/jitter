@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-27 · v2.1.21（发布候选） · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-27 · v2.1.21 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,8 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.21（发布候选）**，上一版 v2.1.20 已发布：<https://github.com/wenzo001/jitter/releases/tag/v2.1.20>。
+**当前版本：v2.1.21（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.21>。
+上一版 v2.1.20：<https://github.com/wenzo001/jitter/releases/tag/v2.1.20>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -629,6 +630,25 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
    别在 dev server 上浪费时间。
 
 ## 七之二、本轮最终状态（已实测）
+
+**测试与发布（2026-11-27 实测，v2.1.21）**
+
+| 项目 | 结果 |
+| --- | --- |
+| `cargo test --workspace --jobs 1` | **353 项全绿** |
+| `pnpm exec vitest run` | **23 文件 / 163 用例全绿** |
+| `pnpm exec vue-tsc --noEmit` | 退出码 0 |
+| `pnpm exec vite build` | 成功；保留既有大 chunk 警告 |
+| `cargo build --release -p jitter-app` | 成功 |
+| CI run `46016319132`（`e4f35bb`） | 前端 / Ubuntu / Windows 全绿 |
+| Release run `46017492246`（`53e2236`） | 全绿，v2.1.21 非 draft、非 prerelease |
+| 发布资产 | 5 个 ZIP + 5 个 `.sha256`，名称、ZIP 成员、SHA256 全部核验通过 |
+| 远程 Windows 包 `probe` | 退出码 0；新边界文案存在；`app.db` / `app.db-wal` 字节不变 |
+
+发布包大小：Windows 3,392,555 B、macOS arm64 3,040,680 B、macOS x64 3,106,170 B、
+Linux x64 3,257,891 B、Linux arm64 3,229,429 B。
+
+> 本机未实跑 macOS / Linux 二进制，也未实跑 Docker；这两个限制仍然存在。
 
 **测试（2026-11-27 实测，v2.1.19）**
 
