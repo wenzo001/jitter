@@ -151,6 +151,10 @@ export interface LogsResponse {
   logs: LogSummary[]
   has_more: boolean
   retention_days: number
+  /** 当前生效的结果筛选（all / success / failed / skipped）。 */
+  outcome?: string
+  /** 该筛选口径下、保留窗口内的匹配总数（不筛选时为 0）。 */
+  matched_total?: number
 }
 
 export interface LogDetailResponse {

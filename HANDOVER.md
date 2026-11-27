@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-26 · v2.1.18 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-27 · v2.1.19 · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.18（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.18>。
+**当前版本：v2.1.19（未发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.18>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -78,6 +78,11 @@ web/                   前端（Vue 3 + TS + antdv-next + Vite + Pinia + vue-i18
     不是「代码里不写 INSERT」。后者拦不住误操作，前者从连接上就拒绝写。
 11. **不要用 `JITTER_ALLOW_MULTI_INSTANCE=1` 起开发实例**：那只绕过互斥体，
     隔离不了 runtime 文件和开机自启注册项，会直接破坏用户正式实例。走 `scripts\dev-instance.ps1`。
+12. **执行记录的筛选必须在 SQL 层做**（`db::list_log_summaries` 的 `outcome` 参数）。
+    在前端筛已取回的记录解决不了用户的真实问题：他每分钟跑一次、只有一小时真执行，
+    成功记录被几万个跳过记录挤到列表后面，翻页才能看到。
+13. **curl 参数表要对着官方全量维护**。curl 8.x 有 270+ 个长选项，
+    漏一个就会让「粘一条 curl 就用不了」。改这个表时用本机 `curl.exe --help all` 对一遍。
 
 ---
 
@@ -321,6 +326,65 @@ cd D:/fwd/code/Jitter
 
 ## 六、本轮已经做完的事（可以直接接手）
 
+### 6.0.8 v2.1.19：执行记录结果筛选（只看成功）+ curl 参数全覆盖
+
+用户需求两条：
+
+1. 执行记录加一个「只看成功」的过滤按钮，而且点一次就要**全量**查出来过滤好的结果——
+   不要还要点「加载更多」才看得到。用户场景：每分钟跑一次、只在半夜 0–1 点真执行，
+   于是攒下一大堆「跳过」记录，第二天想看成功记录时得一路翻页。
+2. curl 要尽量支持 bash 里 curl 的所有参数。
+
+**一、执行记录结果筛选**
+
+| 改动 | 落点 |
+| --- | --- |
+| 新增 `LogOutcome`（All / Success / Failed / Skipped），过滤条件是**代码里写死的 SQL 常量** | `rust/crates/jitter-core/src/db.rs` |
+| `list_log_summaries` 重构：WHERE 动态拼接（保留窗口 + 翻页游标 + 结果口径），参数一律走占位符 | `db.rs` |
+| 新增 `count_log_summaries`：统计窗口内符合口径的**总条数**（不含翻页游标） | `db.rs` |
+| `GET /api/tasks/:id/logs?outcome=success`：非法值 400；返回 `outcome` 与 `matched_total` | `rust/crates/jitter-app/src/api.rs` |
+| 筛选模式一次性取回全部匹配记录（上限 `FILTERED_LOG_LIMIT = 5000`），不筛选时仍按页翻 | `api.rs` |
+| store 新增 `outcome`（记住选择）、`matchedTotal`、`maxRows`；筛选时 limit 放大到 5000、显示上限从 300 放宽到 5000 | `web/src/stores/logs.ts` |
+| 面板顶部加 `a-segmented`（全部 / 只看成功 / 只看失败 / 只看跳过），切换即重拉 | `web/src/components/logs/LogsPanel.vue` |
+| 标题栏显示「筛选出 N 条」；筛选后为空时显示专门的空状态文案 | `LogsPanel.vue`、`web/src/locales/*.ts` |
+| 单测：结果口径的 SQL 行为、计数、筛选 + 翻页叠加、解析非法值 | `rust/crates/jitter-core/tests/db.rs` |
+| 单测：store 的 outcome 行为、筛选时 limit 放大、300 / 5000 两条上限 | `web/tests/log-outcome-filter.test.ts`（新增） |
+
+**约定**：
+- **筛选必须发生在 SQL 层**，不能把已取回的记录在前端筛——那样「只看成功」依然会被
+  大量跳过记录挤到列表后面去，正是用户要解决的问题。
+- 口径定义：成功 = `kind = 'task' AND matched = 1`；失败 = `kind = 'task' AND matched = 0`；
+  跳过 = `kind IN ('skipped', 'missed')`（主请求根本没发）。通知行（`kind = 'notify'`）
+  永远不单独出现，也不被任何口径选中。
+- 筛选的 SQL 片段是**常量**，不是用户输入；用户输入（任务 id、时间戳）一律参数化。
+- 筛选模式给足上限（5000 条），不筛选时维持原来的 300 条 + 「加载更早的记录」。
+
+**二、curl 参数全覆盖**
+
+现状：curl 官方有 269–274 个长选项（随版本增长），解析器原来只分类了 179 个，
+**其余全部落到「不支持的 curl 参数: --xxx」直接失败**——粘一条带冷门参数的 curl 就整条不能用。
+
+做法：把官方长选项逐个归入五张表。
+
+| 档 | 含义 | 数量（改后） |
+| --- | --- | --- |
+| `LONG_FLAGS` | 无值、真正生效 | 8（+`follow`） |
+| `LONG_MAPPED` | 带值、真正生效 | 23（+`proto-default`、`proto`、`proto-redir`） |
+| `LONG_NOOP` | 无值、忽略（只影响 curl 本地行为） | 94 |
+| `LONG_NOOP_WITH_VALUE` | 带值、忽略 | 54 |
+| `LONG_REJECT` | 做不到，明确报错并给中文原因 | 107 |
+
+- 短选项表一行没动（curl 的 32 个短选项本来就 100% 覆盖）。
+- 旧名 `http0.9` / `http1.0` / `http1.1` / `tlsv1.0`–`tlsv1.3` 全部保留（兼容老 curl 脚本），
+  同时补上 curl 8.x 的新名 `http0` / `http1` / `tlsv1`。
+- 真正新增支持的只有三个：`--follow`（等同 `--location`）、`--proto` / `--proto-redir` /
+  `--proto-default`（统一近似成「只允许 http/https」的白名单，非 http/https 直接报错）。
+  其余「真支持」的参数（方法、头、体、cookie、代理、超时、TLS 跳过校验）本来就有。
+- `reject_message()` 给每条拒绝项配了具体中文原因，不再是干巴巴一句「不支持」。
+- **自检**：临时写了一个调用本机 `curl.exe --help all` 的测试，把 274 个官方长选项逐个喂给解析器，
+  落进通用「不支持」分支的数量为 **0**（验证完已删除，别把它留在代码里——CI 上没有 curl.exe）。
+  同时留了一个纯 Rust 常量表自检 `every_official_long_option_is_classified`（CI 安全）。
+
 ### 6.0.7 v2.1.18：实例隔离 + 只读探针（`jitter probe`）
 
 用户需求：开发测试用的实例要和正式实例**完全分开、互不影响**，并且开发者要能**只读**查看生产数据来排查问题。
@@ -530,14 +594,59 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 
 ## 七、还没做完的事（接手从这里开始）
 
-1. **用户自己的实例的更新**：安装版带产品自带的检查升级机制，会自动升级（当前已是 2.1.17）。
-   v2.1.18 发布后由用户自己点更新即可；**不要擅自重启 `D:\下载\Compressed\jitter.exe`**。
+1. **用户自己的实例的更新**：安装版带产品自带的检查升级机制，会自动升级
+   （v2.1.18 发布后已自动升到 2.1.18，并重写了一次 `Jitter.cmd` 自启项——仍指向生产 exe，属预期行为）。
+   之后由用户自己点更新即可；**不要擅自重启 `D:\下载\Compressed\jitter.exe`**。
 2. **未实跑验证的**：`docker build`（本机没有 docker 命令），Dockerfile 改动后没跑过。
 3. **本地 vite dev server 起不来**（`bun run dev` 后台无响应），本机调试只能走
    `bun run build` + `cargo build --release` + `scripts\dev-instance.ps1` 起的隔离实例，
    别在 dev server 上浪费时间。
 
 ## 七之二、本轮最终状态（已实测）
+
+**测试（2026-11-27 实测，v2.1.19）**
+
+| 项目 | 结果 |
+| --- | --- |
+| `cargo test --workspace --jobs 1` | **core + app 全绿**（core 285 项：lib 30 / curl_parser 56 / db 22 / system_updater 10 …） |
+| `bun run typecheck` | 退出码 0 |
+| `bun run test` | **15 文件 / 117 用例全绿**（新增 `tests/log-outcome-filter.test.ts`） |
+| `cargo build --release -p jitter-app --jobs 1` | 成功（v2.1.19，含新前端产物） |
+| 浏览器实测（dev 实例 3111） | 见下方 v2.1.19 实测结论 |
+
+**筛选实测结论（v2.1.19）**
+
+造了一个「每 60 秒循环 + 时段条件限定 00:00–01:00」的任务（当前不在时段内 → 定时器每次都写跳过记录），
+再手动执行 60 次（手动执行不受条件限制 → 成功记录），最后共 61 条（60 成功 + 1 跳过）。
+
+| 请求 | 返回条数 | has_more | matched_total |
+| --- | --- | --- | --- |
+| 全部（默认一页 50 条） | 50 | **true**（要翻页才看得到剩下 10 条成功记录） | 0 |
+| `outcome=success` | **60（一次全出）** | **false** | 60 |
+| `outcome=skipped` | 1 | false | 1 |
+| `outcome=failed` | 0 | false | 0 |
+| `outcome=xxx` | **HTTP 400**「outcome 只能是 all / success / failed / skipped」 | — | — |
+
+界面实测：
+
+- 面板顶部渲染出分段控件「全部 / 只看成功 / 只看失败 / 只看跳过」。
+- 点「只看成功」→ 标题栏出现「筛选出 60 条」，列表是一条合并组「× 60」，
+  **「加载更早的记录」按钮消失**（一次全量到了，不用再翻页）。
+- 点「只看跳过」→ 「筛选出 2 条」，列表是「× 2」，跳过原因照常显示
+  （「当前 13:49 不在执行时段 00:00–01:00 内；已跳过主请求 …」）。
+- 切回「全部」→ 标题栏不再显示匹配数，**「加载更早的记录」按钮重新出现**（原分页行为没被破坏）。
+- 页面 0 console error / 0 warn。
+
+**curl 参数实测结论（v2.1.19）**
+
+用「试跑 curl」的真实解析路径（`POST /api/test`）验证四种情况：
+
+| 输入 | 结果 |
+| --- | --- |
+| `curl 'http://…/api/health' --compressed --proto-default https --follow --local-port 8080 --trace-time --http2 --tlsv1.2 --no-keepalive --silent --globoff --fail` | **解析通过并真的跑通**（HTTP 200） |
+| `curl --proto ftp 'http://…'` | 「不支持的协议：ftp（本程序只发 http/https 请求）」 |
+| `curl -F 'a=1' 'http://…'` | 「不支持的 curl 参数: -F（不支持 multipart/form-data，请改用 --data-binary/--json 或结构化表单）」 |
+| `curl --not-a-real-option 'http://…'` | 「不支持的 curl 参数: --not-a-real-option」（真正不认识的参数仍然失败） |
 
 **测试（2026-11-26 实测，v2.1.18）**
 
@@ -613,9 +722,8 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 - 保留天数确实驱动**查询窗口**（不只是删除）：设 1 天的任务可见条数 0；设「永久保留」(0) 的任务窗口返回 0、条数回到 10；没设的返回全局 30。
 - 页面 0 console error / 0 warn。
 
-> ⚠️ **副本实例的副作用**：所有实例共用 `%APPDATA%\Jitter\jitter.runtime.json`（记录端口与 PID）。
-> 副本实例启动会覆盖它、退出时会删掉它。测完副本实例后要把这个文件改回用户实例的
-> `{"port":3000,"pid":<用户实例PID>}`，否则用户下次双击 exe 会跳到错误端口。
+> ✅ 副本实例的副作用已根治（见上文 v2.1.18 小节）：v2.1.18 起配置目录按实例隔离，
+> `jitter.runtime.json` 不再共用，测完副本实例不需要手工改回端口与 PID。
 
 **界面实测结论（v2.1.10 / v2.1.11）**- 顶栏单行：品牌 + 版本、状态位、时钟、指标、「试跑 curl」、「更多」；次要入口与语言切换都在「更多」下拉里，当前语言前带 ✓。
 - 1920 宽屏下左右两栏铺满可用宽度，右侧执行记录不再只剩半屏。

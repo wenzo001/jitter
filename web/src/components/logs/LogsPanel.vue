@@ -33,6 +33,16 @@ const expandedGroups = ref<string[]>([])
 
 const selectedTask = computed(() => tasks.selectedTask)
 
+/** 结果筛选：全部 / 只看成功 / 只看失败 / 只看跳过。 */
+const outcomeOptions = computed(() => [
+  { label: t('logs.filterAll'), value: 'all' },
+  { label: t('logs.filterSuccess'), value: 'success' },
+  { label: t('logs.filterFailed'), value: 'failed' },
+  { label: t('logs.filterSkipped'), value: 'skipped' },
+])
+
+const filtering = computed(() => logs.outcome !== 'all')
+
 const meta = computed(() => {
   const task = selectedTask.value
   if (!task) return ''
@@ -40,6 +50,9 @@ const meta = computed(() => {
   if (task.running) parts.push(t('logs.running'))
   if (logs.retentionDays > 0) {
     parts.push(t('logs.retentionWindow', { days: logs.retentionDays }))
+  }
+  if (filtering.value) {
+    parts.push(t('logs.filterMatched', { count: logs.matchedTotal }))
   }
   return parts.join(' · ')
 })
@@ -56,6 +69,21 @@ watch(
     }
   },
   { immediate: true },
+)
+
+// 换筛选口径：重新按新口径拉一次。
+// 筛选是在后端 SQL 层做的，所以这次返回的就是该口径下的全部匹配记录，
+// 不需要再点「加载更早的记录」往下翻。
+watch(
+  () => logs.outcome,
+  async () => {
+    expandedGroups.value = []
+    try {
+      await logs.load(tasks.selectedId, { reset: true, pageSize: app.config.logsPageSize })
+    } catch (error) {
+      app.setStatus(error instanceof Error ? error.message : String(error), true)
+    }
+  },
 )
 
 async function refresh() {
@@ -80,6 +108,13 @@ function openDetail(log: LogSummary) {
   detailOpen.value = true
 }
 
+/** 切换结果筛选口径（值来自分段控件，这里做一次白名单校验）。 */
+function onOutcomeChange(value: unknown) {
+  if (value === 'all' || value === 'success' || value === 'failed' || value === 'skipped') {
+    logs.outcome = value
+  }
+}
+
 /** 合并后的分组：关掉合并时每条记录自成一组。 */
 const groups = computed(() =>
   mergeEnabled.value
@@ -101,6 +136,7 @@ const emptyText = computed(() => {
   if (!tasks.selectedId) {
     return tasks.tasks.length === 0 ? t('logs.emptyNoTask') : t('logs.emptyNoSelection')
   }
+  if (filtering.value) return t('logs.emptyNoMatch')
   return t('logs.emptyNoRecords')
 })
 </script>
@@ -116,6 +152,14 @@ const emptyText = computed(() => {
         <span v-if="meta" class="muted panel-meta">{{ meta }}</span>
       </div>
       <div class="panel-actions">
+        <a-segmented
+          :value="logs.outcome"
+          size="small"
+          :options="outcomeOptions"
+          class="logs-filter"
+          :title="$t('logs.filterHint')"
+          @change="onOutcomeChange"
+        />
         <label class="logs-merge-toggle" :title="$t('logs.mergeHint')">
           <a-switch size="small" :checked="mergeEnabled" @change="mergeEnabled = $event" />
           <span class="muted">{{ $t('logs.mergeToggle') }}</span>
@@ -163,7 +207,7 @@ const emptyText = computed(() => {
       </a-button>
     </div>
     <p v-else-if="logs.capped" class="logs-cap muted">
-      {{ $t('logs.capHint') }}
+      {{ $t('logs.capHint', { count: logs.maxRows }) }}
     </p>
 
     <LogDetailDrawer v-model:open="detailOpen" :log-id="detailId" />

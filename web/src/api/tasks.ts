@@ -65,11 +65,14 @@ export function reorderTasks(ids: string[]): Promise<TasksResponse> {
 
 export function listLogs(
   taskId: string,
-  params: { limit?: number; before?: string | null } = {},
+  params: { limit?: number; before?: string | null; outcome?: string } = {},
 ): Promise<LogsResponse> {
   const search = new URLSearchParams()
   if (params.limit) search.set('limit', String(params.limit))
   if (params.before) search.set('before', params.before)
+  // 筛选交给后端在 SQL 层做，所以「只看成功」一次就能拿全，
+  // 不用在前端翻页找。
+  if (params.outcome && params.outcome !== 'all') search.set('outcome', params.outcome)
   const suffix = search.toString()
   return request(`/api/tasks/${encodeURIComponent(taskId)}/logs${suffix ? `?${suffix}` : ''}`)
 }

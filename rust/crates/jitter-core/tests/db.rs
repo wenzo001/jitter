@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use jitter_core::db::*;
+use jitter_core::types::LogKind;
 use serde_json::json;
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
@@ -251,7 +252,7 @@ fn log_summaries_paging_and_since_window() {
         .expect("log");
     }
 
-    let first_page = list_log_summaries("t1", 3, None, None).expect("page");
+    let first_page = list_log_summaries("t1", 3, None, None, LogOutcome::All).expect("page");
     assert_eq!(first_page.len(), 3);
     assert_eq!(first_page[0].executed_at, 11000);
     assert!(first_page[0].request_url.is_none(), "测试没写 url，轻量行如实返回 None");
@@ -260,10 +261,12 @@ fn log_summaries_paging_and_since_window() {
         executed_at: first_page[2].executed_at,
         id: first_page[2].id,
     };
-    let second_page = list_log_summaries("t1", 3, Some(cursor), None).expect("page");
+    let second_page =
+        list_log_summaries("t1", 3, Some(cursor), None, LogOutcome::All).expect("page");
     assert_eq!(second_page[0].executed_at, 8000);
 
-    let recent = list_log_summaries("t1", 100, None, Some(7000)).expect("page");
+    let recent =
+        list_log_summaries("t1", 100, None, Some(7000), LogOutcome::All).expect("page");
     assert_eq!(recent.len(), 5);
     assert_eq!(recent[0].executed_at, 11000);
 
@@ -273,6 +276,131 @@ fn log_summaries_paging_and_since_window() {
     assert_eq!(detail.executed_at, full[0].executed_at);
     cleanup(&path);
     close_db();
+}
+
+#[test]
+fn log_outcome_filter_selects_by_result() {
+    // 「只看成功」这类筛选必须发生在 SQL 层：
+    // 用户每分钟跑一次、只有半夜那一小时真执行，
+    // 大量跳过记录会把成功记录挤到列表后面，翻页才能看到——那就不好用了。
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = std::path::Path::new(&dir).join("app.db").to_string_lossy().to_string();
+    let _ = fs::remove_file(&path);
+    init_db(Some(&path)).expect("init");
+    create_task(&task_input("outcome"), "t1", 1000).expect("create");
+
+    // 成功：主请求发出去了，并且命中成功条件。
+    insert_log(&NewLogInput {
+        task_id: "t1".into(),
+        executed_at: 1000,
+        response_status: Some(200),
+        kind: Some(LogKind::Task),
+        matched: Some(1),
+        ..Default::default()
+    })
+    .expect("log");
+    // 失败：发出去了，但没命中成功条件。
+    insert_log(&NewLogInput {
+        task_id: "t1".into(),
+        executed_at: 2000,
+        response_status: Some(500),
+        kind: Some(LogKind::Task),
+        matched: Some(0),
+        ..Default::default()
+    })
+    .expect("log");
+    // 跳过：主请求根本没发（条件不满足）。
+    insert_log(&NewLogInput {
+        task_id: "t1".into(),
+        executed_at: 3000,
+        kind: Some(LogKind::Skipped),
+        matched: Some(0),
+        ..Default::default()
+    })
+    .expect("log");
+    // 错过：这一回压根没执行。
+    insert_log(&NewLogInput {
+        task_id: "t1".into(),
+        executed_at: 4000,
+        kind: Some(LogKind::Missed),
+        matched: Some(0),
+        ..Default::default()
+    })
+    .expect("log");
+    // 通知行：作为父行的附属数据，不单独出现，也不该被任何口径选中。
+    insert_log(&NewLogInput {
+        task_id: "t1".into(),
+        executed_at: 5000,
+        kind: Some(LogKind::Notify),
+        parent_log_id: Some(1),
+        ..Default::default()
+    })
+    .expect("log");
+
+    let all = list_log_summaries("t1", 100, None, None, LogOutcome::All).expect("all");
+    assert_eq!(all.len(), 4, "通知行不单独出现在列表里");
+
+    let success = list_log_summaries("t1", 100, None, None, LogOutcome::Success).expect("success");
+    assert_eq!(success.len(), 1);
+    assert_eq!(success[0].executed_at, 1000);
+
+    let failed = list_log_summaries("t1", 100, None, None, LogOutcome::Failed).expect("failed");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].executed_at, 2000);
+
+    let skipped = list_log_summaries("t1", 100, None, None, LogOutcome::Skipped).expect("skipped");
+    assert_eq!(skipped.len(), 2, "跳过与错过都算「没执行」");
+    assert_eq!(skipped[0].executed_at, 4000);
+
+    // 计数是「全部匹配」，不含翻页游标。
+    assert_eq!(count_log_summaries("t1", None, LogOutcome::All).expect("count"), 4);
+    assert_eq!(
+        count_log_summaries("t1", None, LogOutcome::Success).expect("count"),
+        1
+    );
+    assert_eq!(
+        count_log_summaries("t1", None, LogOutcome::Failed).expect("count"),
+        1
+    );
+    assert_eq!(
+        count_log_summaries("t1", None, LogOutcome::Skipped).expect("count"),
+        2
+    );
+    // 保留窗口同样作用在筛选上。
+    assert_eq!(
+        count_log_summaries("t1", Some(3500), LogOutcome::Skipped).expect("count"),
+        1
+    );
+
+    // 筛选和翻页可以叠加：往前翻时仍然只拿同一口径的记录。
+    let cursor = LogCursor {
+        executed_at: skipped[0].executed_at,
+        id: skipped[0].id,
+    };
+    let older = list_log_summaries(
+        "t1",
+        10,
+        Some(cursor),
+        None,
+        LogOutcome::Skipped,
+    )
+    .expect("older");
+    assert_eq!(older.len(), 1);
+    assert_eq!(older[0].executed_at, 3000);
+
+    cleanup(&path);
+    close_db();
+}
+
+#[test]
+fn log_outcome_parse_rejects_unknown_values() {
+    assert_eq!(LogOutcome::parse(""), Some(LogOutcome::All));
+    assert_eq!(LogOutcome::parse("all"), Some(LogOutcome::All));
+    assert_eq!(LogOutcome::parse("success"), Some(LogOutcome::Success));
+    assert_eq!(LogOutcome::parse("Failed"), Some(LogOutcome::Failed));
+    assert_eq!(LogOutcome::parse("skipped"), Some(LogOutcome::Skipped));
+    assert_eq!(LogOutcome::parse("whatever"), None);
 }
 
 #[test]
@@ -313,12 +441,13 @@ fn logs_are_ordered_newest_first() {
     assert_eq!(full[0].executed_at, 9000, "最新的一条在最上面");
 
     // 分页之后仍然保持降序，且两页合起来不重不漏。
-    let first_page = list_log_summaries("t1", 2, None, None).expect("page");
+    let first_page = list_log_summaries("t1", 2, None, None, LogOutcome::All).expect("page");
     let cursor = LogCursor {
         executed_at: first_page[1].executed_at,
         id: first_page[1].id,
     };
-    let second_page = list_log_summaries("t1", 10, Some(cursor), None).expect("page");
+    let second_page =
+        list_log_summaries("t1", 10, Some(cursor), None, LogOutcome::All).expect("page");
     let mut seen = first_page
         .iter()
         .chain(second_page.iter())

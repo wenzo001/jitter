@@ -39,7 +39,7 @@ const SHORT_NOOP: [&str; 23] = [
 const SHORT_NOOP_WITH_VALUE: [&str; 8] = ["o", "D", "w", "c", "C", "y", "Y", "z"];
 const SHORT_REJECT: [&str; 11] = ["F", "T", "E", "n", "a", "B", "l", "Q", "P", "t", "K"];
 
-const LONG_FLAGS: [&str; 7] = [
+const LONG_FLAGS: [&str; 8] = [
     "head",
     "get",
     "insecure",
@@ -47,8 +47,10 @@ const LONG_FLAGS: [&str; 7] = [
     "location",
     "no-location",
     "location-trusted",
+    // curl 8.x 新名：与 --location 等价，跟随重定向。
+    "follow",
 ];
-const LONG_MAPPED: [&str; 20] = [
+const LONG_MAPPED: [&str; 23] = [
     "request",
     "header",
     "data",
@@ -69,8 +71,15 @@ const LONG_MAPPED: [&str; 20] = [
     "connect-timeout",
     "proxy",
     "proxy-user",
+    // 限制可用协议；只允许 http/https，其余协议报错。
+    // curl 里 --proto 是「只允许这些协议」、--proto-redir 是「重定向只允许这些协议」、
+    // --proto-default 是「URL 缺协议时用它」，三者语义并不等价，这里统一近似成
+    // 「只允许 http/https」的白名单，见 validate_protocol_list 的说明。
+    "proto",
+    "proto-redir",
+    "proto-default",
 ];
-const LONG_NOOP: [&str; 53] = [
+const LONG_NOOP: [&str; 94] = [
     "silent",
     "show-error",
     "include",
@@ -124,8 +133,53 @@ const LONG_NOOP: [&str; 53] = [
     "fail-early",
     "clobber",
     "no-clobber",
+    // 以下参数只影响 curl 的本地行为（输出、传输细节、TLS 细节、诊断），
+    // 不会改变我们发出的 http/https 请求，直接忽略即可。
+    "append",
+    "crlf",
+    "disallow-username-in-url",
+    "doh-cert-status",
+    "false-start",
+    "form-escape",
+    "http0",
+    "http1",
+    "http3-only",
+    "ignore-content-length",
+    "manual",
+    "mptcp",
+    "out-null",
+    // 本程序原样把 URL 交给底层请求，不会压缩路径里的 ..，等价于 curl 的 --path-as-is。
+    "path-as-is",
+    "proxy-basic",
+    "proxy-http3",
+    "proxy-ssl-allow-beast",
+    "proxy-ssl-auto-client-cert",
+    "proxy-tlsv1",
+    "proxytunnel",
+    "remote-name-all",
+    "remove-on-error",
+    "show-headers",
+    "skip-existing",
+    "ssl",
+    "ssl-allow-beast",
+    "ssl-auto-client-cert",
+    "ssl-reqd",
+    "ssl-revoke-best-effort",
+    "sslv2",
+    "sslv3",
+    "suppress-connect-headers",
+    "tcp-fastopen",
+    "tls-earlydata",
+    "tlsv1",
+    "trace-ids",
+    "trace-time",
+    "use-ascii",
+    "xattr",
+    // --help/--version 只是打印信息后退出，粘贴进任务表单时忽略即可。
+    "help",
+    "version",
 ];
-const LONG_NOOP_WITH_VALUE: [&str; 27] = [
+const LONG_NOOP_WITH_VALUE: [&str; 54] = [
     "output",
     "dump-header",
     "write-out",
@@ -153,8 +207,36 @@ const LONG_NOOP_WITH_VALUE: [&str; 27] = [
     "parallel-max",
     "libcurl",
     "rate",
+    // 以下参数带值但只影响 curl 本地行为：把值吃掉后忽略。
+    "alt-svc",
+    "curves",
+    "dump-ca-embed",
+    "etag-save",
+    "expect100-timeout",
+    "haproxy-clientip",
+    "ip-tos",
+    "keepalive-cnt",
+    "local-port",
+    "parallel-max-host",
+    "proxy-ciphers",
+    "proxy-service-name",
+    "proxy-tls13-ciphers",
+    "proxy-tlsauthtype",
+    "proxy-tlspassword",
+    "proxy-tlsuser",
+    "pubkey",
+    "quote",
+    "service-name",
+    "sigalgs",
+    "ssl-sessions",
+    "tls13-ciphers",
+    "tlsauthtype",
+    "tlspassword",
+    "tlsuser",
+    "upload-flags",
+    "vlan-priority",
 ];
-const LONG_REJECT: [&str; 79] = [
+const LONG_REJECT: [&str; 107] = [
     "form",
     "form-string",
     "upload-file",
@@ -229,11 +311,40 @@ const LONG_REJECT: [&str; 79] = [
     "socks5-gssapi-service",
     "socks5-hostname",
     "preproxy",
-    "proto",
-    "proto-redir",
     "haproxy-protocol",
     "proxy-header",
     "proxy-http2",
+    // 以下功能会改变请求或连接语义，但本程序做不到，明确报错并说明原因。
+    "ca-native",
+    "delegation",
+    "disable-eprt",
+    "disable-epsv",
+    "ech",
+    "etag-compare",
+    "hsts",
+    "ipfs-gateway",
+    "knownhosts",
+    "krb",
+    "list-only",
+    "login-options",
+    "mail-rcpt-allowfails",
+    "metalink",
+    "pinnedpubkey",
+    "post301",
+    "post302",
+    "post303",
+    "proxy-ca-native",
+    "proxy-insecure",
+    "proxy-pinnedpubkey",
+    "proxy1",
+    "proxy1.0",
+    "sasl-authzid",
+    "sasl-ir",
+    "socks5-basic",
+    "socks5-gssapi",
+    "tftp-blksize",
+    "tftp-no-options",
+    "variable",
 ];
 
 fn reject_message(flag: &str) -> Option<&'static str> {
@@ -253,6 +364,29 @@ fn reject_message(flag: &str) -> Option<&'static str> {
         "--unix-socket" | "--abstract-unix-socket" => "不支持 Unix socket",
         "--digest" | "--ntlm" | "--negotiate" => "只支持 Basic 认证（-u/--user）",
         "--noproxy" => "暂不支持 --noproxy",
+        "--ca-native" | "--proxy-ca-native" => "本程序使用内置 CA 证书，不支持系统证书库",
+        "--delegation" => "暂不支持 GSS-API 委派",
+        "--ech" => "暂不支持 Encrypted Client Hello",
+        "--hsts" => "暂不支持 HSTS",
+        "--ipfs-gateway" => "暂不支持 IPFS 网关",
+        "--knownhosts" => "暂不支持 knownhosts 主机密钥校验",
+        "--krb" => "暂不支持 Kerberos 认证",
+        "--list-only" => "暂不支持列表模式",
+        "--login-options" => "暂不支持登录选项",
+        "--mail-rcpt-allowfails" => "暂不支持邮件相关选项",
+        "--metalink" => "暂不支持 metalink",
+        "--sasl-authzid" => "暂不支持 SASL 认证身份",
+        "--sasl-ir" => "暂不支持 SASL 初始响应",
+        "--disable-eprt" | "--disable-epsv" | "--tftp-blksize" | "--tftp-no-options" => {
+            "本程序只发 HTTP 请求"
+        }
+        "--etag-compare" => "不支持基于 ETag 的条件请求",
+        "--pinnedpubkey" | "--proxy-pinnedpubkey" => "不支持证书公钥固定",
+        "--post301" | "--post302" | "--post303" => "不支持重定向后改写请求方法",
+        "--proxy1" | "--proxy1.0" => "不支持为 HTTP/1.0 请求单独指定代理",
+        "--proxy-insecure" => "不支持单独放宽代理的证书校验",
+        "--socks5-basic" | "--socks5-gssapi" => "本程序不支持 SOCKS 代理",
+        "--variable" => "不支持 curl 的变量替换",
         _ => return None,
     })
 }
@@ -879,7 +1013,9 @@ pub fn parse_curl_command(input: &str) -> Result<RequestSpec, CurlParseError> {
                     "get" => get_mode = true,
                     "insecure" => insecure = Some(true),
                     "no-insecure" => insecure = Some(false),
-                    "location" | "location-trusted" => redirect = Some(RedirectMode::Follow),
+                    "location" | "location-trusted" | "follow" => {
+                        redirect = Some(RedirectMode::Follow)
+                    }
                     "no-location" => redirect = Some(RedirectMode::Manual),
                     _ => {}
                 }
@@ -1064,6 +1200,31 @@ pub fn parse_curl_command(input: &str) -> Result<RequestSpec, CurlParseError> {
     )
 }
 
+/// 校验 curl 的协议限制参数（`--proto` / `--proto-redir` / `--proto-default`）。
+///
+/// curl 的语义并不等价：`--proto` 是「只允许这些协议」，`--proto-redir` 是「重定向时
+/// 只允许这些协议」，`--proto-default` 是「URL 缺协议时用这个协议」，而且 `--proto`
+/// 还支持 `-ftp` 这样的禁用前缀。本程序只发 http/https 请求，所以统一近似成同一套
+/// 白名单：值里出现 http/https 之外的协议就报错，只含 http/https 就接受。
+fn validate_protocol_list(flag: &str, value: &str) -> Result<(), CurlParseError> {
+    let protocols: Vec<String> = value
+        .split(',')
+        .map(|protocol| protocol.trim().to_lowercase())
+        .filter(|protocol| !protocol.is_empty())
+        .collect();
+    if protocols.is_empty() {
+        return err(format!("参数 {flag} 缺少协议"));
+    }
+    for protocol in &protocols {
+        if protocol != "http" && protocol != "https" {
+            return err(format!(
+                "不支持的协议：{protocol}（本程序只发 http/https 请求）"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 应用一个带取值的 curl 参数。
 #[allow(clippy::too_many_arguments)]
 fn apply_value(
@@ -1172,6 +1333,7 @@ fn apply_value(
             url_queries.push(url_query_value(value)?);
             Ok(())
         }
+        "--proto" | "--proto-redir" | "--proto-default" => validate_protocol_list(flag, value),
         "--url" => {
             if url.is_some() {
                 return err("只支持一个 URL");
@@ -1266,4 +1428,320 @@ pub fn normalize_structured(input: &StructuredRequestInput) -> Result<RequestSpe
         body,
         options: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// curl 官方长选项全集（取自 `curl --help all`）。
+    /// 留着这张表是为了让「某个官方参数没被归类」在测试里就能被发现，
+    /// 而不是等到用户粘贴命令时才报「不支持的 curl 参数」。
+    const CURL_LONG_OPTIONS: &[&str] = &[
+        "--abstract-unix-socket",
+        "--alt-svc",
+        "--anyauth",
+        "--append",
+        "--aws-sigv4",
+        "--basic",
+        "--ca-native",
+        "--cacert",
+        "--capath",
+        "--cert",
+        "--cert-status",
+        "--cert-type",
+        "--ciphers",
+        "--compressed",
+        "--compressed-ssh",
+        "--config",
+        "--connect-timeout",
+        "--connect-to",
+        "--continue-at",
+        "--cookie",
+        "--cookie-jar",
+        "--create-dirs",
+        "--create-file-mode",
+        "--crlf",
+        "--crlfile",
+        "--curves",
+        "--data",
+        "--data-ascii",
+        "--data-binary",
+        "--data-raw",
+        "--data-urlencode",
+        "--delegation",
+        "--digest",
+        "--disable",
+        "--disable-eprt",
+        "--disable-epsv",
+        "--disallow-username-in-url",
+        "--dns-interface",
+        "--dns-ipv4-addr",
+        "--dns-ipv6-addr",
+        "--dns-servers",
+        "--doh-cert-status",
+        "--doh-insecure",
+        "--doh-url",
+        "--dump-ca-embed",
+        "--dump-header",
+        "--ech",
+        "--egd-file",
+        "--engine",
+        "--etag-compare",
+        "--etag-save",
+        "--expect100-timeout",
+        "--fail",
+        "--fail-early",
+        "--fail-with-body",
+        "--false-start",
+        "--follow",
+        "--form",
+        "--form-escape",
+        "--form-string",
+        "--ftp-account",
+        "--ftp-alternative-to-user",
+        "--ftp-create-dirs",
+        "--ftp-method",
+        "--ftp-pasv",
+        "--ftp-port",
+        "--ftp-pret",
+        "--ftp-skip-pasv-ip",
+        "--ftp-ssl-ccc",
+        "--ftp-ssl-ccc-mode",
+        "--ftp-ssl-control",
+        "--get",
+        "--globoff",
+        "--happy-eyeballs-timeout-ms",
+        "--haproxy-clientip",
+        "--haproxy-protocol",
+        "--head",
+        "--header",
+        "--help",
+        "--hostpubmd5",
+        "--hostpubsha256",
+        "--hsts",
+        "--http0",
+        "--http0.9",
+        "--http1",
+        "--http1.0",
+        "--http1.1",
+        "--http2",
+        "--http2-prior-knowledge",
+        "--http3",
+        "--http3-only",
+        "--ignore-content-length",
+        "--insecure",
+        "--interface",
+        "--ip-tos",
+        "--ipfs-gateway",
+        "--ipv4",
+        "--ipv6",
+        "--json",
+        "--junk-session-cookies",
+        "--keepalive-cnt",
+        "--keepalive-time",
+        "--key",
+        "--key-type",
+        "--knownhosts",
+        "--krb",
+        "--libcurl",
+        "--limit-rate",
+        "--list-only",
+        "--local-port",
+        "--location",
+        "--location-trusted",
+        "--login-options",
+        "--mail-auth",
+        "--mail-from",
+        "--mail-rcpt",
+        "--mail-rcpt-allowfails",
+        "--manual",
+        "--max-filesize",
+        "--max-redirs",
+        "--max-time",
+        "--metalink",
+        "--mptcp",
+        "--negotiate",
+        "--netrc",
+        "--netrc-file",
+        "--netrc-optional",
+        "--next",
+        "--no-alpn",
+        "--no-buffer",
+        "--no-clobber",
+        "--no-keepalive",
+        "--no-npn",
+        "--no-progress-meter",
+        "--no-sessionid",
+        "--noproxy",
+        "--ntlm",
+        "--ntlm-wb",
+        "--oauth2-bearer",
+        "--out-null",
+        "--output",
+        "--output-dir",
+        "--parallel",
+        "--parallel-immediate",
+        "--parallel-max",
+        "--parallel-max-host",
+        "--pass",
+        "--path-as-is",
+        "--pinnedpubkey",
+        "--post301",
+        "--post302",
+        "--post303",
+        "--preproxy",
+        "--progress-bar",
+        "--proto",
+        "--proto-default",
+        "--proto-redir",
+        "--proxy",
+        "--proxy-anyauth",
+        "--proxy-basic",
+        "--proxy-ca-native",
+        "--proxy-cacert",
+        "--proxy-capath",
+        "--proxy-cert",
+        "--proxy-cert-type",
+        "--proxy-ciphers",
+        "--proxy-crlfile",
+        "--proxy-digest",
+        "--proxy-header",
+        "--proxy-http2",
+        "--proxy-http3",
+        "--proxy-insecure",
+        "--proxy-key",
+        "--proxy-key-type",
+        "--proxy-negotiate",
+        "--proxy-ntlm",
+        "--proxy-pass",
+        "--proxy-pinnedpubkey",
+        "--proxy-service-name",
+        "--proxy-ssl-allow-beast",
+        "--proxy-ssl-auto-client-cert",
+        "--proxy-tls13-ciphers",
+        "--proxy-tlsauthtype",
+        "--proxy-tlspassword",
+        "--proxy-tlsuser",
+        "--proxy-tlsv1",
+        "--proxy-user",
+        "--proxy1.0",
+        "--proxytunnel",
+        "--pubkey",
+        "--quote",
+        "--random-file",
+        "--range",
+        "--rate",
+        "--raw",
+        "--referer",
+        "--remote-header-name",
+        "--remote-name",
+        "--remote-name-all",
+        "--remote-time",
+        "--remove-on-error",
+        "--request",
+        "--request-target",
+        "--resolve",
+        "--retry",
+        "--retry-all-errors",
+        "--retry-connrefused",
+        "--retry-delay",
+        "--retry-max-time",
+        "--sasl-authzid",
+        "--sasl-ir",
+        "--service-name",
+        "--show-error",
+        "--show-headers",
+        "--sigalgs",
+        "--silent",
+        "--skip-existing",
+        "--socks4",
+        "--socks4a",
+        "--socks5",
+        "--socks5-basic",
+        "--socks5-gssapi",
+        "--socks5-gssapi-nec",
+        "--socks5-gssapi-service",
+        "--socks5-hostname",
+        "--speed-limit",
+        "--speed-time",
+        "--ssl",
+        "--ssl-allow-beast",
+        "--ssl-auto-client-cert",
+        "--ssl-no-revoke",
+        "--ssl-reqd",
+        "--ssl-revoke-best-effort",
+        "--ssl-sessions",
+        "--sslv2",
+        "--sslv3",
+        "--stderr",
+        "--styled-output",
+        "--suppress-connect-headers",
+        "--tcp-fastopen",
+        "--tcp-nodelay",
+        "--telnet-option",
+        "--tftp-blksize",
+        "--tftp-no-options",
+        "--time-cond",
+        "--tls-earlydata",
+        "--tls-max",
+        "--tls13-ciphers",
+        "--tlsauthtype",
+        "--tlspassword",
+        "--tlsuser",
+        "--tlsv1",
+        "--tlsv1.0",
+        "--tlsv1.1",
+        "--tlsv1.2",
+        "--tlsv1.3",
+        "--tr-encoding",
+        "--trace",
+        "--trace-ascii",
+        "--trace-config",
+        "--trace-ids",
+        "--trace-time",
+        "--unix-socket",
+        "--upload-file",
+        "--upload-flags",
+        "--url",
+        "--url-query",
+        "--use-ascii",
+        "--user",
+        "--user-agent",
+        "--variable",
+        "--verbose",
+        "--version",
+        "--vlan-priority",
+        "--write-out",
+        "--xattr",
+
+    ];
+
+    /// 官方长选项必须落在某一张分类表里，否则运行时会走进「不支持」分支。
+    #[test]
+    fn every_official_long_option_is_classified() {
+        for option in CURL_LONG_OPTIONS {
+            let name = option.trim_start_matches("--");
+            assert!(
+                LONG_FLAGS.contains(&name)
+                    || LONG_MAPPED.contains(&name)
+                    || LONG_NOOP.contains(&name)
+                    || LONG_NOOP_WITH_VALUE.contains(&name)
+                    || LONG_REJECT.contains(&name),
+                "curl 官方参数 {option} 没有被归类"
+            );
+        }
+    }
+
+    /// 不是 curl 官方参数的选项仍然要失败。
+    #[test]
+    fn unknown_long_options_are_still_rejected() {
+        let error = parse_curl_command("curl --definitely-not-a-curl-option https://example.com")
+            .err()
+            .expect("应当报错");
+        assert_eq!(
+            error.0,
+            "不支持的 curl 参数: --definitely-not-a-curl-option"
+        );
+    }
 }

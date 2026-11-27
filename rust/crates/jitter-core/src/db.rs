@@ -1244,52 +1244,118 @@ pub fn list_logs(
     })
 }
 
+/// 执行记录的筛选口径：只看某一类结果。
+///
+/// 「成功」指主请求发出去了并且命中了成功条件（`kind = 'task'` 且 `matched = 1`）；
+/// 「失败」是主请求发出去了但没命中成功条件；
+/// 「跳过」是没发主请求（条件不满足、时段外、前置判断没过）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogOutcome {
+    All,
+    Success,
+    Failed,
+    Skipped,
+}
+
+impl LogOutcome {
+    /// 解析接口传入的筛选值。空值等价于「全部」；认不出来返回 `None`（由接口回 400）。
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "all" => Some(LogOutcome::All),
+            "success" | "ok" => Some(LogOutcome::Success),
+            "failed" | "error" => Some(LogOutcome::Failed),
+            "skipped" | "missed" => Some(LogOutcome::Skipped),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LogOutcome::All => "all",
+            LogOutcome::Success => "success",
+            LogOutcome::Failed => "failed",
+            LogOutcome::Skipped => "skipped",
+        }
+    }
+
+    /// 追加到 WHERE 后面的条件片段。
+    ///
+    /// 这里全是**代码里写死的常量**，不含任何用户输入，所以直接拼进 SQL 是安全的；
+    /// 用户输入（任务 id、时间戳）一律走占位符。
+    fn sql_filter(&self) -> &'static str {
+        match self {
+            LogOutcome::All => "",
+            LogOutcome::Success => " AND kind = 'task' AND matched = 1",
+            LogOutcome::Failed => " AND kind = 'task' AND matched = 0",
+            LogOutcome::Skipped => " AND kind IN ('skipped', 'missed')",
+        }
+    }
+}
+
 /// 带保留窗口上界的轻量日志列表。
+///
+/// `outcome` 是结果口径的筛选：过滤发生在 **SQL 层**，
+/// 所以「只看成功」返回的就是成功记录本身，不会被大量跳过记录挤到后面去。
 pub fn list_log_summaries(
     task_id: &str,
     limit: i64,
     before: Option<LogCursor>,
     since: Option<i64>,
+    outcome: LogOutcome,
 ) -> Result<Vec<LogSummary>, DbError> {
     with_db(|conn, _| {
-        let select = format!("SELECT {LOG_SUMMARY_COLUMNS} FROM logs");
-        let order = " ORDER BY executed_at DESC, id DESC LIMIT";
         // 通知行不单独出现在列表里：作为父任务行的附属数据由 API 聚合返回。
-        let (sql, parameters): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (before, since) {
-            (None, None) => (format!("{select} WHERE task_id = ?1 AND kind != 'notify'{order} ?2"), vec![Box::new(task_id.to_string()), Box::new(limit)]),
-            (None, Some(since)) => (
-                format!("{select} WHERE task_id = ?1 AND kind != 'notify' AND executed_at >= ?2{order} ?3"),
-                vec![Box::new(task_id.to_string()), Box::new(since), Box::new(limit)],
-            ),
-            (Some(cursor), None) => (
-                format!(
-                    "{select} WHERE task_id = ?1 AND kind != 'notify' AND (executed_at < ?2 OR (executed_at = ?3 AND id < ?4)){order} ?5"
-                ),
-                vec![
-                    Box::new(task_id.to_string()),
-                    Box::new(cursor.executed_at),
-                    Box::new(cursor.executed_at),
-                    Box::new(cursor.id),
-                    Box::new(limit),
-                ],
-            ),
-            (Some(cursor), Some(since)) => (
-                format!(
-                    "{select} WHERE task_id = ?1 AND kind != 'notify' AND (executed_at < ?2 OR (executed_at = ?3 AND id < ?4)) AND executed_at >= ?5{order} ?6"
-                ),
-                vec![
-                    Box::new(task_id.to_string()),
-                    Box::new(cursor.executed_at),
-                    Box::new(cursor.executed_at),
-                    Box::new(cursor.id),
-                    Box::new(since),
-                    Box::new(limit),
-                ],
-            ),
-        };
+        let mut sql =
+            format!("SELECT {LOG_SUMMARY_COLUMNS} FROM logs WHERE task_id = ?1 AND kind != 'notify'");
+        let mut parameters: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(task_id.to_string())];
+
+        if let Some(cursor) = before {
+            // 参数编号按绑定顺序连续排（?1 已被任务 id 占用）。
+            sql.push_str(" AND (executed_at < ?2 OR (executed_at = ?3 AND id < ?4))");
+            parameters.push(Box::new(cursor.executed_at));
+            parameters.push(Box::new(cursor.executed_at));
+            parameters.push(Box::new(cursor.id));
+        }
+        if let Some(since) = since {
+            let index = parameters.len() + 1;
+            sql.push_str(&format!(" AND executed_at >= ?{index}"));
+            parameters.push(Box::new(since));
+        }
+        sql.push_str(outcome.sql_filter());
+
+        let limit_index = parameters.len() + 1;
+        sql.push_str(&format!(
+            " ORDER BY executed_at DESC, id DESC LIMIT ?{limit_index}"
+        ));
+        parameters.push(Box::new(limit));
+
         let mut statement = conn.prepare(&sql)?;
         let rows = statement.query_map(rusqlite::params_from_iter(parameters), map_log_summary)?;
         Ok(rows.filter_map(|result| result.ok()).collect())
+    })
+}
+
+/// 统计窗口内符合筛选口径的记录条数（**不含**翻页游标，统计的是全部匹配）。
+///
+/// 用来告诉用户「共 N 条匹配」，避免他以为看到的就是全部。
+pub fn count_log_summaries(
+    task_id: &str,
+    since: Option<i64>,
+    outcome: LogOutcome,
+) -> Result<i64, DbError> {
+    with_db(|conn, _| {
+        let mut sql =
+            "SELECT COUNT(*) FROM logs WHERE task_id = ?1 AND kind != 'notify'".to_string();
+        let mut parameters: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(task_id.to_string())];
+        if let Some(since) = since {
+            sql.push_str(" AND executed_at >= ?2");
+            parameters.push(Box::new(since));
+        }
+        sql.push_str(outcome.sql_filter());
+
+        let mut statement = conn.prepare(&sql)?;
+        let count = statement.query_row(rusqlite::params_from_iter(parameters), |row| row.get(0))?;
+        Ok(count)
     })
 }
 

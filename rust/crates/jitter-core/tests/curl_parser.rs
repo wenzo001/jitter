@@ -454,3 +454,195 @@ fn structured_rejects_get_with_a_body() {
 fn tokenizer_rejects_unbalanced_quotes() {
     assert!(jitter_core::curl_parser::tokenize_curl("curl 'abc").is_err());
 }
+
+/// 只影响 curl 本地行为、应当被忽略的长选项（不带值）。
+const IGNORED_LONG_FLAGS: &[&str] = &[
+    "append",
+    "crlf",
+    "disallow-username-in-url",
+    "doh-cert-status",
+    "false-start",
+    "form-escape",
+    "help",
+    "http0",
+    "http1",
+    "http3-only",
+    "ignore-content-length",
+    "manual",
+    "mptcp",
+    "out-null",
+    "path-as-is",
+    "proxy-basic",
+    "proxy-http3",
+    "proxy-ssl-allow-beast",
+    "proxy-ssl-auto-client-cert",
+    "proxy-tlsv1",
+    "proxytunnel",
+    "remote-name-all",
+    "remove-on-error",
+    "show-headers",
+    "skip-existing",
+    "ssl",
+    "ssl-allow-beast",
+    "ssl-auto-client-cert",
+    "ssl-reqd",
+    "ssl-revoke-best-effort",
+    "sslv2",
+    "sslv3",
+    "suppress-connect-headers",
+    "tcp-fastopen",
+    "tls-earlydata",
+    "tlsv1",
+    "trace-ids",
+    "trace-time",
+    "use-ascii",
+    "version",
+    "xattr",
+];
+
+/// 只影响 curl 本地行为、应当被忽略的长选项（带值，值要被吃掉）。
+const IGNORED_LONG_FLAGS_WITH_VALUE: &[(&str, &str)] = &[
+    ("alt-svc", "cache.txt"),
+    ("curves", "P-256"),
+    ("dump-ca-embed", "bundle.pem"),
+    ("etag-save", "etag.txt"),
+    ("expect100-timeout", "1"),
+    ("haproxy-clientip", "192.0.2.1"),
+    ("ip-tos", "af11"),
+    ("keepalive-cnt", "3"),
+    ("local-port", "8080"),
+    ("parallel-max-host", "4"),
+    ("proxy-ciphers", "DEFAULT"),
+    ("proxy-service-name", "http"),
+    ("proxy-tls13-ciphers", "TLS_AES_128_GCM_SHA256"),
+    ("proxy-tlsauthtype", "SRP"),
+    ("proxy-tlspassword", "secret"),
+    ("proxy-tlsuser", "user"),
+    ("pubkey", "id_rsa.pub"),
+    ("quote", "QUIT"),
+    ("service-name", "http"),
+    ("sigalgs", "RSA+SHA256"),
+    ("ssl-sessions", "sessions.pem"),
+    ("tls13-ciphers", "TLS_AES_256_GCM_SHA384"),
+    ("tlsauthtype", "SRP"),
+    ("tlspassword", "secret"),
+    ("tlsuser", "user"),
+    ("upload-flags", "answered"),
+    ("vlan-priority", "3"),
+];
+
+/// 明确拒绝的长选项（会改变请求或连接语义，但本程序做不到）。
+const REJECTED_LONG_FLAGS: &[&str] = &[
+    "ca-native",
+    "delegation",
+    "disable-eprt",
+    "disable-epsv",
+    "ech",
+    "etag-compare",
+    "hsts",
+    "ipfs-gateway",
+    "knownhosts",
+    "krb",
+    "list-only",
+    "login-options",
+    "mail-rcpt-allowfails",
+    "metalink",
+    "pinnedpubkey",
+    "post301",
+    "post302",
+    "post303",
+    "proxy-ca-native",
+    "proxy-insecure",
+    "proxy-pinnedpubkey",
+    "proxy1",
+    "proxy1.0",
+    "sasl-authzid",
+    "sasl-ir",
+    "socks5-basic",
+    "socks5-gssapi",
+    "tftp-blksize",
+    "tftp-no-options",
+    "variable",
+];
+
+#[test]
+fn ignores_local_only_long_options() {
+    for flag in IGNORED_LONG_FLAGS {
+        let command = format!("curl --{flag} https://example.com");
+        parse_curl_command(&command)
+            .unwrap_or_else(|error| panic!("--{flag} 应当被忽略，但报错：{error}"));
+    }
+}
+
+#[test]
+fn ignores_local_only_long_options_that_take_a_value() {
+    for (flag, value) in IGNORED_LONG_FLAGS_WITH_VALUE {
+        let command = format!("curl --{flag} {value} https://example.com");
+        let spec = parse_curl_command(&command)
+            .unwrap_or_else(|error| panic!("--{flag} 应当被忽略，但报错：{error}"));
+        assert_eq!(url(&json!(spec)), "https://example.com");
+    }
+}
+
+#[test]
+fn rejects_unsupported_long_options_with_a_reason() {
+    for flag in REJECTED_LONG_FLAGS {
+        let command = format!("curl --{flag} https://example.com");
+        let message = error_of(&command);
+        assert!(message.contains(&format!("--{flag}")), "--{flag}: {message}");
+    }
+}
+
+#[test]
+fn maps_follow_to_the_follow_redirect_mode() {
+    let spec = json!(parse_curl_command("curl --follow https://example.com").expect("parse"));
+    assert_eq!(
+        options(&spec).get("redirect").and_then(|value| value.as_str()),
+        Some("follow")
+    );
+}
+
+#[test]
+fn accepts_http_and_https_as_the_default_protocol() {
+    parse_curl_command("curl --proto-default https https://example.com").expect("parse");
+    parse_curl_command("curl --proto-default http,https https://example.com").expect("parse");
+}
+
+#[test]
+fn rejects_other_protocols_as_the_default_protocol() {
+    let message = error_of("curl --proto-default ftp https://example.com");
+    assert!(message.contains("不支持的协议"), "{message}");
+    assert!(message.contains("ftp"), "{message}");
+}
+
+#[test]
+fn accepts_http_and_https_in_the_protocol_allow_list() {
+    parse_curl_command("curl --proto https https://example.com").expect("parse");
+    parse_curl_command("curl --proto http,https https://example.com").expect("parse");
+    parse_curl_command("curl --proto-redir https https://example.com").expect("parse");
+    parse_curl_command("curl --proto-redir http,https https://example.com").expect("parse");
+}
+
+#[test]
+fn rejects_other_protocols_in_the_protocol_allow_list() {
+    let proto = error_of("curl --proto ftp https://example.com");
+    assert!(proto.contains("不支持的协议"), "{proto}");
+    assert!(proto.contains("ftp"), "{proto}");
+
+    let proto_redir = error_of("curl --proto-redir ftp https://example.com");
+    assert!(proto_redir.contains("不支持的协议"), "{proto_redir}");
+    assert!(proto_redir.contains("ftp"), "{proto_redir}");
+}
+
+#[test]
+fn rejects_an_empty_protocol_list() {
+    let message = error_of("curl --proto= https://example.com");
+    assert!(message.contains("缺少协议"), "{message}");
+}
+
+#[test]
+fn still_rejects_unknown_long_options() {
+    let message = error_of("curl --unknown-flag http://x");
+    assert!(message.contains("不支持的 curl 参数"), "{message}");
+    assert!(message.contains("--unknown-flag"), "{message}");
+}

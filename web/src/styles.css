@@ -676,6 +676,12 @@ body {
   white-space: nowrap;
 }
 
+/* 结果筛选（全部 / 只看成功 / 只看失败 / 只看跳过）。 */
+.logs-filter {
+  font-size: 12px;
+  margin-right: 4px;
+}
+
 /* ---------- 日志 ---------- */
 .log-list {
   display: flex;

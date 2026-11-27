@@ -38,6 +38,13 @@ use crate::ACTUAL_PORT;
 /// 进程启动时刻（健康检查里回报运行时长）。
 static STARTED_AT: OnceLock<Instant> = OnceLock::new();
 
+/// 结果筛选模式下一次最多返回多少条记录。
+///
+/// 筛选（如「只看成功」）的诉求是「一次看完，不要再点加载更多」，
+/// 所以筛选模式不再按页翻，直接把匹配的全部记录取回来；
+/// 不筛选时仍按 `logsPageSize` 分页，避免一屏几千条把界面拖慢。
+const FILTERED_LOG_LIMIT: i64 = 5000;
+
 fn started_at() -> Instant {
     *STARTED_AT.get_or_init(Instant::now)
 }
@@ -913,11 +920,32 @@ async fn list_logs(
         return not_found();
     };
     let config = get_active_config();
-    let limit = params
-        .get("limit")
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(config.logs_page_size)
-        .clamp(1, config.logs_max_page_size.max(1));
+
+    // 结果口径筛选：过滤发生在 SQL 层，所以「只看成功」拿到的是成功记录本身，
+    // 不会被大量跳过记录挤到列表后面去。
+    let outcome = match params.get("outcome") {
+        Some(raw) => match db::LogOutcome::parse(raw) {
+            Some(outcome) => outcome,
+            None => return bad_request("outcome 只能是 all / success / failed / skipped"),
+        },
+        None => db::LogOutcome::All,
+    };
+    let filtered = outcome != db::LogOutcome::All;
+
+    // 筛选模式一次性取回全部匹配记录；不筛选时按页取。
+    let limit = if filtered {
+        params
+            .get("limit")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(FILTERED_LOG_LIMIT)
+            .clamp(1, FILTERED_LOG_LIMIT)
+    } else {
+        params
+            .get("limit")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(config.logs_page_size)
+            .clamp(1, config.logs_max_page_size.max(1))
+    };
 
     // 游标 "<executed_at>:<id>"（与 TS 版一致，坏格式直接 400）。
     let mut before: Option<db::LogCursor> = None;
@@ -949,7 +977,7 @@ async fn list_logs(
         None
     };
 
-    match db::list_log_summaries(&id, limit + 1, before, since) {
+    match db::list_log_summaries(&id, limit + 1, before, since, outcome) {
         Ok(mut rows) => {
             let has_more = rows.len() > limit as usize;
             if has_more {
@@ -977,9 +1005,20 @@ async fn list_logs(
                     value
                 })
                 .collect();
-            AxumJson(
-                json!({ "logs": logs, "has_more": has_more, "retention_days": retention_days }),
-            )
+            // 筛选模式下回报匹配总数：用户要知道「共 N 条」，
+            // 才知道看到的这些是不是全部。
+            let matched_total = if filtered {
+                db::count_log_summaries(&id, since, outcome).unwrap_or(0)
+            } else {
+                0
+            };
+            AxumJson(json!({
+                "logs": logs,
+                "has_more": has_more,
+                "retention_days": retention_days,
+                "outcome": outcome.as_str(),
+                "matched_total": matched_total,
+            }))
             .into_response()
         }
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
