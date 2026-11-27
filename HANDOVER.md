@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.19（未发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.18>。
+**当前版本：v2.1.19（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.19>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -613,6 +613,20 @@ Dockerfile 改成三阶段 Rust 主线；cargo 警告清零（`cargo check --wor
 | `bun run test` | **15 文件 / 117 用例全绿**（新增 `tests/log-outcome-filter.test.ts`） |
 | `cargo build --release -p jitter-app --jobs 1` | 成功（v2.1.19，含新前端产物） |
 | 浏览器实测（dev 实例 3111） | 见下方 v2.1.19 实测结论 |
+
+**发布体积（2026-11-27 实测，Release v2.1.19）**
+
+| 项 | 大小 |
+| --- | --- |
+| `jitter-windows-x64.zip` | **3,347,254 B（3.19 MB）** |
+| `jitter-linux-x64.zip` | 3,215,445 B |
+| `jitter-macos-x64.zip` | 3,065,531 B |
+| `jitter-macos-arm64.zip` | 3,001,021 B |
+| `jitter-linux-arm64.zip` | 3,188,050 B |
+| `web/dist/assets/index-*.js` | ≈1,756 kB（gzip ≈492 KB） |
+
+> 发布包解出来的 `jitter.exe` 是 7,752,704 B。
+> sha256 校验一致，发布产物跑 `probe` 正常（对生产库输出 5 个任务 / 749 条记录）。
 
 **筛选实测结论（v2.1.19）**
 
