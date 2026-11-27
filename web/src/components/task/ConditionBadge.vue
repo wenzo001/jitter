@@ -27,7 +27,13 @@ const insecure = computed(() => {
 </script>
 
 <template>
-  <a-popover :trigger="['hover', 'focus', 'click']" placement="bottomLeft" :mouse-enter-delay="0.1">
+  <!-- 未开启执行条件时不渲染入口：没有条件的「执行条件」徽标只会造成歧义。 -->
+  <a-popover
+    v-if="task.precheck_enabled === 1"
+    :trigger="['hover', 'focus', 'click']"
+    placement="bottomLeft"
+    :mouse-enter-delay="0.1"
+  >
     <template #content>
       <div class="condition-pop">
         <div class="condition-pop-head">

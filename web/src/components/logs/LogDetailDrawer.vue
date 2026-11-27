@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { LogDetail, LogSummary } from '@/types/task'
+import { localizeBackendMessage } from '@/api/client'
 import { useLogsStore } from '@/stores/logs'
 import CodeBlock from '@/components/common/CodeBlock.vue'
 
@@ -29,25 +30,39 @@ const title = computed(() =>
       : t('logDetail.title'),
 )
 
+// 请求代际：A→B 快速切换时，迟到的 A 响应必须被丢弃，不能覆盖 B。
+let generation = 0
+
 watch(
   () => [props.open, props.logId] as const,
   async ([open, id]) => {
-    if (!open || !id) return
+    const myGeneration = ++generation
+    if (!open || !id) {
+      detail.value = null
+      loading.value = false
+      error.value = ''
+      return
+    }
     loading.value = true
     error.value = ''
     detail.value = null
     try {
       const data = await logs.loadDetail(id)
+      if (myGeneration !== generation) return
       if (data) detail.value = data
       else error.value = t('logDetail.loadFailed')
     } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err)
+      if (myGeneration !== generation) return
+      const message = err instanceof Error ? err.message : String(err)
+      error.value = localizeBackendMessage(message)
     } finally {
-      loading.value = false
+      if (myGeneration === generation) loading.value = false
     }
   },
   { immediate: true },
 )
+
+defineExpose({ detail, loading, error })
 
 function summaryOf(log: LogSummary): string {
   return `${log.request_method ?? ''} ${log.request_url ?? ''}`.trim()
@@ -55,6 +70,11 @@ function summaryOf(log: LogSummary): string {
 
 function notifySummary(notify: LogSummary): string {
   return `${notify.request_method ?? ''} ${notify.request_url ?? ''}`.trim()
+}
+
+function notifySucceeded(notify: LogSummary): boolean {
+  const status = notify.response_status
+  return !notify.error && !notify.aborted && typeof status === 'number' && status >= 200 && status < 300
 }
 </script>
 
@@ -110,8 +130,8 @@ function notifySummary(notify: LogSummary): string {
       <section v-if="detail.notify" class="notify-section">
         <div class="notify-head">
           <span class="notify-title">{{ $t('logDetail.notifySectionTitle') }}</span>
-          <a-tag :color="detail.notify.error ? 'error' : 'success'" class="notify-state">
-            {{ detail.notify.error ? $t('logDetail.notifyStateFailed') : $t('logDetail.notifyStateSent') }}
+          <a-tag :color="notifySucceeded(detail.notify) ? 'success' : 'error'" class="notify-state">
+            {{ notifySucceeded(detail.notify) ? $t('logDetail.notifyStateSent') : $t('logDetail.notifyStateFailed') }}
           </a-tag>
           <span class="notify-hint muted">{{ $t('logDetail.notifySectionHint') }}</span>
         </div>

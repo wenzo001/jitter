@@ -15,6 +15,7 @@ import { useLogsStore } from '@/stores/logs'
 import { useTasksStore } from '@/stores/tasks'
 import { conditionFromTask } from '@/types/form'
 import { curlOf } from '@/utils/curl'
+import { describeRunNotify } from '@/utils/run-result'
 import { formatDuration, formatRate } from '@/utils/format'
 import { setLocale, type Locale } from '@/i18n'
 import TaskList from '@/components/task/TaskList.vue'
@@ -300,7 +301,7 @@ async function doRun() {
     ]
     if (!data.skipped && data.status !== null) parts.push(`HTTP ${data.status}`)
     if (data.error) parts.push(data.error)
-    else if (data.matched) parts.push(data.notifySent ? t('task.runNotified') : t('common.success'))
+    else if (data.matched) parts.push(describeRunNotify(data, t))
     else parts.push(t('task.conditionNotMet'))
     if (!data.skipped) parts.push(`${data.durationMs} ms`)
     app.setStatus(parts.join(' · '), Boolean(data.error))

@@ -186,8 +186,6 @@ fn precheck_failure_reasons() {
 // 真实 HTTP 往返
 // ---------------------------------------------------------------------------
 
-static PORT_SEQ: AtomicU32 = AtomicU32::new(3100);
-
 /// 数据库是进程级单例：这些测试也要串行使用它。
 static DB_LOCK: Mutex<()> = Mutex::new(());
 
@@ -229,10 +227,10 @@ fn setup_db(config: jitter_core::config::AppConfig) -> DbGuard {
 /// 极简 HTTP 服务器：对每个连接返回一段预先写好的响应。
 async fn spawn_server(responses: Vec<String>) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let port = PORT_SEQ.fetch_add(1, Ordering::SeqCst);
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
+    let port = listener.local_addr().expect("address").port();
     tokio::spawn(async move {
         for response in responses {
             let (mut socket, _) = match listener.accept().await {
@@ -254,6 +252,34 @@ fn http_response(status: &str, body: &str) -> String {
         "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+/// 本地 HTTP fixture：无限次接受连接、计数并返回同一个响应。
+/// 用于断言「主请求有没有真的被发送」这类计数性检查。
+async fn spawn_fixture(status: &str, body: &str) -> (String, std::sync::Arc<AtomicU32>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("address").port();
+    let response = http_response(status, body);
+    let counter = std::sync::Arc::new(AtomicU32::new(0));
+    let served = counter.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            served.fetch_add(1, Ordering::SeqCst);
+            let mut buffer = [0u8; 4096];
+            let _ = socket.read(&mut buffer).await;
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), counter)
 }
 
 fn task_input(url: &str) -> NewTaskInput {
@@ -465,4 +491,257 @@ fn merge_config_reports_page_size_inversions() {
         &json!({ "logsPageSize": 200, "logsMaxPageSize": 50 }),
     );
     assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// 测试台：结构化前置（只有 precheck_url、没有 precheck_curl）
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn testbench_runs_structured_precheck_and_skips_main_on_403() {
+    let _db = setup_db(jitter_core::config::AppConfig {
+        request_timeout_ms: 5000,
+        log_body_limit_bytes: 100 * 1024,
+        ..Default::default()
+    });
+    // 前置返回 403；主请求服务器可计数，正式链路下它一次都不该被访问。
+    let (precheck_url, _) = spawn_fixture("403 Forbidden", "no").await;
+    let (main_url, main_count) = spawn_fixture("200 OK", "hi").await;
+
+    let input = json!({
+        "url": main_url,
+        "precheck_enabled": true,
+        "precheck_url": precheck_url,
+    });
+    let result = jitter_core::testbench::run_test_bench(&input).await;
+
+    let precheck_step = result
+        .steps
+        .iter()
+        .find(|step| step.key == "precheck")
+        .expect("结构化 precheck_url 应当真正发出条件检查请求");
+    assert_eq!(precheck_step.status, "fail");
+    assert!(result.summary.skipped, "前置 403 → 本次应判定为跳过");
+    assert_eq!(
+        main_count.load(Ordering::SeqCst),
+        0,
+        "前置不满足时测试台不得发送主请求"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 通知状态真实性：只有真实 HTTP 2xx 才算 notify_sent
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn notify_http_2xx_marks_notify_sent() {
+    let _db = setup_db(jitter_core::config::AppConfig {
+        request_timeout_ms: 5000,
+        log_body_limit_bytes: 100 * 1024,
+        ..Default::default()
+    });
+    let url = spawn_server(vec![
+        http_response("200 OK", "ok"),
+        http_response("200 OK", "sent"),
+    ])
+    .await;
+    let mut input = task_input(&url);
+    input.notify_enabled = true;
+    input.notify_request = Some(jitter_core::db::RequestParts {
+        url: url.clone(),
+        method: "POST".to_string(),
+        headers: Some("{}".to_string()),
+        body: Some("ping".to_string()),
+        options: Some("{}".to_string()),
+    });
+    let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
+    let outcome = execute_task_run(
+        &task,
+        &CancellationToken::new(),
+        jitter_core::types::RunSource::Scheduled,
+    )
+    .await;
+    assert!(outcome.notify_sent, "通知拿到 200 → sent");
+    assert_eq!(outcome.notify_status, Some(200));
+    assert_eq!(outcome.notify_error, None);
+    assert!(outcome.notify_log_id.is_some());
+}
+
+#[tokio::test]
+async fn notify_http_500_marks_notify_failed_but_keeps_log() {
+    let _db = setup_db(jitter_core::config::AppConfig {
+        request_timeout_ms: 5000,
+        log_body_limit_bytes: 100 * 1024,
+        ..Default::default()
+    });
+    let url = spawn_server(vec![
+        http_response("200 OK", "ok"),
+        http_response("500 Internal Server Error", "boom"),
+    ])
+    .await;
+    let mut input = task_input(&url);
+    input.notify_enabled = true;
+    input.notify_request = Some(jitter_core::db::RequestParts {
+        url: url.clone(),
+        method: "POST".to_string(),
+        headers: Some("{}".to_string()),
+        body: Some("ping".to_string()),
+        options: Some("{}".to_string()),
+    });
+    let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
+    let outcome = execute_task_run(
+        &task,
+        &CancellationToken::new(),
+        jitter_core::types::RunSource::Scheduled,
+    )
+    .await;
+    assert!(!outcome.notify_sent, "500 不是 2xx → 不能算已发送");
+    assert_eq!(outcome.notify_status, Some(500));
+    let error = outcome.notify_error.clone().unwrap_or_default();
+    assert!(error.contains("500"), "notify_error 应记录状态码: {error}");
+    // 失败的通知也必须保留日志，便于排查。
+    let notify_log_id = outcome.notify_log_id.expect("notify log kept");
+    let notify = jitter_core::db::get_log(notify_log_id)
+        .expect("read")
+        .expect("exists");
+    assert_eq!(notify.kind, "notify");
+    assert_eq!(notify.response_status, Some(500));
+}
+
+#[tokio::test]
+async fn notify_timeout_marks_notify_failed() {
+    let _db = setup_db(jitter_core::config::AppConfig {
+        request_timeout_ms: 1000,
+        log_body_limit_bytes: 100 * 1024,
+        ..Default::default()
+    });
+    let url = spawn_server(vec![http_response("200 OK", "ok")]).await;
+    // 通知服务器只收连接不响应 → 超时。
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let stall_addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buffer = [0u8; 4096];
+        let _ = socket.read(&mut buffer).await;
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    });
+    let mut input = task_input(&url);
+    input.notify_enabled = true;
+    input.notify_request = Some(jitter_core::db::RequestParts {
+        url: format!("http://{stall_addr}"),
+        method: "POST".to_string(),
+        headers: Some("{}".to_string()),
+        body: Some("ping".to_string()),
+        options: Some("{}".to_string()),
+    });
+    let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
+    let outcome = execute_task_run(
+        &task,
+        &CancellationToken::new(),
+        jitter_core::types::RunSource::Scheduled,
+    )
+    .await;
+    assert!(!outcome.notify_sent);
+    assert_eq!(outcome.notify_status, None);
+    let error = outcome.notify_error.clone().unwrap_or_default();
+    assert!(error.contains("请求超时"), "notify_error 应记录超时: {error}");
+    assert!(
+        outcome.notify_log_id.is_some(),
+        "超时的通知也要保留日志"
+    );
+}
+
+#[tokio::test]
+async fn testbench_notify_sent_requires_2xx() {
+    let _db = setup_db(jitter_core::config::AppConfig {
+        request_timeout_ms: 5000,
+        log_body_limit_bytes: 100 * 1024,
+        ..Default::default()
+    });
+
+    // 通知返回 500 → notify_sent=false，且带状态与错误。
+    let main = spawn_server(vec![http_response("200 OK", "ok")]).await;
+    let (notify_url, _) = spawn_fixture("500 Internal Server Error", "boom").await;
+    let input = json!({
+        "url": main,
+        "notify_enabled": true,
+        "send_notify": true,
+        "notify_url": notify_url,
+    });
+    let result = jitter_core::testbench::run_test_bench(&input).await;
+    assert!(result.summary.matched);
+    assert!(!result.summary.notify_sent, "500 不算已发送");
+    assert_eq!(result.summary.notify_status, Some(500));
+    assert!(result.summary.notify_failed);
+    let error = result.summary.notify_error.clone().unwrap_or_default();
+    assert!(error.contains("500"), "notify_error 应记录状态码: {error}");
+
+    // 通知返回 2xx → notify_sent=true，无错误。
+    let main = spawn_server(vec![http_response("200 OK", "ok")]).await;
+    let (notify_url, _) = spawn_fixture("200 OK", "sent").await;
+    let input = json!({
+        "url": main,
+        "notify_enabled": true,
+        "send_notify": true,
+        "notify_url": notify_url,
+    });
+    let result = jitter_core::testbench::run_test_bench(&input).await;
+    assert!(result.summary.notify_sent);
+    assert_eq!(result.summary.notify_status, Some(200));
+    assert_eq!(result.summary.notify_error, None);
+    assert!(!result.summary.notify_failed);
+}
+
+// ---------------------------------------------------------------------------
+// 日志写入失败：必须返回错误，不许 panic
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn main_log_write_failure_returns_error_without_panicking() {
+    let _db = setup_db(jitter_core::config::AppConfig {
+        request_timeout_ms: 5000,
+        log_body_limit_bytes: 100 * 1024,
+        ..Default::default()
+    });
+    let url = spawn_server(vec![http_response("200 OK", "ok")]).await;
+    let task = jitter_core::db::create_task(&task_input(&url), "t1", 1000).expect("create");
+    // 拔掉数据库再执行：insert_log 必然失败。
+    jitter_core::db::close_db();
+    let outcome = execute_task_run(
+        &task,
+        &CancellationToken::new(),
+        jitter_core::types::RunSource::Scheduled,
+    )
+    .await;
+    assert_eq!(outcome.main_log_id, 0, "写库失败时 main_log_id 记 0");
+    let error = outcome.error.clone().unwrap_or_default();
+    assert!(error.contains("写入执行日志失败"), "应报告写库失败: {error}");
+    assert_eq!(outcome.status, Some(200), "主请求结果仍然保留");
+    assert!(!outcome.notify_sent);
+}
+
+#[tokio::test]
+async fn skip_log_write_failure_returns_error_without_panicking() {
+    use chrono::Datelike;
+    let _db = setup_db(jitter_core::config::AppConfig::default());
+    let url = spawn_server(vec![]).await;
+    let mut input = task_input(&url);
+    input.precheck_enabled = true;
+    let today = chrono::Local::now().weekday().num_days_from_sunday() as i64;
+    input.precheck_weekdays = Some(vec![(today + 1) % 7]);
+    let task = jitter_core::db::create_task(&input, "t1", 1000).expect("create");
+    jitter_core::db::close_db();
+    let outcome = execute_task_run(
+        &task,
+        &CancellationToken::new(),
+        jitter_core::types::RunSource::Scheduled,
+    )
+    .await;
+    assert!(outcome.skipped);
+    assert_eq!(outcome.main_log_id, 0);
+    let error = outcome.error.clone().unwrap_or_default();
+    assert!(error.contains("写入跳过日志失败"), "应报告写库失败: {error}");
 }

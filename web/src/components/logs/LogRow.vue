@@ -51,6 +51,14 @@ function statusInfo(log: LogSummary): { text: string; color: string } {
   const color = status >= 200 && status < 300 ? 'success' : status < 400 ? 'warning' : 'error'
   return { text: String(status), color }
 }
+
+const notifySucceeded = computed(() => {
+  const notify = props.log.notify
+  const status = notify?.response_status
+  return Boolean(
+    notify && !notify.error && !notify.aborted && typeof status === 'number' && status >= 200 && status < 300,
+  )
+})
 </script>
 
 <template>
@@ -75,8 +83,8 @@ function statusInfo(log: LogSummary): { text: string; color: string } {
       <a-tag v-if="log.kind === 'task' && log.matched !== null" :color="log.matched ? 'success' : 'default'">
         {{ log.matched ? $t('logs.matched') : $t('logs.notMatched') }}
       </a-tag>
-      <a-tag v-if="log.notify" :color="log.notify.error ? 'error' : 'blue'" class="notify-tag">
-        {{ log.notify.error ? $t('logs.notifyFailed') : $t('logs.notified') }}
+      <a-tag v-if="log.notify" :color="notifySucceeded ? 'success' : 'error'" class="notify-tag">
+        {{ notifySucceeded ? $t('logs.notified') : $t('logs.notifyFailed') }}
       </a-tag>
       <a-tag
         v-if="mergeCount && mergeCount > 1"

@@ -177,7 +177,23 @@ const emptyText = computed(() => {
       </div>
     </div>
 
-    <div v-if="logs.logs.length === 0" class="empty">
+    <!-- 查询失败：明确说「加载失败 + 原因 + 重试」，绝不能伪装成「没有记录」。 -->
+    <a-alert
+      v-if="logs.error"
+      class="logs-error-alert"
+      type="error"
+      show-icon
+      style="margin: 0 12px 10px"
+      :message="$t('logs.loadFailed', { error: logs.error })"
+    >
+      <template #action>
+        <a-button size="small" :loading="logs.loading" @click="logs.retry()">
+          {{ $t('common.retry') }}
+        </a-button>
+      </template>
+    </a-alert>
+
+    <div v-if="logs.logs.length === 0 && !logs.error" class="empty">
       {{ logs.loading ? $t('common.loading') : emptyText }}
     </div>
     <div v-else class="log-list">

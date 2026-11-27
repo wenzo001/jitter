@@ -115,6 +115,8 @@ export interface TaskPayload {
   log_retention_days?: number | null
   /** 工作日 / 休息日条件（法定节假日数据判断）。 */
   precheck_day_type?: 'workday' | 'offday'
+  /** 复制创建时初始状态；后端约定 'stopped' = 建好但不启用。 */
+  status?: 'active' | 'stopped'
   precheck_expect_status?: number
   precheck_expr?: string
 }
@@ -177,7 +179,12 @@ export interface RunResult {
   error: string | null
   aborted: boolean
   durationMs: number | null
-  notifySent: boolean
+  /** 仅当通知请求真实拿到 HTTP 2xx 才为 true；旧响应可能缺省。 */
+  notifySent?: boolean
+  /** 通知请求的 HTTP 状态码（未发出通知时为 null）。 */
+  notifyStatus?: number | null
+  /** 通知失败原因（成功或未通知时为 null）。 */
+  notifyError?: string | null
 }
 
 export interface SchedulePreviewRequest {

@@ -32,17 +32,20 @@ export class ApiError extends Error {
   kind: ApiErrorKind
   /** 服务端给的解决建议（没有则为空串）。 */
   hint: string
+  /** 后端返回的稳定错误码（跨语言标识，旧后端可能没有）。 */
+  code?: string
 
   constructor(
     message: string,
     status = 0,
-    options: { kind?: ApiErrorKind; hint?: string } = {},
+    options: { kind?: ApiErrorKind; hint?: string; code?: string } = {},
   ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.kind = options.kind ?? (status >= 500 ? 'server' : status > 0 ? 'http' : 'unknown')
     this.hint = options.hint ?? ''
+    this.code = options.code
   }
 }
 
@@ -108,6 +111,32 @@ function readHint(payload: unknown): string {
   return ''
 }
 
+function readCode(payload: unknown): string | undefined {
+  if (payload && typeof payload === 'object' && 'code' in payload) {
+    const code = (payload as { code: unknown }).code
+    return typeof code === 'string' ? code : undefined
+  }
+  return undefined
+}
+
+/**
+ * 后端写死的中文错误 → 界面语言文案的最小映射。
+ *
+ * 后端目前没有稳定的错误 code，只有整句中文（见 rust api 层）。
+ * 这里只对已确认的原句做精确匹配，映射到 i18n key；
+ * 匹配不上的原样返回（后端数据本身不做机翻式猜测）。
+ * 后端将来补上 code 后，优先按 `ApiError.code` 分支，这里可逐步退役。
+ */
+const BACKEND_MESSAGE_KEYS: Record<string, string> = {
+  任务不存在: 'error.backendTaskNotFound',
+}
+
+export function localizeBackendMessage(message: string): string {
+  if (!message) return ''
+  const key = BACKEND_MESSAGE_KEYS[message.trim()]
+  return key ? translate(key) : message
+}
+
 async function requestOnce<T>(path: string, options: RequestOptions): Promise<T> {
   const controller = new AbortController()
   const timeout = window.setTimeout(
@@ -142,6 +171,7 @@ async function requestOnce<T>(path: string, options: RequestOptions): Promise<T>
       throw new ApiError(message, response.status, {
         kind: response.status >= 500 ? 'server' : 'http',
         hint: readHint(payload),
+        code: readCode(payload),
       })
     }
     if (text && payload === null) {

@@ -14,7 +14,8 @@ use serde_json::{Map as JsonMap, Value as Json};
 use crate::types::{LogKind, TaskStatus};
 
 pub const LOG_RETENTION_SETTING: &str = "logRetentionDays";
-/// 全局「默认跳过 TLS 证书校验」开关；缺省视为开启（打卡系统多为自签证书）。
+pub const SCHEMA_VERSION: i64 = 1;
+/// 全局「默认跳过 TLS 证书校验」开关；新安装默认验证，旧库迁移时显式保留旧值。
 pub const SKIP_TLS_VERIFY_SETTING: &str = "skipTlsVerify";
 /// 接通电源时防止系统休眠（默认关闭）。
 pub const PREVENT_SLEEP_ON_AC_SETTING: &str = "preventSleepOnAc";
@@ -369,6 +370,7 @@ pub struct RequestParts {
 #[derive(Debug, Clone, Default)]
 pub struct NewTaskInput {
     pub name: String,
+    pub status: Option<String>,
     pub curl_command: Option<String>,
     pub request: RequestParts,
     pub window_start: String,
@@ -608,7 +610,7 @@ pub fn local_day_start(timestamp: i64, offset_days: i64) -> i64 {
 
 /// 旧版只存 `paused_until`，会让「明天开始暂停」变成「立即开始」；
 /// 升级时用确定规则补 `paused_from`（详见 TS 版注释）。
-fn backfill_pause_from(conn: &mut Connection) -> Result<(), DbError> {
+fn backfill_pause_from(conn: &Connection) -> Result<(), DbError> {
     let mut rows: Vec<(String, i64)> = {
         let mut statement = conn.prepare(
             "SELECT id, paused_until FROM tasks WHERE paused_until IS NOT NULL AND paused_from IS NULL",
@@ -663,7 +665,7 @@ fn is_hhmm(value: &str) -> bool {
 }
 
 /// 旧调度（含已移除的 Cron）修复为每天窗口。
-fn backfill_schedule_kind(conn: &mut Connection) -> Result<(), DbError> {
+fn backfill_schedule_kind(conn: &Connection) -> Result<(), DbError> {
     let broken: Vec<(String, String, Option<String>, String, String)> = {
         let mut statement = conn.prepare(
             "SELECT id, name, schedule_kind, window_start, window_end
@@ -712,31 +714,84 @@ fn backfill_schedule_kind(conn: &mut Connection) -> Result<(), DbError> {
 }
 
 /// 给每个任务一个显式位置，保持「最新在前」的可见顺序。
-fn backfill_sort_order(conn: &mut Connection) -> Result<(), DbError> {
+fn backfill_sort_order(conn: &Connection) -> Result<(), DbError> {
     let ids: Vec<String> = {
         let mut statement =
             conn.prepare("SELECT id FROM tasks ORDER BY created_at DESC, rowid DESC")?;
         let mapped: Vec<String> = statement
             .query_map([], |row| row.get::<_, String>(0))?
-            .filter_map(|result| result.ok())
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         mapped
     };
-    if ids.is_empty() {
-        return Ok(());
-    }
-    let tx = conn.transaction()?;
     for (index, id) in ids.iter().enumerate() {
-        tx.execute(
+        conn.execute(
             "UPDATE tasks SET sort_order = ?1 WHERE id = ?2",
             params![index as i64, id],
         )?;
     }
-    tx.commit()?;
     Ok(())
 }
 
-fn migrate(conn: &mut Connection) -> Result<(), DbError> {
+fn preserve_legacy_tls(conn: &Connection) -> Result<(), DbError> {
+    let skip_verify = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![SKIP_TLS_VERIFY_SETTING],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .map_or(true, |value| value.trim() != "0");
+    if skip_verify {
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![SKIP_TLS_VERIFY_SETTING],
+        )?;
+    }
+    let mut statement = conn.prepare(
+        "SELECT id, request_options, precheck_options, notify_options FROM tasks",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, request, precheck, notify) in rows {
+        if !skip_verify {
+            continue;
+        }
+        for (column, raw) in [
+            ("request_options", request),
+            ("precheck_options", precheck),
+            ("notify_options", notify),
+        ] {
+            let Some(mut options) = raw
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<Json>(text).ok())
+            else {
+                continue;
+            };
+            let Some(object) = options.as_object_mut() else {
+                continue;
+            };
+            if !object.contains_key("insecure") {
+                object.insert("insecure".to_string(), Json::Bool(true));
+                conn.execute(
+                    &format!("UPDATE tasks SET {column} = ?1 WHERE id = ?2"),
+                    params![options.to_string(), id],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn migrate(conn: &Connection, legacy: bool) -> Result<(), DbError> {
     ensure_column(
         conn,
         "tasks",
@@ -824,6 +879,15 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     }
     backfill_schedule_kind(conn)?;
     backfill_pause_from(conn)?;
+    if legacy {
+        preserve_legacy_tls(conn)?;
+    } else {
+        // 新库必须留下显式标记，否则下次打开会被误判为旧库。
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, '0')",
+            params![SKIP_TLS_VERIFY_SETTING],
+        )?;
+    }
     Ok(())
 }
 
@@ -849,17 +913,41 @@ pub fn init_db(path: Option<&str>) -> Result<(), DbError> {
     }
 
     let mut conn = Connection::open(&target)?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version > SCHEMA_VERSION {
+        return Err(DbError(format!(
+            "数据库版本 {version} 高于当前支持的版本 {SCHEMA_VERSION}，请使用新版 Jitter 打开"
+        )));
+    }
+    let legacy: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     // 必须在第一次建表之前设置：新库会以小块回收页，而不是等一次全量 VACUUM。
     conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
-    conn.execute_batch(SCHEMA)?;
-    migrate(&mut conn)?;
+    {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA)?;
+        migrate(&tx, legacy)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.commit()?;
+    }
+    let check: String = conn.pragma_query_value(None, "quick_check", |row| row.get(0))?;
+    if check != "ok" {
+        return Err(DbError(format!("数据库完整性检查失败: {check}")));
+    }
 
     *guard = Some(Db { conn, path: target });
     Ok(())
+}
+
+pub fn get_schema_version() -> Result<i64, DbError> {
+    with_connection(|conn| conn.pragma_query_value(None, "user_version", |row| row.get(0)).map_err(DbError::from))
 }
 
 /// 新任务的位置：比当前最靠前的还要靠前（历史行为「最新在前」）。
@@ -925,7 +1013,7 @@ pub fn create_task(input: &NewTaskInput, id: &str, now: i64) -> Result<TaskRow, 
                 input.interval_seconds,
                 input.interval_jitter_seconds.unwrap_or(0),
                 input.interval_start_at,
-                "active",
+                input.status.as_deref().filter(|status| *status == "stopped").unwrap_or("active"),
                 None::<i64>,
                 None::<i64>,
                 None::<i64>,
@@ -1063,7 +1151,7 @@ pub fn list_tasks() -> Result<Vec<TaskRow>, DbError> {
         let mut statement =
             conn.prepare("SELECT * FROM tasks ORDER BY sort_order ASC, created_at DESC")?;
         let rows = statement.query_map([], map_task)?;
-        Ok(rows.filter_map(|result| result.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     })
 }
 
@@ -1796,12 +1884,11 @@ pub fn set_setting(key: &str, value: Option<&str>) -> Result<(), DbError> {
     })
 }
 
-/// 实际生效的保留窗口：界面设置优先于配置文件默认值。
-/// 是否默认跳过 TLS 证书校验（未设置时视为开启）。
+/// 是否默认跳过 TLS 证书校验（新安装默认验证）。
 pub fn get_skip_tls_verify() -> bool {
     match get_setting(SKIP_TLS_VERIFY_SETTING) {
         Ok(Some(value)) => value.trim() != "0",
-        _ => true,
+        _ => false,
     }
 }
 

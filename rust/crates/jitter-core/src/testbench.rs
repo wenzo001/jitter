@@ -50,7 +50,12 @@ pub struct TestBenchSummary {
     pub status: Option<i64>,
     pub error: Option<String>,
     pub total_ms: i64,
+    /// 通知真实发送成功（HTTP 2xx）。500 / 超时 / 网络错误一律 false。
     pub notify_sent: bool,
+    /// 通知请求拿到的 HTTP 状态码（没有响应为 None）。
+    pub notify_status: Option<i64>,
+    /// 通知未发送成功的原因（发送成功为 None）。
+    pub notify_error: Option<String>,
     /// 真的通知已尝试发送（send_notify）且失败。
     pub notify_failed: bool,
 }
@@ -405,7 +410,13 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
     let precheck_curl = pick_str(input, "precheck_curl")
         .map(str::trim)
         .filter(|text| !text.is_empty());
-    let has_guard_curl = precheck_curl.is_some();
+    // 与正式执行对齐：curl 与结构化 precheck_url 任一存在都要真正发出前置请求。
+    // 之前只看 precheck_curl，结构化配置的前置（如返回 403）会被整体跳过。
+    let has_guard_curl = precheck_curl.is_some()
+        || pick_str(input, "precheck_url")
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .is_some();
 
     if guard_on
         && !has_local_conditions(&local_config)
@@ -624,17 +635,25 @@ pub async fn run_test_bench(input: &Json) -> TestBenchResult {
                         &notify_response,
                         notify_started,
                     ));
-                    summary.notify_sent =
-                        notify_response.status.is_some() && notify_response.error.is_none();
-                    if !summary.notify_sent {
+                    // 与正式执行同一判定：只有真实 HTTP 2xx 才算已发送。
+                    let (sent, reason) = executor::classify_notify(
+                        notify_response.status,
+                        notify_response.error.as_deref(),
+                        notify_response.aborted,
+                    );
+                    summary.notify_sent = sent;
+                    summary.notify_status = notify_response.status;
+                    summary.notify_error = reason;
+                    if !sent {
                         summary.notify_failed = true;
                         if summary.error.is_none() {
-                            summary.error = notify_response.error.clone();
+                            summary.error = summary.notify_error.clone();
                         }
                     }
                 }
                 Err(message) => {
                     summary.notify_failed = true;
+                    summary.notify_error = Some(message.clone());
                     steps.push(failure_step("notify", "发送通知", message, notify_started));
                 }
             }

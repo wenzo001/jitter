@@ -51,7 +51,7 @@ function timeValue(value: unknown): string {
       <p class="field-hint" style="margin-top: 4px">{{ $t('condition.weekdayHint') }}</p>
     </div>
 
-    <div class="form-grid-2">
+    <div class="form-grid-2" data-error-key="condTime">
       <div class="field">
         <label class="field-label">{{ $t('condition.timeStart') }}</label>
         <a-time-picker
@@ -134,7 +134,7 @@ function timeValue(value: unknown): string {
       </p>
     </div>
 
-    <div class="field">
+    <div class="field" data-error-key="condCurl">
       <label class="field-label">{{ $t('condition.curlLabel') }}</label>
       <a-textarea
         :value="modelValue.curl"
@@ -146,7 +146,7 @@ function timeValue(value: unknown): string {
     </div>
 
     <div class="form-grid-2">
-      <div class="field">
+      <div class="field" data-error-key="condStatus">
         <label class="field-label">{{ $t('condition.expectStatus') }}</label>
         <a-input
           :value="modelValue.expectStatus"
@@ -167,7 +167,7 @@ function timeValue(value: unknown): string {
     </div>
 
     <div v-if="error('curl')" class="field-error">{{ error('curl') }}</div>
-    <div v-if="error('any')" class="field-error">{{ error('any') }}</div>
+    <div v-if="error('any')" class="field-error" data-error-key="condAny">{{ error('any') }}</div>
     <p class="field-hint" style="margin-top: 6px">
       {{ $t('condition.atLeastOne') }}
     </p>

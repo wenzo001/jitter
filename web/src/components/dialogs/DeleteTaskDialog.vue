@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Task } from '@/types/task'
 import { deleteTask } from '@/api/tasks'
+import { localizeBackendMessage } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 
 const props = defineProps<{
@@ -50,7 +51,8 @@ async function confirm() {
     emit('deleted', task.id, task.name, data.deleted_logs ?? 0)
     emit('update:open', false)
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err)
+    const message = err instanceof Error ? err.message : String(err)
+    error.value = localizeBackendMessage(message)
   } finally {
     busy.value = false
   }
@@ -71,6 +73,14 @@ async function confirm() {
       {{ $t('deleteTask.contentBefore') }}<strong>{{ task?.name }}</strong
       >{{ $t('deleteTask.contentAfter') }}
     </p>
+    <!-- 任务可能正在执行：说清楚删除的即时后果，别让用户以为只是「删条配置」。 -->
+    <a-alert
+      v-if="task?.running"
+      type="error"
+      show-icon
+      :message="$t('deleteTask.runningWarning')"
+      style="margin-top: 10px"
+    />
     <a-alert type="warning" show-icon :message="$t('deleteTask.warning')" />
     <div class="field" style="margin-top: 12px">
       <label class="field-label">

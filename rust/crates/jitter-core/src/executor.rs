@@ -15,7 +15,7 @@ use serde_json::{Map as JsonMap, Value as Json};
 use tokio_util::sync::CancellationToken;
 
 use crate::condition::evaluate_condition;
-use crate::config::{get_active_config, AppConfig};
+use crate::config::get_active_config;
 use crate::db::TaskRow;
 use crate::db::{insert_log, NewLogInput};
 use crate::guard::{
@@ -235,14 +235,80 @@ pub fn parse_request_options(raw: Option<&str>) -> RequestOptions {
     options
 }
 
-struct RequestResult {
+/// 唯一的请求构造入口：任务存储字段 → `RequestSpec`。
+///
+/// 测试台的 build_request 产出的就是同一个 `RequestSpec` 形状，两条链路
+/// （正式执行 / 试跑）都经 `execute_request` 消费同一份构造与选项逻辑，
+/// 避免「正式和试跑行为漂移」。坏数据与历史行为一致：头部解析失败视为无头部、
+/// 选项解析失败回退默认值。
+pub fn request_spec(
+    url: &str,
+    method: &str,
+    headers: Option<&str>,
+    body: Option<&str>,
+    options: Option<&str>,
+) -> crate::types::RequestSpec {
+    crate::types::RequestSpec {
+        url: url.to_string(),
+        method: method.to_string(),
+        headers: parse_stored_headers(headers).unwrap_or(None).unwrap_or_default(),
+        body: body.map(str::to_string),
+        options: Some(parse_request_options(options)),
+    }
+}
+
+/// 从任务行的某一组请求列构造 `RequestSpec`（主 / 前置 / 通知共用）。
+pub fn request_spec_of(
+    url: Option<&str>,
+    method: Option<&str>,
+    headers: Option<&str>,
+    body: Option<&str>,
+    options: Option<&str>,
+) -> crate::types::RequestSpec {
+    request_spec(
+        url.unwrap_or(""),
+        method.unwrap_or("GET"),
+        headers,
+        body,
+        options,
+    )
+}
+
+/// 通知真实性判定（纯函数）：只有拿到真实 HTTP 2xx 才算发送成功。
+/// 返回 `(sent, 未发送原因)`；500 / 超时 / 网络错误 / 中断一律不算发送。
+pub fn classify_notify(
     status: Option<i64>,
-    headers_json: Option<String>,
-    body: String,
-    truncated: bool,
-    error: Option<String>,
+    error: Option<&str>,
     aborted: bool,
-    duration_ms: i64,
+) -> (bool, Option<String>) {
+    let sent = matches!(status, Some(code) if (200..300).contains(&code))
+        && error.is_none()
+        && !aborted;
+    if sent {
+        return (true, None);
+    }
+    let reason = match error {
+        Some(text) => text.to_string(),
+        None if aborted => "通知请求被中断".to_string(),
+        None => match status {
+            Some(code) => format!("通知返回 HTTP {code}"),
+            None => "通知没有拿到响应".to_string(),
+        },
+    };
+    (false, Some(reason))
+}
+
+/// 传输层执行结果（正式执行与测试台共用）。`headers_json` 保留原始 JSON 字符串，
+/// 便于直接落库；需要解析后的 map 时另行反序列化。
+#[derive(Debug, Clone)]
+pub struct ExecutedRequest {
+    pub status: Option<i64>,
+    pub headers_json: Option<String>,
+    pub body: String,
+    pub truncated: bool,
+    pub error: Option<String>,
+    pub aborted: bool,
+    pub duration_ms: i64,
 }
 
 fn env_proxy_snapshot() -> BTreeMap<String, String> {
@@ -371,7 +437,7 @@ async fn perform_request(
     default_timeout_ms: i64,
     body_limit: usize,
     default_insecure: bool,
-) -> RequestResult {
+) -> ExecutedRequest {
     let started = Instant::now();
     let mut status: Option<i64> = None;
     let mut headers_json: Option<String> = None;
@@ -578,7 +644,7 @@ async fn perform_request(
         };
     }
 
-    RequestResult {
+    ExecutedRequest {
         status,
         headers_json,
         body: response_body,
@@ -587,6 +653,37 @@ async fn perform_request(
         aborted,
         duration_ms: started.elapsed().as_millis() as i64,
     }
+}
+
+/// 走正式传输链路发送一个 `RequestSpec`：正式执行（`timeout_cap = None`，
+/// 跟随全局超时）与测试台（`timeout_cap = Some(TEST_REQUEST_TIMEOUT_MS)`）共用。
+/// TLS 行为保持现状：任务级 `-k`（`options.insecure`）优先，未指定时跟随
+/// 全局「默认跳过 TLS 校验」开关（`db::get_skip_tls_verify`）。
+pub async fn execute_request(
+    request: &crate::types::RequestSpec,
+    cancel: &CancellationToken,
+    timeout_cap: Option<i64>,
+) -> ExecutedRequest {
+    let config = get_active_config();
+    let mut options = request.options.clone().unwrap_or_default();
+    if let Some(cap) = timeout_cap {
+        if options.timeout_ms.is_none() {
+            options.timeout_ms = Some(cap);
+        }
+    }
+    let headers_text = Json::Object(request.headers.clone()).to_string();
+    perform_request(
+        &request.url,
+        &request.method,
+        Some(&headers_text),
+        request.body.as_deref(),
+        cancel,
+        &options,
+        config.request_timeout_ms,
+        config.log_body_limit_bytes,
+        crate::db::get_skip_tls_verify(),
+    )
+    .await
 }
 
 /// 一次性探测请求：与正式执行同一条传输链路，但不写库。
@@ -603,31 +700,11 @@ pub struct TestRequestOutcome {
 }
 
 pub async fn execute_test_request(request: &crate::types::RequestSpec) -> TestRequestOutcome {
-    let config = get_active_config();
-    let cancel = CancellationToken::new();
-    let mut options = request.options.clone().unwrap_or_default();
-    if options.timeout_ms.is_none() {
-        options.timeout_ms = Some(TEST_REQUEST_TIMEOUT_MS);
-    }
-    let headers_text: String = Json::Object(request.headers.clone()).to_string();
-    let default_insecure = crate::db::get_skip_tls_verify();
-    let result = perform_request(
-        &request.url,
-        &request.method,
-        Some(&headers_text),
-        request.body.as_deref(),
-        &cancel,
-        &options,
-        config.request_timeout_ms,
-        config.log_body_limit_bytes,
-        default_insecure,
-    )
-    .await;
-
+    let result =
+        execute_request(request, &CancellationToken::new(), Some(TEST_REQUEST_TIMEOUT_MS)).await;
     let headers = result
         .headers_json
         .and_then(|text| serde_json::from_str::<JsonMap<String, Json>>(&text).ok());
-
     TestRequestOutcome {
         status: result.status,
         headers,
@@ -652,13 +729,14 @@ struct SkipExchange {
     duration_ms: i64,
 }
 
-/// 一条解释「为什么跳过」的日志。
+/// 一条解释「为什么跳过」的日志。写库失败不再 panic：返回 Err 由调用方
+/// 把原因并进 outcome.error（此时 main_log_id 记 0）。
 fn record_skip(
     task: &TaskRow,
     reason: &str,
     exchange: Option<&SkipExchange>,
     source: crate::types::RunSource,
-) -> i64 {
+) -> Result<i64, String> {
     let stored_body = exchange.and_then(|exchange| {
         exchange.status.map(|_| {
             if exchange.truncated {
@@ -702,7 +780,7 @@ fn record_skip(
         matched: Some(0),
         run_source: Some(source.as_str().to_string()),
     })
-    .expect("write skip log")
+    .map_err(|error| format!("写入跳过日志失败：{error}"))
 }
 
 pub fn now_ms() -> i64 {
@@ -712,6 +790,7 @@ pub fn now_ms() -> i64 {
 /// 一次完整执行的结果。
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
+    /// 主日志 id；0 = 日志写入失败（错误已并入 `error`），调用方按 0 处理即可。
     pub main_log_id: i64,
     pub status: Option<i64>,
     pub aborted: bool,
@@ -720,17 +799,51 @@ pub struct RunOutcome {
     pub skipped: bool,
     pub error: Option<String>,
     pub notify_log_id: Option<i64>,
+    /// 通知真实发送成功（拿到 HTTP 2xx）。500 / 超时 / 网络错误一律 false。
+    pub notify_sent: bool,
+    /// 通知请求拿到的 HTTP 状态码（没有响应为 None）。
+    pub notify_status: Option<i64>,
+    /// 通知未发送成功的原因（发送成功为 None）；含日志写入失败。
+    pub notify_error: Option<String>,
     pub duration_ms: i64,
 }
 
+/// 跳过分支的 RunOutcome：日志写入失败也不 panic，把原因并进 error。
+fn skipped_outcome(
+    log_result: Result<i64, String>,
+    reason: &str,
+    status: Option<i64>,
+    aborted: bool,
+    duration_ms: i64,
+) -> RunOutcome {
+    let (main_log_id, error) = match log_result {
+        Ok(id) => (id, reason.to_string()),
+        Err(db_error) => (0, format!("{reason}；{db_error}")),
+    };
+    RunOutcome {
+        main_log_id,
+        status,
+        aborted,
+        matched: false,
+        skipped: true,
+        error: Some(error),
+        notify_log_id: None,
+        notify_sent: false,
+        notify_status: None,
+        notify_error: None,
+        duration_ms,
+    }
+}
+
 /// 执行一个任务：前置判断 → 主请求 → 判定 → 命中则通知。
+///
+/// 所有日志写入都不 panic：写库失败时 `main_log_id` 记 0、原因并入 `error`，
+/// 通知日志写失败则原因并入 `notify_error`。
 pub async fn execute_task_run(
     task: &TaskRow,
     cancel: &CancellationToken,
     source: crate::types::RunSource,
 ) -> RunOutcome {
-    let config: AppConfig = get_active_config();
-
     // 前置判断约束定时与开机自动执行：页面「立即执行」是人工触发，跳过所有前置条件。
     // 本地条件零成本；电源 / IP 读本机信息；guard curl 只在配置了的情况下才发。
     if task.precheck_enabled == 1 && !matches!(source, crate::types::RunSource::Manual) {
@@ -742,22 +855,18 @@ pub async fn execute_task_run(
         );
         let verdict = evaluate_local_guard(&guard_config, now_ms());
         if !verdict.passed {
-            let main_log_id = record_skip(task, &verdict.reason, None, source);
             tracing::warn!(
                 "[jitter] 任务「{}」跳过本次执行：{}",
                 task.name,
                 verdict.reason
             );
-            return RunOutcome {
-                main_log_id,
-                status: None,
-                aborted: false,
-                matched: false,
-                skipped: true,
-                error: Some(verdict.reason),
-                notify_log_id: None,
-                duration_ms: 0,
-            };
+            return skipped_outcome(
+                record_skip(task, &verdict.reason, None, source),
+                &verdict.reason,
+                None,
+                false,
+                0,
+            );
         }
 
         let host_config = HostGuardConfig {
@@ -774,83 +883,67 @@ pub async fn execute_task_run(
                 &environment.networks,
             );
             if !verdict.passed {
-                let main_log_id = record_skip(task, &verdict.reason, None, source);
                 tracing::warn!(
                     "[jitter] 任务「{}」跳过本次执行：{}",
                     task.name,
                     verdict.reason
                 );
-                return RunOutcome {
-                    main_log_id,
-                    status: None,
-                    aborted: false,
-                    matched: false,
-                    skipped: true,
-                    error: Some(verdict.reason),
-                    notify_log_id: None,
-                    duration_ms: 0,
-                };
+                return skipped_outcome(
+                    record_skip(task, &verdict.reason, None, source),
+                    &verdict.reason,
+                    None,
+                    false,
+                    0,
+                );
             }
         }
 
         if let Some(precheck_url) = &task.precheck_url {
-            let precheck = run_precheck(task, cancel, &config).await;
+            let precheck = run_precheck(task, cancel).await;
             if !precheck.verdict.passed {
-                let main_log_id = record_skip(
-                    task,
-                    &precheck.verdict.reason,
-                    Some(&SkipExchange {
-                        request_url: Some(precheck_url.clone()),
-                        request_method: Some(
-                            task.precheck_method
-                                .clone()
-                                .unwrap_or_else(|| "GET".to_string()),
-                        ),
-                        request_headers: task.precheck_headers.clone(),
-                        request_body: task.precheck_body.clone(),
-                        status: precheck.status,
-                        headers_json: precheck.headers_json,
-                        body: precheck.body,
-                        truncated: precheck.truncated,
-                        aborted: precheck.aborted,
-                        duration_ms: precheck.duration_ms,
-                    }),
-                    source,
+                let reason = precheck.verdict.reason.clone();
+                tracing::warn!("[jitter] 任务「{}」跳过本次执行：{}", task.name, reason);
+                return skipped_outcome(
+                    record_skip(
+                        task,
+                        &reason,
+                        Some(&SkipExchange {
+                            request_url: Some(precheck_url.clone()),
+                            request_method: Some(
+                                task.precheck_method
+                                    .clone()
+                                    .unwrap_or_else(|| "GET".to_string()),
+                            ),
+                            request_headers: task.precheck_headers.clone(),
+                            request_body: task.precheck_body.clone(),
+                            status: precheck.status,
+                            headers_json: precheck.headers_json,
+                            body: precheck.body,
+                            truncated: precheck.truncated,
+                            aborted: precheck.aborted,
+                            duration_ms: precheck.duration_ms,
+                        }),
+                        source,
+                    ),
+                    &reason,
+                    precheck.status,
+                    precheck.aborted,
+                    precheck.duration_ms,
                 );
-                tracing::warn!(
-                    "[jitter] 任务「{}」跳过本次执行：{}",
-                    task.name,
-                    precheck.verdict.reason
-                );
-                return RunOutcome {
-                    main_log_id,
-                    status: precheck.status,
-                    aborted: precheck.aborted,
-                    matched: false,
-                    skipped: true,
-                    error: Some(precheck.verdict.reason),
-                    notify_log_id: None,
-                    duration_ms: precheck.duration_ms,
-                };
             }
         }
     }
 
-    let main_options = parse_request_options(task.request_options.as_deref());
-    let main_executed_at = now_ms();
-    let default_insecure = crate::db::get_skip_tls_verify();
-    let main = perform_request(
+    // 与测试台共用同一条构造 + 执行链路（request_spec / execute_request）。
+    let main_spec = request_spec(
         &task.request_url,
         &task.request_method,
         task.request_headers.as_deref(),
         task.request_body.as_deref(),
-        cancel,
-        &main_options,
-        config.request_timeout_ms,
-        config.log_body_limit_bytes,
-        default_insecure,
-    )
-    .await;
+        task.request_options.as_deref(),
+    );
+    let main_executed_at = now_ms();
+    let main = execute_request(&main_spec, cancel, None).await;
 
     let matched = evaluate_success(&SuccessInput {
         status: main.status,
@@ -869,7 +962,7 @@ pub async fn execute_task_run(
         Some(_) => Some(main.body.clone()),
     };
 
-    let main_log_id = insert_log(&NewLogInput {
+    let main_log_id = match insert_log(&NewLogInput {
         task_id: task.id.clone(),
         executed_at: main_executed_at,
         request_url: Some(task.request_url.clone()),
@@ -886,55 +979,88 @@ pub async fn execute_task_run(
         parent_log_id: None,
         matched: Some(if matched { 1 } else { 0 }),
         run_source: Some(source.as_str().to_string()),
-    })
-    .expect("write main log");
+    }) {
+        Ok(id) => id,
+        Err(db_error) => {
+            // 主日志写不进去就不发通知（通知日志失去 parent），把两个错误并起来返回。
+            let db_error = format!("写入执行日志失败：{db_error}");
+            tracing::error!("[jitter] 任务「{}」：{}", task.name, db_error);
+            let error = Some(match main.error.as_ref() {
+                Some(text) => format!("{text}；{db_error}"),
+                None => db_error,
+            });
+            return RunOutcome {
+                main_log_id: 0,
+                status: main.status,
+                aborted: main.aborted,
+                matched,
+                skipped: false,
+                error,
+                notify_log_id: None,
+                notify_sent: false,
+                notify_status: None,
+                notify_error: None,
+                duration_ms: main.duration_ms,
+            };
+        }
+    };
 
     let mut notify_log_id: Option<i64> = None;
+    let mut notify_sent = false;
+    let mut notify_status: Option<i64> = None;
+    let mut notify_error: Option<String> = None;
     if matched && task.notify_enabled == 1 && task.notify_url.is_some() && !cancel.is_cancelled() {
         let notify_executed_at = now_ms();
-        let notify_options = parse_request_options(task.notify_options.as_deref());
-        let notify = perform_request(
-            task.notify_url.as_deref().unwrap_or(""),
-            task.notify_method.as_deref().unwrap_or("GET"),
+        let notify_spec = request_spec_of(
+            task.notify_url.as_deref(),
+            task.notify_method.as_deref(),
             task.notify_headers.as_deref(),
             task.notify_body.as_deref(),
-            cancel,
-            &notify_options,
-            config.request_timeout_ms,
-            config.log_body_limit_bytes,
-            crate::db::get_skip_tls_verify(),
-        )
-        .await;
+            task.notify_options.as_deref(),
+        );
+        let notify = execute_request(&notify_spec, cancel, None).await;
+        let (sent, reason) =
+            classify_notify(notify.status, notify.error.as_deref(), notify.aborted);
+        notify_sent = sent;
+        notify_status = notify.status;
+        notify_error = reason;
         let notify_body = match notify.status {
             None => None,
             Some(_) if notify.truncated => Some(format!("{}\n[truncated]", notify.body)),
             Some(_) => Some(notify.body.clone()),
         };
-        notify_log_id = Some(
-            insert_log(&NewLogInput {
-                task_id: task.id.clone(),
-                executed_at: notify_executed_at,
-                request_url: task.notify_url.clone(),
-                request_method: Some(
-                    task.notify_method
-                        .clone()
-                        .unwrap_or_else(|| "GET".to_string()),
-                ),
-                request_headers: task.notify_headers.clone(),
-                request_body: task.notify_body.clone(),
-                response_status: notify.status,
-                response_headers: notify.headers_json.clone(),
-                response_body: notify_body,
-                duration_ms: Some(notify.duration_ms),
-                error: notify.error.clone(),
-                aborted: notify.aborted.into(),
-                kind: Some(crate::types::LogKind::Notify),
-                parent_log_id: Some(main_log_id),
-                matched: None,
-                run_source: Some(source.as_str().to_string()),
-            })
-            .expect("write notify log"),
-        );
+        match insert_log(&NewLogInput {
+            task_id: task.id.clone(),
+            executed_at: notify_executed_at,
+            request_url: task.notify_url.clone(),
+            request_method: Some(
+                task.notify_method
+                    .clone()
+                    .unwrap_or_else(|| "GET".to_string()),
+            ),
+            request_headers: task.notify_headers.clone(),
+            request_body: task.notify_body.clone(),
+            response_status: notify.status,
+            response_headers: notify.headers_json.clone(),
+            response_body: notify_body,
+            duration_ms: Some(notify.duration_ms),
+            error: notify.error.clone(),
+            aborted: notify.aborted.into(),
+            kind: Some(crate::types::LogKind::Notify),
+            parent_log_id: Some(main_log_id),
+            matched: None,
+            run_source: Some(source.as_str().to_string()),
+        }) {
+            Ok(id) => notify_log_id = Some(id),
+            Err(db_error) => {
+                let db_error = format!("写入通知日志失败：{db_error}");
+                tracing::error!("[jitter] 任务「{}」：{}", task.name, db_error);
+                notify_error = Some(match notify_error.take() {
+                    Some(text) => format!("{text}；{db_error}"),
+                    None => db_error,
+                });
+            }
+        }
     }
 
     RunOutcome {
@@ -945,6 +1071,9 @@ pub async fn execute_task_run(
         skipped: false,
         error: main.error,
         notify_log_id,
+        notify_sent,
+        notify_status,
+        notify_error,
         duration_ms: main.duration_ms,
     }
 }
@@ -959,24 +1088,16 @@ struct PrecheckRun {
     duration_ms: i64,
 }
 
-/// 前置 curl：与正常执行完全相同的传输链路。
-async fn run_precheck(
-    task: &TaskRow,
-    cancel: &CancellationToken,
-    config: &AppConfig,
-) -> PrecheckRun {
-    let result = perform_request(
-        task.precheck_url.as_deref().unwrap_or(""),
-        task.precheck_method.as_deref().unwrap_or("GET"),
+/// 前置 curl：与正常执行完全相同的构造 + 传输链路（request_spec / execute_request）。
+async fn run_precheck(task: &TaskRow, cancel: &CancellationToken) -> PrecheckRun {
+    let spec = request_spec_of(
+        task.precheck_url.as_deref(),
+        task.precheck_method.as_deref(),
         task.precheck_headers.as_deref(),
         task.precheck_body.as_deref(),
-        cancel,
-        &parse_request_options(task.precheck_options.as_deref()),
-        config.request_timeout_ms,
-        config.log_body_limit_bytes,
-        crate::db::get_skip_tls_verify(),
-    )
-    .await;
+        task.precheck_options.as_deref(),
+    );
+    let result = execute_request(&spec, cancel, None).await;
     let verdict = evaluate_precheck(&PrecheckInput {
         status: result.status,
         body: Some(&result.body),
@@ -1035,5 +1156,47 @@ mod tests {
         for _ in 0..50 {
             assert!(retry_jitter_ms() < 80);
         }
+    }
+
+    #[test]
+    fn classify_notify_only_accepts_2xx() {
+        // 2xx → 已发送。
+        assert_eq!(classify_notify(Some(200), None, false), (true, None));
+        assert_eq!(classify_notify(Some(204), None, false), (true, None));
+        // 500 → 未发送，原因带状态码。
+        let (sent, reason) = classify_notify(Some(500), None, false);
+        assert!(!sent);
+        assert!(reason.unwrap().contains("500"));
+        // 网络/超时错误 → 未发送，原因是错误本身。
+        let (sent, reason) = classify_notify(None, Some("请求超时（30000 ms）"), false);
+        assert!(!sent);
+        assert!(reason.unwrap().contains("请求超时"));
+        // 中断 / 无响应。
+        let (sent, _) = classify_notify(None, None, true);
+        assert!(!sent);
+        let (sent, reason) = classify_notify(None, None, false);
+        assert!(!sent);
+        assert!(reason.unwrap().contains("没有拿到响应"));
+    }
+
+    #[test]
+    fn request_spec_falls_back_on_broken_data() {
+        // 坏头部 JSON / 坏选项 JSON：与历史行为一致（忽略头部、回退默认选项）。
+        let spec = request_spec("http://x", "GET", Some("{bad"), Some("b"), Some("{"));
+        assert!(spec.headers.is_empty());
+        assert_eq!(spec.body.as_deref(), Some("b"));
+        assert_eq!(spec.options, Some(RequestOptions::default()));
+        // 正常数据原样保留。
+        let spec = request_spec(
+            "http://x",
+            "POST",
+            Some(r#"{"A":"1"}"#),
+            None,
+            Some(r#"{"timeoutMs":1234,"insecure":true}"#),
+        );
+        assert_eq!(spec.headers["A"], Json::from("1"));
+        let options = spec.options.unwrap();
+        assert_eq!(options.timeout_ms, Some(1234));
+        assert_eq!(options.insecure, Some(true));
     }
 }

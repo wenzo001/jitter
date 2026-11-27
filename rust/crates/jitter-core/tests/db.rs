@@ -843,3 +843,180 @@ fn database_browser_lists_tables_and_rows() {
     cleanup(&path);
     close_db();
 }
+
+#[test]
+fn new_databases_verify_tls_and_record_the_schema_version() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = std::path::Path::new(&dir).join("app.db").to_string_lossy().to_string();
+    init_db(Some(&path)).expect("init");
+
+    assert_eq!(get_schema_version().expect("schema version"), SCHEMA_VERSION);
+    assert!(!get_skip_tls_verify(), "新安装默认验证 TLS 证书");
+    create_task(&task_input("new tls"), "t1", 1000).expect("create");
+
+    close_db();
+    init_db(Some(&path)).expect("reopen");
+    assert!(!get_skip_tls_verify(), "新库重开后仍必须验证 TLS 证书");
+    let task = get_task("t1").expect("read").expect("exists");
+    let options: serde_json::Value =
+        serde_json::from_str(task.request_options.as_deref().expect("options")).expect("options json");
+    assert!(options.get("insecure").is_none(), "新库任务不能被注入 insecure=true");
+
+    cleanup(&path);
+    close_db();
+}
+
+#[test]
+fn upgrading_a_legacy_database_preserves_its_tls_behavior() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = std::path::Path::new(&dir).join("app.db").to_string_lossy().to_string();
+    init_db(Some(&path)).expect("init");
+    create_task(&task_input("legacy tls"), "t1", 1000).expect("create");
+    close_db();
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open legacy");
+        conn.execute_batch(
+            "PRAGMA user_version = 0;
+             UPDATE tasks SET request_options = '{\"redirect\":\"follow\"}',
+                             precheck_options = '{\"insecure\":false}', notify_options = '{}'
+              WHERE id = 't1';
+             DELETE FROM settings WHERE key = 'skipTlsVerify';",
+        )
+        .expect("seed legacy metadata");
+    }
+
+    init_db(Some(&path)).expect("upgrade");
+    let task = get_task("t1").expect("read").expect("exists");
+    let options: serde_json::Value =
+        serde_json::from_str(task.request_options.as_deref().expect("options"))
+            .expect("options json");
+    assert_eq!(options.get("insecure"), Some(&serde_json::json!(true)));
+    assert_eq!(options.get("redirect"), Some(&serde_json::json!("follow")));
+    let precheck: serde_json::Value =
+        serde_json::from_str(task.precheck_options.as_deref().expect("precheck options"))
+            .expect("precheck options json");
+    assert_eq!(precheck.get("insecure"), Some(&serde_json::json!(false)));
+    let notify: serde_json::Value =
+        serde_json::from_str(task.notify_options.as_deref().expect("notify options"))
+            .expect("notify options json");
+    assert_eq!(notify.get("insecure"), Some(&serde_json::json!(true)));
+    assert_eq!(get_schema_version().expect("schema version"), SCHEMA_VERSION);
+
+    cleanup(&path);
+    close_db();
+}
+
+#[test]
+fn upgrading_a_legacy_database_skips_non_object_option_json() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = std::path::Path::new(&dir).join("app.db").to_string_lossy().to_string();
+    init_db(Some(&path)).expect("init");
+    create_task(&task_input("legacy scalar options"), "t1", 1000).expect("create");
+    close_db();
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open legacy");
+        conn.execute_batch(
+            "PRAGMA user_version = 0;
+             UPDATE tasks SET request_options = '[]',
+                             precheck_options = '\"legacy\"', notify_options = 'null'
+              WHERE id = 't1';
+             DELETE FROM settings WHERE key = 'skipTlsVerify';",
+        )
+        .expect("seed legacy metadata");
+    }
+
+    init_db(Some(&path)).expect("non-object JSON must not panic migration");
+    let task = get_task("t1").expect("read").expect("exists");
+    assert_eq!(task.request_options.as_deref(), Some("[]"));
+    assert_eq!(task.precheck_options.as_deref(), Some("\"legacy\""));
+    assert_eq!(task.notify_options.as_deref(), Some("null"));
+
+    cleanup(&path);
+    close_db();
+}
+
+#[test]
+fn a_newer_database_is_rejected_without_being_migrated() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = std::path::Path::new(&dir).join("app.db").to_string_lossy().to_string();
+    init_db(Some(&path)).expect("init");
+    close_db();
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open future db");
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .expect("future version");
+    }
+
+    let error = init_db(Some(&path)).expect_err("newer schema must be rejected");
+    assert!(error.0.contains("版本"), "错误应说明数据库版本不兼容：{error}");
+    let conn = rusqlite::Connection::open(&path).expect("inspect");
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read version");
+    assert_eq!(version, SCHEMA_VERSION + 1, "拒绝时不能改写未来数据库");
+
+    cleanup(&path);
+    close_db();
+}
+
+#[test]
+fn a_failed_migration_rolls_back_added_columns() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = std::path::Path::new(&dir).join("app.db").to_string_lossy().to_string();
+    init_db(Some(&path)).expect("init");
+    create_task(&task_input("rollback"), "t1", 1000).expect("create");
+    close_db();
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open broken migration");
+        conn.execute_batch(
+            "PRAGMA user_version = 0;
+             ALTER TABLE tasks DROP COLUMN precheck_day_type;
+             UPDATE tasks SET schedule_kind = 'broken' WHERE id = 't1';
+             CREATE TRIGGER fail_schedule_migration
+             BEFORE UPDATE OF schedule_kind ON tasks
+             BEGIN SELECT RAISE(ABORT, 'migration fixture failure'); END;",
+        )
+        .expect("seed failing migration");
+    }
+
+    assert!(init_db(Some(&path)).is_err(), "迁移失败必须返回错误");
+    let conn = rusqlite::Connection::open(&path).expect("inspect rollback");
+    let has_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'precheck_day_type'")
+        .expect("query columns")
+        .exists([])
+        .expect("exists");
+    assert!(!has_column, "失败事务必须回滚本次新增列");
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read version");
+    assert_eq!(version, 0, "失败迁移不能标成新版本");
+
+    cleanup(&path);
+    close_db();
+}
+
+#[test]
+fn copied_tasks_can_be_created_stopped() {
+    let dir = temp_dir();
+    let _db_guard = DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = std::path::Path::new(&dir).join("app.db").to_string_lossy().to_string();
+    init_db(Some(&path)).expect("init");
+    let mut input = task_input("copy");
+    input.status = Some("stopped".to_string());
+
+    let task = create_task(&input, "copy1", 1000).expect("create copy");
+    assert_eq!(task.status, "stopped");
+    assert_eq!(task.next_run_at, None);
+
+    cleanup(&path);
+    close_db();
+}

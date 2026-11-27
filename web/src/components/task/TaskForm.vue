@@ -4,6 +4,7 @@ import type { TaskFormModel, FormErrors } from '@/types/form'
 import type { TaskPayload, SchedulePreviewResponse } from '@/types/task'
 import { emptyFormModel, formModelFromTask, copiedTaskName } from '@/types/form'
 import { createTask, updateTask, previewSchedule } from '@/api/tasks'
+import { localizeBackendMessage } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import { useTasksStore } from '@/stores/tasks'
 import { formatShortTime, formatClockSecond, hhmm } from '@/utils/format'
@@ -37,6 +38,10 @@ const errors = ref<FormErrors>({})
 const submitting = ref(false)
 const editingId = ref<string | null>(null)
 const editingName = ref('')
+/** 保存请求失败时显示在对话框内的错误（不能只写全局状态行）。 */
+const submitError = ref('')
+/** 当前表单是从已有任务「复制」来的草稿：提交时默认停用。 */
+const copyDraft = ref(false)
 
 const dirty = computed(() => JSON.stringify(model.value) !== baseline.value)
 
@@ -177,6 +182,8 @@ function loadTask(task: Task) {
     editingId.value = task.id
     editingName.value = task.name
     errors.value = {}
+    submitError.value = ''
+    copyDraft.value = false
     baseline.value = JSON.stringify(model.value)
     if (hasExpected(model.value)) expectOpen.value = ['expect']
     precheckOn.value = task.precheck_enabled === 1
@@ -204,6 +211,8 @@ function loadDraft(task: Task) {
     editingId.value = null
     editingName.value = ''
     errors.value = {}
+    submitError.value = ''
+    copyDraft.value = true
     expectOpen.value = hasExpected(model.value) ? ['expect'] : []
     precheckOn.value = task.precheck_enabled === 1
     // 复制来的内容就是这次的起点：不改动不算「有未保存的修改」。
@@ -227,6 +236,8 @@ function resetForm(statusText?: string) {
   editingId.value = null
   editingName.value = ''
   errors.value = {}
+  submitError.value = ''
+  copyDraft.value = false
   expectOpen.value = []
   precheckOn.value = false
   applyDefaultWindow()
@@ -309,16 +320,19 @@ function previewPayload(): Record<string, unknown> | null {
 
 function schedulePreview() {
   window.clearTimeout(previewTimer)
+  previewEpoch += 1
+  preview.value = null
+  if (!previewPayload()) return
   previewTimer = window.setTimeout(() => void refreshPreview(), 300)
 }
 
 async function refreshPreview() {
+  const epoch = (previewEpoch += 1)
   const payload = previewPayload()
   if (!payload) {
     preview.value = null
     return
   }
-  const epoch = (previewEpoch += 1)
   try {
     const data = await previewSchedule(payload as never)
     if (epoch === previewEpoch) preview.value = data
@@ -532,6 +546,9 @@ function buildPayload(): TaskPayload {
 
   if (value.notifyEnabled) payload.notify_curl = value.notifyCurl.trim()
 
+  // 复制出来的新任务默认停用：确认无误后再手动启用，避免立刻产生真实请求。
+  if (copyDraft.value && !editingId.value) payload.status = 'stopped'
+
   // null = 跟随全局设置；0 = 永久保留。
   payload.log_retention_days = value.logRetentionDays
 
@@ -544,6 +561,7 @@ function buildPayload(): TaskPayload {
 
 async function submit() {
   if (submitting.value) return
+  submitError.value = ''
   const found = validate()
   errors.value = found
   const keys = Object.keys(found)
@@ -577,6 +595,8 @@ async function submit() {
     emit('close')
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
+    // 错误必须留在对话框里：弹窗开着的时候全局状态行既看不见也来不及读。
+    submitError.value = localizeBackendMessage(message)
     app.setStatus(message, true)
   } finally {
     submitting.value = false
@@ -647,12 +667,38 @@ defineExpose({
   submitting,
   editingId,
   footerHint,
+  model,
+  precheckOn,
+  copyDraft,
+  submitError,
 })
 </script>
 
 <template>
   <div class="task-form-shell">
     <form class="task-form" novalidate @submit.prevent="submit">
+      <!-- 保存失败：错误留在对话框里（弹窗遮住顶栏时全局状态行看不到）。 -->
+      <a-alert
+        v-if="submitError"
+        class="form-submit-alert"
+        type="error"
+        show-icon
+        closable
+        role="alert"
+        style="margin-bottom: 12px"
+        :message="submitError"
+        @close="submitError = ''"
+      />
+      <!-- 复制任务：明确告知默认停用，确认后再启用。 -->
+      <a-alert
+        v-if="copyDraft"
+        class="form-copy-alert"
+        type="warning"
+        show-icon
+        style="margin-bottom: 12px"
+        :message="$t('taskForm.copyHint')"
+      />
+
       <!-- 1. 请求 -->
       <section class="form-section">
         <div class="section-head">

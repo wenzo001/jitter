@@ -242,32 +242,39 @@ fn open_existing_instance() {
 /// 互斥体名**按实例区分**（`Local\JitterSingleInstance-prod` / `-dev`），
 /// 所以不同实例各自互斥、实例之间互不干扰。
 #[cfg(windows)]
-fn acquire_single_instance() -> bool {
+fn acquire_single_instance() -> std::io::Result<bool> {
     #[link(name = "kernel32")]
     extern "system" {
         fn CreateMutexW(attributes: *const std::ffi::c_void, initial_owner: i32, name: *const u16) -> isize;
         fn GetLastError() -> u32;
     }
-    const ERROR_ALREADY_EXISTS: u32 = 183;
     let mut name: Vec<u16> = jitter_core::instance::single_instance_mutex_name()
         .encode_utf16()
         .collect();
     name.push(0);
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
     let last_error = unsafe { GetLastError() };
-    if handle == 0 {
-        // 创建失败就不拦，宁可多开也不让程序起不来。
-        return true;
+    if !mutex_creation_succeeded(handle, last_error)? {
+        return Ok(false);
     }
     // 句柄故意不关闭：互斥体要活到进程结束。
-    // （isize 是 Copy 类型，mem::forget 对它没有作用，这里只是明确表达意图。）
     let _ = handle;
-    last_error != ERROR_ALREADY_EXISTS
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn mutex_creation_succeeded(handle: isize, last_error: u32) -> std::io::Result<bool> {
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    if handle == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(last_error != ERROR_ALREADY_EXISTS)
+    }
 }
 
 #[cfg(not(windows))]
-fn acquire_single_instance() -> bool {
-    true
+fn acquire_single_instance(db_path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    jitter_core::instance::acquire_file_lock(&db_path.to_path_buf(), &jitter_core::instance::instance_name())
 }
 
 /// 读取指定路径的配置文件。
@@ -371,14 +378,39 @@ async fn run(config: jitter_core::config::AppConfig) -> anyhow::Result<()> {
     let allow_multi = std::env::var("JITTER_ALLOW_MULTI_INSTANCE")
         .map(|value| value.trim() == "1")
         .unwrap_or(false);
-    if !allow_multi && !acquire_single_instance() {
-        tracing::info!("检测到已有 Jitter 实例，打开它的界面后退出");
-        open_existing_instance();
-        std::process::exit(0);
+    let db_path = config.db_path.clone();
+    #[cfg(not(windows))]
+    let _unix_instance_lock = if !allow_multi {
+        match acquire_single_instance(std::path::Path::new(&db_path)) {
+            Ok(Some(lock)) => Some(lock),
+            Ok(None) => {
+                tracing::info!("检测到已有 Jitter 实例，打开它的界面后退出");
+                open_existing_instance();
+                std::process::exit(0);
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!("无法创建单实例锁，已停止启动：{error}"));
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    if !allow_multi {
+        match acquire_single_instance() {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!("检测到已有 Jitter 实例，打开它的界面后退出");
+                open_existing_instance();
+                std::process::exit(0);
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!("无法创建单实例锁，已停止启动：{error}"));
+            }
+        }
     }
 
     // 数据库。
-    let db_path = config.db_path.clone();
     jitter_core::db::init_db(Some(&db_path))?;
     tracing::info!("数据库: {db_path}");
     tracing::info!(
@@ -449,6 +481,20 @@ async fn run(config: jitter_core::config::AppConfig) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn mutex_creation_failure_is_an_error_not_an_acquired_lock() {
+        let result = mutex_creation_succeeded(0, 5);
+        assert!(result.is_err(), "CreateMutexW 失败不能当成抢锁成功");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_existing_mutex_is_distinguished_from_a_new_mutex() {
+        assert!(!mutex_creation_succeeded(1, 183).expect("existing mutex"));
+        assert!(mutex_creation_succeeded(1, 0).expect("new mutex"));
+    }
 
     #[test]
     fn a_broken_config_keeps_its_own_directory_as_the_data_base() {

@@ -67,4 +67,37 @@ describe('components/logs/LogRow', () => {
     expect(wrapper.emitted('select')).toBeFalsy()
     wrapper.unmount()
   })
+
+  it('通知 HTTP 500 即使没有传输错误也显示失败', () => {
+    const wrapper = mount(LogRow, {
+      props: {
+        log: logOf({
+          response_status: 200,
+          matched: 1,
+          notify: logOf({ id: 2, kind: 'notify', response_status: 500, error: null }),
+        }),
+      },
+      global: { plugins: [i18n] },
+    })
+
+    expect(wrapper.find('.notify-tag').text()).toBe('通知失败')
+    expect(wrapper.find('.notify-tag').classes()).toContain('ant-tag-error')
+    wrapper.unmount()
+  })
+
+  it('通知只有 HTTP 2xx 才显示已通知', () => {
+    const wrapper = mount(LogRow, {
+      props: {
+        log: logOf({
+          response_status: 200,
+          matched: 1,
+          notify: logOf({ id: 2, kind: 'notify', response_status: 204, error: null }),
+        }),
+      },
+      global: { plugins: [i18n] },
+    })
+
+    expect(wrapper.find('.notify-tag').text()).toBe('已通知')
+    wrapper.unmount()
+  })
 })

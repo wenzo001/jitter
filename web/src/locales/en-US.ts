@@ -77,6 +77,8 @@ const enUS: MessageSchema = {
     parseFailed: 'The backend returned content that could not be parsed',
     timeoutMessage: 'Request timed out, the service may still be working — refresh in a moment',
     networkMessage: 'Cannot reach the backend service, please make sure Jitter is still running',
+    /* Fixed Chinese backend error mapped to UI locale (see api/client.ts localizeBackendMessage). */
+    backendTaskNotFound: 'Task not found (it may have been deleted); refresh the list to try again',
   },
   app: {
     mainArea: 'Main interface',
@@ -92,7 +94,7 @@ const enUS: MessageSchema = {
     editTitle: 'Edit task · {name}',
     editingStatus: 'Editing task “{name}”',
     copyTitle: 'Duplicate task',
-    copiedStatus: 'Copied the configuration of task “{name}”; change the name to create the new task',
+    copiedStatus: 'Copied the configuration of task “{name}”; the copy starts stopped — rename it, review, then enable it',
     orderSaved: 'Task order saved',
     empty:
       'No tasks yet. Click “New task” in the top right, paste your curl, try it once to make sure it works, then pick a schedule and save.',
@@ -141,11 +143,13 @@ const enUS: MessageSchema = {
     runSkipped: 'Task “{name}” was skipped by its execution conditions',
     runDone: 'Task “{name}” ran once',
     runNotified: 'Succeeded and notified',
+    runNotifyFailed: 'Notification failed: {error}',
+    runNotifyStatus: 'Notification returned HTTP {status}',
     conditionNotMet: 'Success condition not met',
     runTimeout:
       'Task “{name}” did not return within 60 seconds and the wait was aborted; the backend may still be running it — refresh the execution records in a moment',
     stopContent:
-      'After stopping, task “{name}” no longer runs automatically; the execution records are kept and you can re-enable it at any time.',
+      'Stopping only blocks future scheduled runs of task “{name}”; it does not interrupt a request that is currently in flight. Records are kept and you can re-enable it at any time.',
     scheduleDisabled: 'Schedule disabled',
     scheduleEnabled: 'Schedule enabled',
     pauseCancelled: 'Pause cancelled, scheduled execution resumed',
@@ -155,6 +159,7 @@ const enUS: MessageSchema = {
     createTask: 'Create task',
     /** Suffix appended to the original name when duplicating a task. */
     copySuffix: ' (copy)',
+    copyHint: 'The copy starts stopped — rename it, review the settings, then enable it.',
     sectionRequest: 'Request',
     sectionRequestDesc:
       'Paste your curl, or fill in the URL / method / headers / body by hand. Not sure it works? Try it first.',
@@ -418,6 +423,7 @@ const enUS: MessageSchema = {
     emptyNoSelection: 'Click any task card to see its execution records',
     emptyNoRecords: 'This task has no execution records yet. Scheduled runs will appear here.',
     emptyNoMatch: 'No records match the current filter.',
+    loadFailed: 'Failed to load execution records: {error}',
     filterAll: 'All',
     filterSuccess: 'Succeeded',
     filterFailed: 'Failed',
@@ -852,6 +858,8 @@ const enUS: MessageSchema = {
     contentAfter: '” and all of its history and test-run records will be permanently deleted.',
     warning:
       'This cannot be undone. If you want to keep the data, create a backup under “Settings → Backup” first.',
+    runningWarning:
+      'This task is running or may still be running: deleting may interrupt the request in flight and leave this run’s result unverifiable.',
     confirmLabel: 'Type the task name to confirm:',
     statusDeleted: 'Deleted task “{name}” and its {count} log entries',
   },

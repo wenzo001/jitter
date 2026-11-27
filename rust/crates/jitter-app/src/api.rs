@@ -5,8 +5,9 @@
 use crate::scheduler;
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, Request};
 use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json as AxumJson, Router};
@@ -37,6 +38,9 @@ use crate::ACTUAL_PORT;
 
 /// 进程启动时刻（健康检查里回报运行时长）。
 static STARTED_AT: OnceLock<Instant> = OnceLock::new();
+
+/// 恢复备份时独占持有；所有写请求共享持有，避免在换库期间写旧库或新库。
+static RESTORE_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 /// 结果筛选模式下一次最多返回多少条记录。
 ///
@@ -523,8 +527,15 @@ fn parse_task_input(body: &Json) -> Result<NewTaskInput, String> {
         }
     }
 
+    let status = match object.get("status").and_then(|value| value.as_str()) {
+        None | Some("active") => None,
+        Some("stopped") => Some("stopped".to_string()),
+        Some(_) => return Err("任务状态只能是 active 或 stopped".to_string()),
+    };
+
     Ok(NewTaskInput {
         name,
+        status,
         curl_command,
         request: request_parts(&spec),
         window_start,
@@ -669,20 +680,35 @@ async fn update_task(Path(id): Path<String>, AxumJson(body): AxumJson<Json>) -> 
         Ok(input) => input,
         Err(message) => return bad_request(message),
     };
+    scheduler::block_task_runs(&id);
     match db::update_task_config(&id, &input, executor::now_ms()) {
         Ok(Some(task)) => {
+            #[cfg(test)]
+            crate::api::tests::lifecycle_test_gate().await;
             scheduler::schedule_new_task(&task.id);
+            scheduler::finish_task_transition(&id);
             AxumJson(json!({ "task": task_view(&task) })).into_response()
         }
-        Ok(None) => not_found(),
-        Err(error) => bad_request(error.0),
+        Ok(None) => {
+            scheduler::finish_task_transition(&id);
+            not_found()
+        }
+        Err(error) => {
+            scheduler::finish_task_transition(&id);
+            scheduler::schedule_new_task(&id);
+            bad_request(error.0)
+        }
     }
 }
 
 async fn delete_task(Path(id): Path<String>) -> Response {
+    scheduler::block_task_runs(&id);
+    #[cfg(test)]
+    crate::api::tests::lifecycle_test_gate().await;
     match db::delete_task(&id) {
         Ok(outcome) if outcome.deleted => {
             scheduler::cancel_task(&id);
+            scheduler::finish_task_transition(&id);
             AxumJson(json!({
                 "ok": true,
                 "id": id,
@@ -691,15 +717,24 @@ async fn delete_task(Path(id): Path<String>) -> Response {
             }))
             .into_response()
         }
-        Ok(_) => not_found(),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
+        Ok(_) => {
+            scheduler::finish_task_transition(&id);
+            not_found()
+        }
+        Err(error) => {
+            scheduler::finish_task_transition(&id);
+            scheduler::schedule_new_task(&id);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0)
+        }
     }
 }
 
 async fn stop_task(Path(id): Path<String>) -> Response {
     match db::get_task(&id) {
         Ok(Some(task)) if task.status == "active" => {
-            scheduler::cancel_task(&id);
+            scheduler::block_task_runs(&id);
+            #[cfg(test)]
+            crate::api::tests::lifecycle_test_gate().await;
             match db::update_task_status(
                 &id,
                 jitter_core::types::TaskStatus::Stopped,
@@ -707,6 +742,7 @@ async fn stop_task(Path(id): Path<String>) -> Response {
                 executor::now_ms(),
             ) {
                 Ok(()) => {
+                    scheduler::finish_task_transition(&id);
                     // TS 版停止时一并清掉暂停区间。
                     if task.paused_until.is_some() {
                         let _ = db::set_task_pause(&id, None, None, executor::now_ms());
@@ -714,7 +750,11 @@ async fn stop_task(Path(id): Path<String>) -> Response {
                     let task = db::get_task(&id).ok().flatten().unwrap_or(task);
                     AxumJson(json!({ "task": task_view(&task) })).into_response()
                 }
-                Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0),
+                Err(error) => {
+                    scheduler::finish_task_transition(&id);
+                    scheduler::schedule_new_task(&id);
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, error.0)
+                }
             }
         }
         Ok(Some(task)) => AxumJson(json!({ "task": task_view(&task) })).into_response(),
@@ -749,18 +789,28 @@ async fn start_task(Path(id): Path<String>) -> Response {
 }
 
 async fn run_task(Path(id): Path<String>) -> Response {
-    let Some(task) = db::get_task(&id).ok().flatten() else {
+    if db::get_task(&id).ok().flatten().is_none() {
         return not_found();
-    };
-    if !scheduler::try_begin_run(&id) {
-        return conflict("任务正在执行中，请等它结束再试");
     }
+    let Some((run, task)) = scheduler::begin_task_run(
+        &id,
+        tokio_util::sync::CancellationToken::new(),
+        scheduler::RunAdmission::Manual,
+    ) else {
+        return conflict("任务正在执行中，请等它结束再试");
+    };
     // 与 TS 版一致：同步执行，返回完整结果（页面显示判定与耗时）。
-    let cancel = tokio_util::sync::CancellationToken::new();
-    scheduler::register_running(&id, cancel.clone());
-    let outcome =
-        executor::execute_task_run(&task, &cancel, jitter_core::types::RunSource::Manual).await;
-    scheduler::finish_run(&id);
+    let outcome = executor::execute_task_run(
+        &task,
+        &run.cancel,
+        jitter_core::types::RunSource::Manual,
+    )
+    .await;
+    drop(run);
+    run_response(outcome)
+}
+
+fn run_response(outcome: executor::RunOutcome) -> Response {
     AxumJson(json!({
         "ok": true,
         "status": outcome.status,
@@ -769,7 +819,9 @@ async fn run_task(Path(id): Path<String>) -> Response {
         "error": outcome.error,
         "aborted": outcome.aborted,
         "durationMs": outcome.duration_ms,
-        "notifySent": outcome.notify_log_id.is_some(),
+        "notifySent": outcome.notify_sent,
+        "notifyStatus": outcome.notify_status,
+        "notifyError": outcome.notify_error,
     }))
     .into_response()
 }
@@ -793,7 +845,7 @@ async fn pause_task(Path(id): Path<String>, AxumJson(body): AxumJson<Json>) -> R
     let pause = jitter_core::window::pause_interval(now, days, starts_today);
     match db::get_task(&id) {
         Ok(Some(task)) if task.status == "active" => {
-            scheduler::cancel_task(&id);
+            scheduler::cancel_schedule(&id);
             let stored = StoredSchedule {
                 schedule_kind: Some(task.schedule_kind.clone()),
                 window_start: Some(task.window_start.clone()),
@@ -853,7 +905,7 @@ async fn resume_task(Path(id): Path<String>) -> Response {
             };
             match jitter_core::schedule::plan_schedule_new(now, &spec, None, &mut rand_thread()) {
                 Ok(target) => {
-                    scheduler::cancel_task(&id);
+                    scheduler::cancel_schedule(&id);
                     let _ = db::set_task_pause(&id, None, Some(target), now);
                     scheduler::schedule_resume(&id, target);
                 }
@@ -1496,14 +1548,22 @@ async fn test_run_detail(Path(id): Path<String>) -> Response {
 
 /// 健康检查：顺带回报运行时长、路径与最近一次错误，界面据此提示用户。
 async fn health() -> Response {
+    health_response(db::list_tasks().is_ok())
+}
+
+fn health_response(db_ok: bool) -> Response {
     let config = get_active_config();
     let last_error = last_error_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    let db_ok = db::list_tasks().is_ok();
-    AxumJson(json!({
-        "ok": true,
+    let status = if db_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, AxumJson(json!({
+        "ok": db_ok,
         "now": executor::now_ms(),
         "version": jitter_core::VERSION,
         "uptimeMs": started_at().elapsed().as_millis() as u64,
@@ -1514,7 +1574,7 @@ async fn health() -> Response {
             Some((at, message)) => json!({ "at": at, "message": message }),
             None => Json::Null,
         },
-    }))
+    })))
     .into_response()
 }
 
@@ -1741,43 +1801,116 @@ async fn backup_delete(AxumJson(body): AxumJson<BackupNameBody>) -> Response {
     }
 }
 
-/// 恢复备份：停调度 → 关库 → 换文件 → 重新初始化 → 重启调度。
-/// api 层已经先做好当前状态的安全快照（prepare_restore）。
+async fn restart_service_after_restore(db_path: &str) -> Result<(), String> {
+    db::init_db(Some(db_path)).map_err(|error| format!("数据库重新打开失败：{error}"))?;
+    scheduler::start()
+        .await
+        .map_err(|error| format!("调度重新启动失败：{error:#}"))?;
+    Ok(())
+}
+
+fn restore_failure(
+    restore_error: &str,
+    rollback: Result<bool, String>,
+    recovery: Result<(), String>,
+) -> (StatusCode, String) {
+    let (status, message) = match rollback {
+        Ok(true) => (
+            StatusCode::CONFLICT,
+            format!("恢复失败，数据库已回滚：{restore_error}"),
+        ),
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            format!("恢复失败，且没有可回滚副本：{restore_error}"),
+        ),
+        Err(rollback_error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("恢复失败，回滚也失败：{restore_error}；{rollback_error}"),
+        ),
+    };
+    match recovery {
+        Ok(()) => (status, message),
+        Err(recovery_error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{message}；服务恢复失败：{recovery_error}。请重启 Jitter 后再检查数据。"),
+        ),
+    }
+}
+
+/// 恢复备份：校验 → 停调度 → 安全快照 → 关库 → 换文件 → 重新初始化 → 重启调度。
 async fn backup_restore(AxumJson(body): AxumJson<BackupNameBody>) -> Response {
     let Some(name) = body.name.filter(|value| !value.is_empty()) else {
         return bad_request("缺少 name");
     };
+    let _restore_permit = RESTORE_GATE.write().await;
     let db_path = current_db_path();
     let db_path_string = get_active_config().db_path.clone();
-    let plan = match backup::prepare_restore(&db_path, &name, backup::now_ms()) {
-        Ok(plan) => plan,
+    let backup_path = match backup::validate_restore_backup(&db_path, &name) {
+        Ok(path) => path,
         Err(error) => return bad_request(error.0),
     };
 
-    let restored: anyhow::Result<()> = async {
-        scheduler::stop().await;
-        db::close_db();
-        backup::swap_database(&db_path, &plan.backup_path)?;
-        db::init_db(Some(&db_path_string))?;
-        scheduler::start().await?;
-        anyhow::Ok(())
+    scheduler::stop().await;
+    let safety_name = match backup::create_backup(&db_path, backup::now_ms()) {
+        Ok(safety) => safety.name,
+        Err(error) => {
+            let recovery = restart_service_after_restore(&db_path_string).await;
+            let (status, message) = match recovery {
+                Ok(()) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("恢复失败，无法创建安全快照：{}", error.0),
+                ),
+                Err(recovery_error) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "恢复失败，无法创建安全快照：{}；服务恢复失败：{recovery_error}。请重启 Jitter 后再检查数据。",
+                        error.0
+                    ),
+                ),
+            };
+            return error_response(status, message);
+        }
+    };
+    db::close_db();
+    if let Err(error) = backup::swap_database_with_version(
+        &db_path,
+        &backup_path,
+        db::SCHEMA_VERSION,
+    ) {
+        if let Err(recovery_error) = restart_service_after_restore(&db_path_string).await {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "恢复失败：{}；服务恢复失败：{recovery_error}。请重启 Jitter 后再检查数据。",
+                    error.0
+                ),
+            );
+        }
+        return conflict(error.0);
     }
-    .await;
+
+    let restored: Result<(), String> = restart_service_after_restore(&db_path_string).await;
 
     match restored {
-        Ok(()) => AxumJson(json!({
-            "ok": true,
-            "message": format!("已恢复 {name}；恢复前的数据保存在 {}", plan.safety_name),
-            "safety_backup": plan.safety_name,
-        }))
-        .into_response(),
-        Err(error) => {
-            tracing::error!("恢复备份失败: {error:#}");
-            // 至少让服务回到可用状态。
-            if db::init_db(Some(&db_path_string)).is_ok() {
-                let _ = scheduler::start().await;
+        Ok(()) => {
+            if let Err(error) = backup::finalize_swap(&db_path) {
+                tracing::warn!("恢复成功，但清理安全副本失败: {error}");
             }
-            error_response(StatusCode::CONFLICT, error.to_string())
+            AxumJson(json!({
+                "ok": true,
+                "message": format!("已恢复 {name}；恢复前的数据保存在 {}", safety_name),
+                "safety_backup": safety_name,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::error!("恢复备份失败，正在回滚: {error}");
+            scheduler::stop().await;
+            db::close_db();
+            let rollback = backup::rollback_swap(&db_path).map_err(|error| error.0);
+            let recovery = restart_service_after_restore(&db_path_string).await;
+            let (status, message) = restore_failure(&error, rollback, recovery);
+            error_response(status, message)
         }
     }
 }
@@ -1853,6 +1986,106 @@ fn rand_thread() -> impl FnMut() -> f64 {
     }
 }
 
+fn split_host_port(value: &str) -> Option<(&str, Option<u16>)> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(['/', '@', '?', '#']) || value.chars().any(char::is_whitespace) {
+        return None;
+    }
+    if let Some(rest) = value.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = &rest[..end];
+        let suffix = &rest[end + 1..];
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.strip_prefix(':')?.parse::<u16>().ok()?)
+        };
+        return Some((host, port));
+    }
+    match value.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => Some((host, Some(port.parse::<u16>().ok()?))),
+        Some(_) => None,
+        None => Some((value, None)),
+    }
+}
+
+fn host_is_allowed(host_header: &str, bound_host: &str, actual_port: u16) -> bool {
+    let Some((host, port)) = split_host_port(host_header) else {
+        return false;
+    };
+    if port.unwrap_or(80) != actual_port {
+        return false;
+    }
+    let host = host.trim_matches('[').trim_matches(']').to_ascii_lowercase();
+    let bound = bound_host.trim_matches('[').trim_matches(']').to_ascii_lowercase();
+    let loopback = matches!(bound.as_str(), "localhost" | "127.0.0.1" | "::1");
+    if loopback {
+        return matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
+    }
+    if matches!(bound.as_str(), "0.0.0.0" | "::") {
+        return host.parse::<std::net::IpAddr>().is_ok_and(|ip| !ip.is_unspecified());
+    }
+    host == bound
+}
+
+fn origin_is_allowed(origin: &str, host_header: &str) -> bool {
+    let Some(authority) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
+    let Some((origin_host, origin_port)) = split_host_port(authority) else {
+        return false;
+    };
+    let Some((host, host_port)) = split_host_port(host_header) else {
+        return false;
+    };
+    origin_host.eq_ignore_ascii_case(host)
+        && origin_port.unwrap_or(80) == host_port.unwrap_or(80)
+}
+
+async fn local_boundary_middleware(request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let is_restore = path == "/api/backup/restore";
+    // 手动执行由调度器负责准入、取消与收尾，不能长期占住恢复写闸。
+    let is_scheduler_run = request.method() == axum::http::Method::POST
+        && path.starts_with("/api/tasks/")
+        && path.ends_with("/run");
+    let _write_permit = if request.method() != axum::http::Method::GET
+        && request.method() != axum::http::Method::HEAD
+        && !is_restore
+        && !is_scheduler_run
+    {
+        Some(RESTORE_GATE.read().await)
+    } else {
+        None
+    };
+    let config = get_active_config();
+    let port = ACTUAL_PORT.load(Ordering::Relaxed);
+    let Some(host) = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return (StatusCode::FORBIDDEN, "缺少 Host 请求头").into_response();
+    };
+    if !host_is_allowed(host, &config.host, port) {
+        return (StatusCode::FORBIDDEN, "Host 与本机监听地址不匹配").into_response();
+    }
+    if let Some(origin) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        if !origin_is_allowed(origin, host) {
+            return (StatusCode::FORBIDDEN, "Origin 与本机页面不匹配").into_response();
+        }
+    }
+    next.run(request).await
+}
+
 pub fn build_router() -> Router {
     Router::new()
         .route("/", get(index))
@@ -1903,11 +2136,877 @@ pub fn build_router() -> Router {
         .route("/api/update/apply", post(update_apply))
         // 备份导入可能携带大文件（数据库快照）。
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024))
+        .layer(middleware::from_fn(local_boundary_middleware))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) static TEST_CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    static LIFECYCLE_READY: Mutex<Option<tokio::sync::oneshot::Sender<()>>> = Mutex::new(None);
+    static LIFECYCLE_RELEASE: Mutex<Option<tokio::sync::oneshot::Receiver<()>>> = Mutex::new(None);
+
+    fn arm_lifecycle_gate() -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *LIFECYCLE_READY.lock().expect("lifecycle ready") = Some(ready_tx);
+        *LIFECYCLE_RELEASE.lock().expect("lifecycle release") = Some(release_rx);
+        (ready_rx, release_tx)
+    }
+
+    pub(crate) async fn lifecycle_test_gate() {
+        let release = LIFECYCLE_RELEASE.lock().expect("lifecycle release").take();
+        if let Some(release) = release {
+            let ready = LIFECYCLE_READY.lock().expect("lifecycle ready").take();
+            if let Some(ready) = ready {
+                let _ = ready.send(());
+            }
+            let _ = release.await;
+        }
+    }
+
+    async fn test_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let router = Router::new()
+            .route("/api/tasks", post(|| async { StatusCode::OK }))
+            .route("/api/backup/restore", post(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn(local_boundary_middleware));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (address, server)
+    }
+
+    async fn test_request(address: std::net::SocketAddr, method: &str, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.expect("read");
+        response
+    }
+
+    #[tokio::test]
+    async fn a_run_arriving_during_config_save_cannot_use_the_new_config_with_the_old_plan() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _serial = TEST_CONFIG_LOCK.lock().await;
+        let previous_config = get_active_config();
+        let dir = std::env::temp_dir().join(format!("jitter-config-race-{}", uuid()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db_path = dir.join("app.db");
+        let mut config = previous_config.clone();
+        config.db_path = db_path.to_string_lossy().to_string();
+        jitter_core::config::set_active_config(config);
+        db::init_db(Some(&db_path.to_string_lossy())).expect("init");
+        scheduler::start().await.expect("start scheduler");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let id = format!("config-race-{}", uuid());
+        db::create_task(
+            &NewTaskInput {
+                name: "config race".to_string(),
+                curl_command: Some(format!("curl http://{address}/")),
+                request: RequestParts {
+                    url: format!("http://{address}/"),
+                    method: "GET".to_string(),
+                    headers: Some("{}".to_string()),
+                    body: None,
+                    options: Some("{}".to_string()),
+                },
+                schedule_kind: Some("interval".to_string()),
+                interval_seconds: Some(60),
+                ..Default::default()
+            },
+            &id,
+            1000,
+        )
+        .expect("create task");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let fixture_requests = requests.clone();
+        let fixture = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                fixture_requests.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .await;
+            }
+        });
+
+        let (ready, release) = arm_lifecycle_gate();
+        let update_id = id.clone();
+        let updating = tokio::spawn(update_task(
+            Path(update_id),
+            AxumJson(json!({
+                "name": "config race",
+                "schedule_kind": "interval",
+                "interval_seconds": 300,
+                "curl": format!("curl http://{address}/")
+            })),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), ready)
+            .await
+            .expect("config save must reach the lifecycle gate")
+            .expect("config save ready");
+        let committed = db::get_task(&id).expect("read committed task").expect("task");
+        assert_eq!(committed.interval_seconds, Some(300));
+        let run = run_task(Path(id.clone())).await;
+        let _ = release.send(());
+        let update = updating.await.expect("update task");
+
+        fixture.abort();
+        scheduler::stop().await;
+        db::close_db();
+        jitter_core::config::set_active_config(previous_config);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(run.status(), StatusCode::CONFLICT, "新配置提交后、新计划安装前不得接纳执行");
+        assert_eq!(update.status(), StatusCode::OK);
+        assert_eq!(requests.load(Ordering::SeqCst), 0, "竞态请求不能到达目标服务");
+    }
+
+    #[tokio::test]
+    async fn a_run_arriving_during_stop_cannot_slip_past_the_status_change() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _serial = TEST_CONFIG_LOCK.lock().await;
+        let previous_config = get_active_config();
+        let dir = std::env::temp_dir().join(format!("jitter-stop-race-{}", uuid()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db_path = dir.join("app.db");
+        let mut config = previous_config.clone();
+        config.db_path = db_path.to_string_lossy().to_string();
+        jitter_core::config::set_active_config(config);
+        db::init_db(Some(&db_path.to_string_lossy())).expect("init");
+        scheduler::start().await.expect("start scheduler");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let id = format!("stop-race-{}", uuid());
+        db::create_task(
+            &NewTaskInput {
+                name: "stop race".to_string(),
+                curl_command: Some(format!("curl http://{address}/")),
+                request: RequestParts {
+                    url: format!("http://{address}/"),
+                    method: "GET".to_string(),
+                    headers: Some("{}".to_string()),
+                    body: None,
+                    options: Some("{}".to_string()),
+                },
+                schedule_kind: Some("interval".to_string()),
+                interval_seconds: Some(60),
+                ..Default::default()
+            },
+            &id,
+            1000,
+        )
+        .expect("create task");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let fixture_requests = requests.clone();
+        let fixture = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                fixture_requests.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .await;
+            }
+        });
+
+        let (ready, release) = arm_lifecycle_gate();
+        let stop_id = id.clone();
+        let stopping = tokio::spawn(stop_task(Path(stop_id)));
+        tokio::time::timeout(std::time::Duration::from_secs(5), ready)
+            .await
+            .expect("stop must reach the lifecycle gate")
+            .expect("stop ready");
+        let run = run_task(Path(id.clone())).await;
+        let _ = release.send(());
+        let stop = stopping.await.expect("stop task");
+
+        fixture.abort();
+        scheduler::stop().await;
+        db::close_db();
+        jitter_core::config::set_active_config(previous_config);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(run.status(), StatusCode::CONFLICT, "停止写入期间不得接纳新执行");
+        assert_eq!(stop.status(), StatusCode::OK);
+        assert_eq!(requests.load(Ordering::SeqCst), 0, "竞态请求不能到达目标服务");
+    }
+
+    #[tokio::test]
+    async fn a_run_arriving_during_delete_cannot_slip_past_the_row_removal() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _serial = TEST_CONFIG_LOCK.lock().await;
+        let previous_config = get_active_config();
+        let dir = std::env::temp_dir().join(format!("jitter-delete-race-{}", uuid()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db_path = dir.join("app.db");
+        let mut config = previous_config.clone();
+        config.db_path = db_path.to_string_lossy().to_string();
+        jitter_core::config::set_active_config(config);
+        db::init_db(Some(&db_path.to_string_lossy())).expect("init");
+        scheduler::start().await.expect("start scheduler");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let id = format!("delete-race-{}", uuid());
+        db::create_task(
+            &NewTaskInput {
+                name: "delete race".to_string(),
+                curl_command: Some(format!("curl http://{address}/")),
+                request: RequestParts {
+                    url: format!("http://{address}/"),
+                    method: "GET".to_string(),
+                    headers: Some("{}".to_string()),
+                    body: None,
+                    options: Some("{}".to_string()),
+                },
+                schedule_kind: Some("interval".to_string()),
+                interval_seconds: Some(60),
+                ..Default::default()
+            },
+            &id,
+            1000,
+        )
+        .expect("create task");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let fixture_requests = requests.clone();
+        let fixture = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                fixture_requests.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .await;
+            }
+        });
+
+        let (ready, release) = arm_lifecycle_gate();
+        let delete_id = id.clone();
+        let deleting = tokio::spawn(delete_task(Path(delete_id)));
+        tokio::time::timeout(std::time::Duration::from_secs(5), ready)
+            .await
+            .expect("delete must reach the lifecycle gate")
+            .expect("delete ready");
+        let run = run_task(Path(id.clone())).await;
+        let _ = release.send(());
+        let delete = deleting.await.expect("delete task");
+
+        fixture.abort();
+        scheduler::stop().await;
+        db::close_db();
+        jitter_core::config::set_active_config(previous_config);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(run.status(), StatusCode::CONFLICT, "删除写入期间不得接纳新执行");
+        assert_eq!(delete.status(), StatusCode::OK);
+        assert_eq!(requests.load(Ordering::SeqCst), 0, "竞态请求不能到达目标服务");
+    }
+
+    #[tokio::test]
+    async fn writes_wait_while_restore_holds_the_exclusive_gate() {
+        let _serial = TEST_CONFIG_LOCK.lock().await;
+        let previous_config = get_active_config();
+        let previous_port = ACTUAL_PORT.load(Ordering::Relaxed);
+        let mut config = previous_config.clone();
+        config.host = "127.0.0.1".to_string();
+        jitter_core::config::set_active_config(config);
+        let (address, server) = test_server().await;
+        ACTUAL_PORT.store(address.port(), Ordering::Relaxed);
+        let restore_permit = RESTORE_GATE.write().await;
+        let mut response = tokio::spawn(test_request(address, "POST", "/api/tasks"));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut response)
+                .await
+                .is_err(),
+            "恢复换库期间，写请求不能进入处理器"
+        );
+        drop(restore_permit);
+        assert!(response
+            .await
+            .expect("request task")
+            .starts_with("HTTP/1.1 200"));
+        server.abort();
+
+        jitter_core::config::set_active_config(previous_config);
+        ACTUAL_PORT.store(previous_port, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn restore_bypasses_the_shared_gate_to_avoid_self_deadlock() {
+        let _serial = TEST_CONFIG_LOCK.lock().await;
+        let previous_config = get_active_config();
+        let previous_port = ACTUAL_PORT.load(Ordering::Relaxed);
+        let mut config = previous_config.clone();
+        config.host = "127.0.0.1".to_string();
+        jitter_core::config::set_active_config(config);
+        let (address, server) = test_server().await;
+        ACTUAL_PORT.store(address.port(), Ordering::Relaxed);
+        let _write_permit = RESTORE_GATE.write().await;
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            test_request(address, "POST", "/api/backup/restore"),
+        )
+        .await
+        .expect("恢复请求不能先获取共享锁再等待自己的独占锁");
+        assert!(response.starts_with("HTTP/1.1 200"));
+        server.abort();
+
+        jitter_core::config::set_active_config(previous_config);
+        ACTUAL_PORT.store(previous_port, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn cancelling_pause_does_not_cancel_an_in_flight_manual_run() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _serial = TEST_CONFIG_LOCK.lock().await;
+        let previous_config = get_active_config();
+        let dir = std::env::temp_dir().join(format!("jitter-resume-run-{}", uuid()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db_path = dir.join("app.db");
+        let mut config = previous_config.clone();
+        config.db_path = db_path.to_string_lossy().to_string();
+        jitter_core::config::set_active_config(config);
+        db::init_db(Some(&db_path.to_string_lossy())).expect("init");
+        scheduler::start().await.expect("start scheduler");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let fixture_address = listener.local_addr().expect("fixture address");
+        let id = format!("resume-run-{}", uuid());
+        db::create_task(
+            &NewTaskInput {
+                name: "resume during run".to_string(),
+                curl_command: Some(format!("curl http://{fixture_address}/slow")),
+                request: RequestParts {
+                    url: format!("http://{fixture_address}/slow"),
+                    method: "GET".to_string(),
+                    headers: Some("{}".to_string()),
+                    body: None,
+                    options: Some("{}".to_string()),
+                },
+                schedule_kind: Some("interval".to_string()),
+                interval_seconds: Some(60),
+                ..Default::default()
+            },
+            &id,
+            1000,
+        )
+        .expect("create task");
+        let now = executor::now_ms();
+        db::set_task_pause(&id, Some((now, now + 60_000)), Some(now + 60_000), now)
+            .expect("pause task");
+
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).await.expect("read request");
+            let _ = arrived_tx.send(());
+            let _ = release_rx.await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .expect("write response");
+        });
+
+        let mut running = tokio::spawn(run_task(Path(id.clone())));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                response = &mut running => panic!(
+                    "manual run exited before reaching fixture: {:?}",
+                    response.expect("manual run task").status()
+                ),
+                arrived = arrived_rx => arrived.expect("fixture arrival"),
+            }
+        })
+        .await
+        .expect("request must reach fixture");
+        let resume = resume_task(Path(id.clone())).await;
+        let running_count_after_resume = scheduler::running_count();
+        let _ = release_tx.send(());
+        let run_response = running.await.expect("manual run task");
+        let run_body = axum::body::to_bytes(run_response.into_body(), 1024 * 1024)
+            .await
+            .expect("run body");
+        let run_result: Json = serde_json::from_slice(&run_body).expect("run json");
+        fixture.abort();
+        scheduler::stop().await;
+        db::close_db();
+        jitter_core::config::set_active_config(previous_config);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(resume.status(), StatusCode::OK);
+        assert_eq!(
+            running_count_after_resume, 1,
+            "取消暂停只能撤销未来计划，不能撤掉在途运行"
+        );
+        assert_eq!(run_result["aborted"], false, "在途请求不能被取消暂停中断");
+    }
+
+    #[tokio::test]
+    async fn restore_cancels_an_in_flight_manual_run_without_waiting_for_its_http_guard() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _serial = TEST_CONFIG_LOCK.lock().await;
+        let previous_config = get_active_config();
+        let previous_port = ACTUAL_PORT.load(Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("jitter-restore-manual-{}", uuid()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db_path = dir.join("app.db");
+        let mut config = previous_config.clone();
+        config.db_path = db_path.to_string_lossy().to_string();
+        config.host = "127.0.0.1".to_string();
+        jitter_core::config::set_active_config(config);
+        ACTUAL_PORT.store(3111, Ordering::Relaxed);
+        db::init_db(Some(&db_path.to_string_lossy())).expect("init");
+        scheduler::start().await.expect("start scheduler");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let fixture_address = listener.local_addr().expect("fixture address");
+        let id = format!("restore-manual-{}", uuid());
+        db::create_task(
+            &NewTaskInput {
+                name: "restore manual".to_string(),
+                curl_command: Some(format!("curl http://{fixture_address}/slow")),
+                request: RequestParts {
+                    url: format!("http://{fixture_address}/slow"),
+                    method: "GET".to_string(),
+                    headers: Some("{}".to_string()),
+                    body: None,
+                    options: Some("{}".to_string()),
+                },
+                ..Default::default()
+            },
+            &id,
+            1000,
+        )
+        .expect("create task");
+        let source = backup::create_backup(&db_path, backup::now_ms()).expect("source backup");
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).await.expect("read request");
+            let _ = arrived_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let router = Router::new()
+            .route("/api/tasks/:id/run", post(run_task))
+            .route("/api/backup/restore", post(backup_restore))
+            .layer(middleware::from_fn(local_boundary_middleware));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("api listener");
+        let api_address = listener.local_addr().expect("api address");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        async fn request(
+            address: std::net::SocketAddr,
+            path: String,
+            body: String,
+        ) -> (StatusCode, String) {
+            let mut stream = tokio::net::TcpStream::connect(address)
+                .await
+                .expect("connect api");
+            let request = format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:3111\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(request.as_bytes()).await.expect("write api");
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.expect("read api");
+            let (head, body) = response.split_once("\r\n\r\n").expect("response body");
+            let status = head
+                .lines()
+                .next()
+                .expect("status line")
+                .split_whitespace()
+                .nth(1)
+                .expect("status code")
+                .parse::<u16>()
+                .expect("numeric status");
+            (StatusCode::from_u16(status).expect("valid status"), body.to_string())
+        }
+
+        let mut running = tokio::spawn(request(
+            api_address,
+            format!("/api/tasks/{id}/run"),
+            String::new(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+            .await
+            .expect("manual request must reach fixture")
+            .expect("fixture arrival");
+        let restore_body = serde_json::to_string(&json!({ "name": source.name })).expect("restore json");
+        let mut restoring = tokio::spawn(request(
+            api_address,
+            "/api/backup/restore".to_string(),
+            restore_body,
+        ));
+        let restore_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            &mut restoring,
+        )
+        .await;
+        let restore_status = restore_result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.as_ref().ok())
+            .map(|(status, _)| *status);
+        let restore_response_body = if let Ok(Ok((_, body))) = restore_result {
+            body
+        } else {
+            String::new()
+        };
+        let run_response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            &mut running,
+        )
+        .await;
+        let (run_status, run_result) = if let Ok(Ok((status, body))) = run_response {
+            (Some(status), Some(serde_json::from_slice::<Json>(body.as_bytes()).expect("run json")))
+        } else {
+            (None, None)
+        };
+        let running_count = scheduler::running_count();
+        restoring.abort();
+        running.abort();
+        server.abort();
+        fixture.abort();
+        scheduler::stop().await;
+        db::close_db();
+        jitter_core::config::set_active_config(previous_config);
+        ACTUAL_PORT.store(previous_port, Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            restore_status,
+            Some(StatusCode::OK),
+            "restore 必须能取消在途手动执行，不能被 HTTP 读锁反堵：{}",
+            restore_response_body
+
+        );
+        assert_eq!(running_count, 0, "restore 返回前必须等手动执行收尾");
+        assert_eq!(run_status, Some(StatusCode::OK));
+        assert_eq!(
+            run_result.expect("manual run response")["aborted"],
+            true,
+            "restore 应通过取消 token 中断在途请求"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_safety_snapshot_waits_for_the_scheduled_run_to_finish() {
+        use tokio::io::AsyncReadExt;
+
+        let _serial = TEST_CONFIG_LOCK.lock().await;
+        let previous_config = get_active_config();
+        let dir = std::env::temp_dir().join(format!(
+            "jitter-restore-order-{}-{}",
+            std::process::id(),
+            uuid()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db_path = dir.join("app.db");
+        let mut config = previous_config.clone();
+        config.db_path = db_path.to_string_lossy().to_string();
+        jitter_core::config::set_active_config(config);
+        db::init_db(Some(&db_path.to_string_lossy())).expect("init");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let fixture_address = listener.local_addr().expect("fixture address");
+        let id = format!("restore-order-{}", uuid());
+        db::create_task(
+            &NewTaskInput {
+                name: "restore order".to_string(),
+                curl_command: Some(format!("curl http://{fixture_address}/slow")),
+                request: RequestParts {
+                    url: format!("http://{fixture_address}/slow"),
+                    method: "GET".to_string(),
+                    headers: Some("{}".to_string()),
+                    body: None,
+                    options: Some("{}".to_string()),
+                },
+                window_start: "10:10".to_string(),
+                window_end: "10:20".to_string(),
+                schedule_kind: Some("interval".to_string()),
+                interval_seconds: Some(1),
+                ..Default::default()
+            },
+            &id,
+            1000,
+        )
+        .expect("create task");
+        let source = backup::create_backup(&db_path, backup::now_ms()).expect("source backup");
+        scheduler::start().await.expect("start scheduler");
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).await.expect("read request");
+            let _ = arrived_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+            .await
+            .expect("request must reach fixture")
+            .expect("fixture arrival");
+
+        let response = backup_restore(AxumJson(BackupNameBody {
+            name: Some(source.name),
+        }))
+        .await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("restore body");
+        assert_eq!(scheduler::running_count(), 0, "恢复前必须等真实调度执行收尾");
+        fixture.abort();
+
+        let safety_name = if status == StatusCode::OK {
+            let value: Json = serde_json::from_slice(&body).expect("restore json");
+            value["safety_backup"].as_str().expect("safety name").to_string()
+        } else {
+            String::new()
+        };
+        let safety_log_count = if safety_name.is_empty() {
+            0
+        } else {
+            let safety_path = backup::get_backup_dir(&db_path).join(safety_name);
+            let connection = rusqlite::Connection::open(safety_path).expect("open safety snapshot");
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM logs WHERE task_id = ?1 AND run_source = 'scheduled'",
+                    [&id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count safety logs")
+        };
+
+        scheduler::stop().await;
+        scheduler::start().await.expect("restore scheduler test state");
+        db::close_db();
+        jitter_core::config::set_active_config(previous_config);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(status, StatusCode::OK, "restore failed: {}", String::from_utf8_lossy(&body));
+        assert_eq!(safety_log_count, 1, "安全快照必须包含停止调度前已收尾的在途执行");
+    }
+
+    #[tokio::test]
+    async fn browser_boundary_middleware_enforces_host_and_origin_on_the_wire() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let _serial = TEST_CONFIG_LOCK.lock().await;
+
+        let previous_config = jitter_core::config::get_active_config();
+        let previous_port = ACTUAL_PORT.load(Ordering::Relaxed);
+        let mut config = previous_config.clone();
+        config.host = "127.0.0.1".to_string();
+        jitter_core::config::set_active_config(config);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        ACTUAL_PORT.store(address.port(), Ordering::Relaxed);
+        let router = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(middleware::from_fn(local_boundary_middleware));
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        async fn request(address: std::net::SocketAddr, headers: &str) -> String {
+            let mut stream = TcpStream::connect(address).await.expect("connect");
+            let request = format!("GET / HTTP/1.1\r\n{headers}\r\nConnection: close\r\n\r\n");
+            stream.write_all(request.as_bytes()).await.expect("write");
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.expect("read");
+            response
+        }
+
+        let host = format!("Host: 127.0.0.1:{}\r\n", address.port());
+        let foreign = request(
+            address,
+            &format!("Host: evil.example:{}\r\n", address.port()),
+        )
+        .await;
+        assert!(foreign.starts_with("HTTP/1.1 403"));
+        let cross_origin = request(
+            address,
+            &format!("{host}Origin: http://evil.example\r\n"),
+        )
+        .await;
+        assert!(cross_origin.starts_with("HTTP/1.1 403"));
+        let local = request(address, &host).await;
+        assert!(local.starts_with("HTTP/1.1 200"));
+        let same_origin = request(
+            address,
+            &format!("{host}Origin: http://127.0.0.1:{}\r\n", address.port()),
+        )
+        .await;
+        assert!(same_origin.starts_with("HTTP/1.1 200"));
+
+        server.abort();
+        ACTUAL_PORT.store(previous_port, Ordering::Relaxed);
+        jitter_core::config::set_active_config(previous_config);
+    }
+
+    #[test]
+    fn restore_failure_does_not_hide_service_recovery_errors() {
+        let (status, message) = restore_failure(
+            "换库后初始化失败",
+            Ok(true),
+            Err("数据库仍无法打开".to_string()),
+        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(message.contains("服务恢复失败"), "{message}");
+        assert!(message.contains("数据库仍无法打开"), "{message}");
+    }
+
+    #[test]
+    fn restore_failure_reports_the_actual_rollback_result() {
+        let (status, message) = restore_failure("初始化失败", Ok(true), Ok(()));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(message.contains("已回滚"), "{message}");
+
+        let (status, message) = restore_failure("初始化失败", Ok(false), Ok(()));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(message.contains("没有可回滚副本"), "{message}");
+
+        let (status, message) = restore_failure(
+            "初始化失败",
+            Err("安全副本 rename 失败".to_string()),
+            Ok(()),
+        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(message.contains("回滚也失败"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn run_response_does_not_call_a_failed_notification_successful() {
+        let response = run_response(executor::RunOutcome {
+            main_log_id: 8,
+            status: Some(200),
+            aborted: false,
+            matched: true,
+            skipped: false,
+            error: None,
+            notify_log_id: Some(9),
+            notify_sent: false,
+            notify_status: Some(500),
+            notify_error: Some("通知返回 HTTP 500".to_string()),
+            duration_ms: 12,
+        });
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body: Json = serde_json::from_slice(&bytes).expect("json response");
+        assert_eq!(body["notifySent"], false);
+        assert_eq!(body["notifyStatus"], 500);
+        assert_eq!(body["notifyError"], "通知返回 HTTP 500");
+    }
+
+    #[test]
+    fn copied_task_status_is_parsed() {
+        let input = parse_task_input(&json!({
+            "name": "copy",
+            "url": "https://example.com",
+            "schedule_kind": "interval",
+            "interval_seconds": 60,
+            "status": "stopped"
+        }))
+        .expect("valid task");
+        assert_eq!(input.status.as_deref(), Some("stopped"));
+    }
+
+    #[test]
+    fn invalid_task_status_is_rejected() {
+        assert!(parse_task_input(&json!({
+            "name": "copy",
+            "url": "https://example.com",
+            "schedule_kind": "interval",
+            "interval_seconds": 60,
+            "status": "paused"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn browser_boundary_rejects_foreign_hosts_and_origins() {
+        assert!(host_is_allowed("127.0.0.1:3000", "127.0.0.1", 3000));
+        assert!(host_is_allowed("localhost:3000", "127.0.0.1", 3000));
+        assert!(!host_is_allowed("evil.example:3000", "127.0.0.1", 3000));
+        assert!(!host_is_allowed("127.0.0.1:4000", "127.0.0.1", 3000));
+
+        assert!(origin_is_allowed("http://127.0.0.1:3000", "127.0.0.1:3000"));
+        assert!(origin_is_allowed("http://localhost:3000", "localhost:3000"));
+        assert!(!origin_is_allowed("https://evil.example", "127.0.0.1:3000"));
+        assert!(origin_is_allowed("http://127.0.0.1", "127.0.0.1:80"));
+        assert!(!origin_is_allowed("null", "127.0.0.1:3000"));
+    }
+
+    #[test]
+    fn health_is_not_ok_when_the_database_is_unreadable() {
+        assert_eq!(health_response(true).status(), StatusCode::OK);
+        assert_eq!(health_response(false).status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     /// 4xx 是请求本身的问题，不该把后台标记成「降级」；
     /// 只有 5xx 才算后台故障。合在一个用例里，避免共享的 LAST_ERROR 互相干扰。

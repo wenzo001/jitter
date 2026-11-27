@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/jitter-core", "crates/jitter-app"]
 
 [workspace.package]
-version = "2.1.19"
+version = "2.1.20"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -19,7 +19,7 @@ url = "2"
 percent-encoding = "2"
 base64 = "0.22"
 http = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "fs", "process", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "fs", "process", "sync", "test-util"] }
 tokio-util = "0.7"
 futures-util = "0.3"
 axum = "0.7"

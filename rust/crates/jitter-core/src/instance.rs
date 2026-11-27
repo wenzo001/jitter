@@ -126,6 +126,43 @@ pub fn mutex_name_for(name: &str) -> String {
     format!("Local\\JitterSingleInstance-{}", name)
 }
 
+#[cfg(not(windows))]
+pub fn acquire_file_lock(db_path: &PathBuf, instance: &str) -> std::io::Result<Option<std::fs::File>> {
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let absolute = std::path::absolute(db_path).unwrap_or_else(|_| db_path.clone());
+    let parent = absolute.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in absolute.to_string_lossy().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let path = parent.join(format!(
+        ".jitter-{}-{hash:016x}.lock",
+        normalize_instance_name(instance)
+    ));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        Ok(Some(file))
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    }
+}
+
 /// 实例专属的配置目录。
 ///
 /// 生产实例仍然是 `%APPDATA%\Jitter`（与旧版一致），其它实例是 `%APPDATA%\Jitter-dev`。
@@ -256,5 +293,23 @@ mod tests {
         assert_eq!(prod.file_name(), base_config_dir().file_name());
         // 开发目录在默认名后面接 `-<实例名>`。
         assert_eq!(dev.file_name().unwrap().to_string_lossy(), "Jitter-dev");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn file_lock_excludes_only_the_same_instance_and_database() {
+        let dir = std::env::temp_dir().join(format!("jitter-lock-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create lock test dir");
+        let db = dir.join("app.db");
+        let other_db = dir.join("other.db");
+
+        let first = acquire_file_lock(&db, "dev").expect("first lock").expect("uncontended");
+        assert!(acquire_file_lock(&db, "dev").expect("second lock").is_none());
+        let _other_instance = acquire_file_lock(&db, "prod").expect("instance lock").expect("different instance");
+        let _other_database = acquire_file_lock(&other_db, "dev").expect("database lock").expect("different database");
+        drop(first);
+        assert!(acquire_file_lock(&db, "dev").expect("released lock").is_some());
+
+        std::fs::remove_dir_all(dir).expect("remove lock test dir");
     }
 }

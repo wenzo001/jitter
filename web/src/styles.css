@@ -261,8 +261,10 @@ body {
 .panel-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
-  flex: none;
+  flex: 1 1 240px;
+  min-width: 0;
 }
 
 /* 标题 + 副信息归为一段：窄的时候整段按钮一起换行，不会只掉下一个按钮。 */
@@ -1125,7 +1127,14 @@ body {
   }
 
   .status-line {
-    display: none;
+    /* 窄屏也不能藏掉这条：它常是唯一的反馈通道（保存结果、后台错误）。
+       改成最多两行截断，而不是一刀切 display: none。 */
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    max-width: min(60vw, 52ch);
+    overflow: hidden;
   }
 
   .form-grid-2,

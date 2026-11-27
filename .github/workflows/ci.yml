@@ -7,7 +7,8 @@ on:
 
 jobs:
   rust:
-    name: Rust core tests (${{ matrix.os }})
+    name: Rust workspace tests (${{ matrix.os }})
+    needs: frontend
     strategy:
       fail-fast: false
       matrix:
@@ -15,13 +16,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-      - name: Test jitter-core
+      - name: Test Rust workspace
         working-directory: rust
-        run: cargo test -p jitter-core --jobs 2
+        run: cargo test --workspace --jobs 2
 
   frontend:
     name: Vue frontend
@@ -42,3 +47,7 @@ jobs:
       - name: Build
         working-directory: web
         run: bun run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: web/dist

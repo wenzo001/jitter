@@ -20,6 +20,9 @@ axum.workspace = true
 include_dir.workspace = true
 mime_guess.workspace = true
 
+[dev-dependencies]
+rusqlite.workspace = true
+
 [build-dependencies]
 winresource = "0.1"
 

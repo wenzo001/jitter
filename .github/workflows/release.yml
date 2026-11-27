@@ -9,14 +9,19 @@ permissions:
 
 jobs:
   test:
-    name: "Gate: Rust core green"
+    name: "Gate: Rust workspace green"
+    needs: frontend
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@stable
-      - name: Rust core tests
+      - name: Rust workspace tests
         working-directory: rust
-        run: cargo test -p jitter-core
+        run: cargo test --workspace --jobs 2
 
   frontend:
     name: Build frontend
