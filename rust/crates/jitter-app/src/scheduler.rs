@@ -874,6 +874,8 @@ mod tests {
     #[tokio::test]
     async fn begin_run_reserves_the_slot_atomically() {
         let _serial = crate::api::tests::TEST_CONFIG_LOCK.lock().await;
+        stop().await;
+        SWEEP_STOP.store(false, Ordering::SeqCst);
         let id = test_id("atomic");
         let first = begin_run(&id, CancellationToken::new()).expect("first run starts");
         assert!(running_tasks().contains_key(&id));
@@ -913,6 +915,8 @@ mod tests {
     #[tokio::test]
     async fn cancelling_future_schedule_does_not_cancel_the_current_request() {
         let _serial = crate::api::tests::TEST_CONFIG_LOCK.lock().await;
+        stop().await;
+        SWEEP_STOP.store(false, Ordering::SeqCst);
         let id = test_id("stop");
         let run = begin_run(&id, CancellationToken::new()).expect("run starts");
 
@@ -926,6 +930,8 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_task_cancels_the_current_request() {
         let _serial = crate::api::tests::TEST_CONFIG_LOCK.lock().await;
+        stop().await;
+        SWEEP_STOP.store(false, Ordering::SeqCst);
         let id = test_id("delete");
         let run = begin_run(&id, CancellationToken::new()).expect("run starts");
 
@@ -940,6 +946,8 @@ mod tests {
     #[tokio::test]
     async fn cancelling_and_restarting_a_task_keeps_the_new_run_slot() {
         let _serial = crate::api::tests::TEST_CONFIG_LOCK.lock().await;
+        stop().await;
+        SWEEP_STOP.store(false, Ordering::SeqCst);
         let id = test_id("generation-guard");
         let first = begin_run(&id, CancellationToken::new()).expect("first run starts");
 
@@ -956,6 +964,8 @@ mod tests {
     #[tokio::test]
     async fn a_stale_handle_is_not_attached_to_a_replacement_run() {
         let _serial = crate::api::tests::TEST_CONFIG_LOCK.lock().await;
+        stop().await;
+        SWEEP_STOP.store(false, Ordering::SeqCst);
         let id = test_id("stale-handle");
         let first = begin_run(&id, CancellationToken::new()).expect("first run starts");
         cancel_task(&id);
@@ -980,6 +990,8 @@ mod tests {
     #[tokio::test]
     async fn idle_wait_does_not_finish_until_the_last_guard_is_released() {
         let _serial = crate::api::tests::TEST_CONFIG_LOCK.lock().await;
+        stop().await;
+        SWEEP_STOP.store(false, Ordering::SeqCst);
         let id = test_id("idle-wait");
         let run = begin_run(&id, CancellationToken::new()).expect("run starts");
         let mut idle = Box::pin(wait_for_runs_idle());
@@ -999,6 +1011,8 @@ mod tests {
     #[tokio::test]
     async fn a_panicking_run_releases_its_slot() {
         let _serial = crate::api::tests::TEST_CONFIG_LOCK.lock().await;
+        stop().await;
+        SWEEP_STOP.store(false, Ordering::SeqCst);
         let id = test_id("panic");
         let task_id = id.clone();
         let handle = tokio::spawn(async move {
