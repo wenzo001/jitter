@@ -6,7 +6,7 @@
 //!
 //! - **只读**打开数据库（`SQLITE_OPEN_READ_ONLY`），写操作在连接层就被拒绝；
 //! - 不起 HTTP 服务、不占端口、不抢单实例互斥体、不初始化自己的数据库；
-//! - **不碰生产实例的任何文件**：db / wal / shm 的大小与 mtime 都不变；
+//! - **不写业务数据，也不修改 db / wal 内容**；WAL 模式下 SQLite 可能更新 `-shm` 读标记；
 //! - 顺带能看生产实例的运行日志目录。
 //!
 //! # 用法
@@ -217,7 +217,7 @@ fn print_report(report: &probe::ProbeReport, logs_dir: Option<&str>) {
 
     out.blank();
     out.line(format_args!(
-        "（本次读取全程只读：没有写入，也没有修改任何文件。）"
+        "（本次读取全程只读：没有写入数据库，也没有修改 app.db / app.db-wal；WAL 模式可能更新 -shm 读标记。）"
     ));
     out.finish();
 }

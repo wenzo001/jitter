@@ -1,6 +1,6 @@
 # Jitter 交接说明（维护者用）
 
-> 最后更新：2026-11-27 · v2.1.19 · 单主线（Rust 后端 + Vue 前端）
+> 最后更新：2026-11-27 · v2.1.21（发布候选） · 单主线（Rust 后端 + Vue 前端）
 > 面向用户的使用说明在 [README.md](README.md)，两者不要各写各的。
 
 ---
@@ -14,7 +14,7 @@ Jitter 是一个常驻本机的定时 HTTP 请求工具：粘 curl → 定时间
 早期那条 Bun/TypeScript 后端（根目录 `src/`、`bun.lock`、`tsconfig.json`、`ecosystem.config.cjs`）已**彻底删除**，
 Dockerfile / CI / 发布流水线都走 Rust 主线。不要把它捡回来。
 
-**当前版本：v2.1.19（已发布）**，Release：<https://github.com/wenzo001/jitter/releases/tag/v2.1.19>。
+**当前版本：v2.1.21（发布候选）**，上一版 v2.1.20 已发布：<https://github.com/wenzo001/jitter/releases/tag/v2.1.20>。
 发布走 `v*` 标签，标签打在哪一版 README 里就写哪一版。
 接手第一件事：跑一遍第五节的构建与测试，确认基线是绿的，再决定要不要提交。
 
@@ -319,12 +319,38 @@ cd D:/fwd/code/Jitter
 ```
 
 只读打开（`SQLITE_OPEN_READ_ONLY`），输出任务列表、设置、最近执行记录、运行日志尾部。
-**不会修改** `app.db` / `app.db-wal` / `app.db-shm`（连 mtime 都不变），正式实例可以照常在跑。
+不会写入数据库，也不会修改 `app.db` / `app.db-wal` 的内容；WAL 模式下 SQLite 可能更新
+`app.db-shm` 的读标记。正式实例可以照常在跑。
 实现见 `rust/crates/jitter-core/src/probe.rs` 与 `rust/crates/jitter-app/src/probe_cli.rs`。
 
 ---
 
 ## 六、本轮已经做完的事（可以直接接手）
+
+### 6.0.10 v2.1.21：修正探针只读边界说明
+
+远程 Windows 发布包实测发现：WAL 模式下 `SQLITE_OPEN_READ_ONLY` 会更新 `app.db-shm`
+的读标记。它不会写业务数据，也不会修改 `app.db` / `app.db-wal` 内容，但此前“三个文件
+连 mtime 都不变”的承诺过强。
+
+- 代码注释、终端收尾文案、README 与本交接文档统一改成可证明的边界。
+- 新增 WAL 回归测试：必须读到尚未 checkpoint 的记录，且 `app.db` / `app.db-wal`
+  字节保持不变。
+- 版本号统一升到 `2.1.21`；产品执行逻辑未改。
+
+### 6.0.9 v2.1.20：执行、恢复、更新与本机边界加固
+
+- 执行准入统一走 `begin_task_run`：停止期间拒绝新执行，取消、删除、恢复与 generation
+  都有明确语义；运行槽用 RAII 释放，panic 也不会漏占槽。
+- 备份恢复先 staging + 安全副本，失败回滚并报告具体边车；更新包流式下载、限大小、
+  SHA256 校验后只解出当前平台唯一二进制。
+- 浏览器边界校验 Host / Origin，阻止跨站与 DNS rebinding 访问本机接口。
+- 前端补齐请求失败反馈、通知真实状态、复制失败反馈与窄屏可用性。
+- CI / Release 的 Rust job 先下载前端 artifact，再跑完整 workspace，避免 Linux 上
+  `include_dir!` 缺文件造成假失败。
+- 首次 v2.1.20 发布暴露两个测试隔离问题：Linux backup 夹具让 WAL 边车保持为目录，
+  以及 scheduler 测试共享 `SWEEP_STOP`。分别由 `3eab076`、`e4f35bb` 修复；修复后
+  Ubuntu / Windows / 前端 CI 全绿。
 
 ### 6.0.8 v2.1.19：执行记录结果筛选（只看成功）+ curl 参数全覆盖
 

@@ -8,7 +8,7 @@
 //! - 用 `SQLITE_OPEN_READ_ONLY` 打开，绝不写库；
 //! - 生产实例正在运行时也能读（WAL 模式下另有一份 `-wal` 文件，
 //!   只读连接照样能看到已提交的数据）；
-//! - 只读连接**不会修改** db / wal / shm 三个文件（连 mtime 都不变）。
+//! - 只读连接不会修改 db / wal 的内容；WAL 模式下 SQLite 可能更新 `-shm` 的读标记。
 //!
 //! # 边界
 //!
@@ -44,8 +44,8 @@ impl From<rusqlite::Error> for ProbeError {
 /// 这是比「代码里不写 INSERT」强得多的保证：即使探针代码有 bug，
 /// 也写不进去。
 ///
-/// 只读连接不创建 `-shm` 文件，也不动 `-wal`：生产实例正在跑的时候，
-/// 三个文件的大小和 mtime 都不会变化。
+/// 只读连接不修改 db / wal 的内容。生产实例正在跑时，WAL 模式可能更新
+/// `-shm` 的读标记，但不会写入业务数据。
 pub fn open_readonly(path: &Path) -> Result<Connection, ProbeError> {
     if !path.exists() {
         return Err(ProbeError(format!("数据库不存在：{}", path.display())));
@@ -327,6 +327,35 @@ mod tests {
             let after_time = std::fs::metadata(&path).expect("meta").modified().ok();
             assert_eq!(after_time, Some(before_time), "只读访问不能改动文件的修改时间");
         }
+    }
+
+    #[test]
+    fn wal_只读访问能读到未_checkpoint的数据且不改_db和wal() {
+        let dir = temp_dir("wal-readonly");
+        let conn = make_db(&dir);
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .expect("wal");
+        conn.pragma_update(None, "wal_autocheckpoint", 0)
+            .expect("no auto checkpoint");
+        conn.execute(
+            "INSERT INTO logs (task_id, executed_at, request_method, request_url,
+                    response_status, duration_ms, kind, error)
+             VALUES ('t1', 1700000000001, 'GET', 'http://x/wal', 201, 7, 'task', NULL)",
+            [],
+        )
+        .expect("wal log");
+        let path = dir.join("probe.db");
+        let wal_path = dir.join("probe.db-wal");
+        let db_before = std::fs::read(&path).expect("db bytes");
+        let wal_before = std::fs::read(&wal_path).expect("wal bytes");
+
+        let ro = open_readonly(&path).expect("open");
+        let report = collect_report(&ro, &path, 10).expect("report");
+        assert_eq!(report.log_count, 2, "必须读到仍在 WAL 中的新记录");
+        drop(ro);
+
+        assert_eq!(std::fs::read(&path).expect("db after"), db_before);
+        assert_eq!(std::fs::read(&wal_path).expect("wal after"), wal_before);
     }
 
     #[test]
