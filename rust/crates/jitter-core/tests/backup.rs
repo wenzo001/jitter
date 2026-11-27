@@ -400,8 +400,11 @@ fn swap_reports_incomplete_rollback_when_a_sidecar_cannot_be_restored() {
     assert!(error.0.contains("回滚失败"), "边车回滚失败必须显式报错: {error:?}");
     assert!(error.0.contains("wal"), "应指出具体失败的边车: {error:?}");
     assert_eq!(fs::read(&db_path).unwrap(), original, "主库仍应尽力恢复");
-    assert!(has_task(&db_path, "live"));
+    assert!(Path::new(&wal_path).is_dir(), "夹具必须让 WAL 边车无法恢复");
     assert!(dir.join("app.db.restore-safe-wal").exists(), "恢复失败的边车副本必须保留供人工恢复");
+
+    fs::remove_dir(&wal_path).expect("remove blocking WAL directory");
+    assert!(has_task(&db_path, "live"));
 
     let _ = fs::remove_dir_all(&dir);
 }
